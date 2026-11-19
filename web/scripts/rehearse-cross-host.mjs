@@ -17,7 +17,6 @@ import {
   metadataFixture,
   prepareCrossHostFixture,
   readLibrary,
-  rehearsalWork,
   startEdge,
 } from './rehearse-household.mjs';
 
@@ -261,6 +260,7 @@ async function main() {
   let fixture;
   let coordinator;
   let native;
+  let nativeCleaned = false;
   let succeeded = false;
   let blockedStore;
   try {
@@ -455,7 +455,10 @@ async function main() {
     if (oldWire.status !== 426 || oldWire.headers.get('x-den-wire-min') !== '5')
       throw new Error('service did not enforce wire generation 5');
 
-    if (!KEEP) await coordinator.command('cleanup', { timeoutSeconds: 45 });
+    // KEEP retains only host-side evidence. Native state is always removed through the mounted production cleanup
+    // seam, so preserving an xcresult can never strand this run's Keychain or Application Support namespace.
+    await coordinator.command('cleanup', { timeoutSeconds: 45 });
+    nativeCleaned = true;
     await coordinator.command('finish');
     const code = await native.exited;
     if (code !== 0) throw new Error(`native xcodebuild exited ${code}`);
@@ -467,6 +470,14 @@ async function main() {
     );
   } finally {
     if (blockedStore) chmodSync(blockedStore.path, blockedStore.mode);
+    if (coordinator && !nativeCleaned) {
+      try {
+        await coordinator.command('cleanup', { timeoutSeconds: 45 });
+        nativeCleaned = true;
+      } catch (error) {
+        console.error(`bounded native cleanup failed: ${String(error)}`);
+      }
+    }
     if (native?.child.exitCode === null) {
       native.child.kill('SIGTERM');
       await native.exited;
@@ -477,10 +488,8 @@ async function main() {
       writeFileSync(join(work, 'den-edge.log'), `${fixture.edge.log.join('\n')}\n`);
     await fixture?.edge?.stop().catch(() => {});
     await fixture?.closeWire?.().catch(() => {});
-    if (!KEEP && succeeded) {
-      rmSync(work, { recursive: true, force: true });
-      rmSync(rehearsalWork, { recursive: true, force: true });
-    } else if (!succeeded) {
+    if (!KEEP && succeeded) rmSync(work, { recursive: true, force: true });
+    else if (!succeeded) {
       console.error(`cross-host evidence retained under ${work}`);
     }
   }

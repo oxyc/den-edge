@@ -32,6 +32,8 @@ const BINARY = process.env.DEN_EDGE_BIN ?? join(ROOT, 'target/debug/den-edge');
 const DIST = process.env.REHEARSE_DIST ?? join(WEB, 'dist');
 const KEEP = process.env.REHEARSE_KEEP === '1';
 const HEADED = process.argv.includes('--headed');
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 // `--only=<scenario>` runs one scenario (a function name below) instead of all of them.
 const ONLY = process.argv.find((arg) => arg.startsWith('--only='))?.slice('--only='.length);
 const PIN = '1234';
@@ -45,8 +47,9 @@ function fail(message) {
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const work = mkdtempSync(join(tmpdir(), 'den-household-'));
-export const rehearsalWork = work;
+// Imported helpers always receive an explicit root. Allocate standalone scratch only for this script's own run,
+// so an importing rehearsal cannot leak an unused household directory on KEEP or an early failure.
+const work = invokedDirectly ? mkdtempSync(join(tmpdir(), 'den-household-')) : undefined;
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok, detail });
@@ -1331,8 +1334,6 @@ async function browsedOnlyStaysPut() {
   }
 }
 
-const invokedDirectly =
-  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
   try {
     await main();
