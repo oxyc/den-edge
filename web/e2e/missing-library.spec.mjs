@@ -31,7 +31,10 @@ test('a library den-edge will not start keeps the edit, hands off to Linked devi
   const edge = { missing: true };
   const log = (captured = []);
   const t0 = Date.now();
-  page.on('worker', (w) => stamp(`worker ${w.url()}`));
+  page.on('worker', (w) => {
+    stamp(`worker ${w.url()}`);
+    w.on('console', (m) => stamp(`worker.console.${m.type()} ${m.text()}`));
+  });
   const stamp = (line) => log.push(`${Date.now() - t0} ${line}`);
   page.on('console', (m) => stamp(`console.${m.type()} ${m.text()}`));
   page.on('pageerror', (e) => stamp(`pageerror ${e.message}`));
