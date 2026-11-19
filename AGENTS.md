@@ -99,6 +99,17 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Localizing the profile switcher (#1158) was measured by the hosted gate at exact base `d4d42ac1` (core delta
+  127,190, translations 51,549, startup 207,012) and the PR head: translations 51,689 (+140), core delta 127,242
+  (+52), startup 207,061 (+49, within its cap). The translations are the two new PIN-field labels, the
+  parameterised Owner-PIN and Kid age lines and the `profile` fallback. The first draft measured 51,749; dropping
+  the two fragments the parameterised Owner-PIN line replaced removed 60. The core growth is the `i18n` calls around
+  the switcher's existing copy and its description helper. The catalogs are already lazy, and lazily importing the
+  switcher dialog would add a request to every open while still counting in the complete graph. Main kept 35
+  translation bytes and 42 complete-graph bytes, so the translation ceiling advances from 51,584 to 51,712
+  (retaining 23) and the complete ceiling from 127,232 to 127,360 (retaining 118). The startup ceiling is
+  unchanged. It adds no request, timer, listener or dependency.
+
 - Refused-start fresh-write fencing (#1392) was measured on clean, matched production builds at exact base
   `d4d42ac1` and production/test head `08e93a63`, from equal-length detached worktree paths with identical lockfile
   dependencies and Node/Vite toolchains. Browser startup moves 207,038 → 207,012 gzip bytes (-26), while its
