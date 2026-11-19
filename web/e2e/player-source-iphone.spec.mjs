@@ -315,6 +315,17 @@ async function swedishSourceSheet(page) {
   return sheet;
 }
 
+/**
+ * The player's next selected session, waited for from now. Hearth's answer reaches the route handler before the player
+ * has applied it, and the player arms the replacement's AirPlay stall watch only as it selects it (`[Den playback]
+ * selected`); a fake clock run between the two passes before that watch exists and fires nothing.
+ */
+const nextSelection = (page) =>
+  page.waitForEvent('console', {
+    predicate: (message) => message.text().startsWith('[Den playback] {"event":"selected"'),
+    timeout: 30_000,
+  });
+
 /** What a tap at a control's centre lands on: the control itself (or something inside it), or what is over it. */
 const tapLandsOnStamp = (stamp) =>
   stamp.evaluate((el) => {
@@ -522,8 +533,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayTarget(true);
       });
 
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(3);
+      await receiverSafe;
       expect(playback[1]).toMatchObject({
         player: 'airplay',
         directOnly: true,
@@ -657,8 +670,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayTarget(true);
       });
 
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(3);
+      await receiverSafe;
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(4);
       expect(playback[3]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
@@ -727,8 +742,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayAvailability('available');
         window.setAirPlayTarget(true);
       });
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(5);
+      await receiverSafe;
       await page.clock.runFor(12_001);
       await expect(page.getByTestId('playback-source')).toHaveText('Source');
       expect(playback).toHaveLength(5);
