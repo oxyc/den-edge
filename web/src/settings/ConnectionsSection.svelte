@@ -407,7 +407,7 @@
   let simklClientId = $state<string | null>(null);
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
-  let simklNote = $state<{ text: string; bad: boolean } | null>(null);
+  let simklNote = $state<string | null>(null);
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
@@ -416,7 +416,7 @@
     simklAttempt++;
     if (!connected)
       untrack(() => {
-        if (!simklNote?.text || simklNote.text === 'Couldn’t disconnect it. Try again in a moment.')
+        if (!simklNote || simklNote === 'Couldn’t disconnect it. Try again in a moment.')
           simklNote = null;
       });
     return () => simklAttempt++;
@@ -425,12 +425,10 @@
   async function disconnectSimkl() {
     const writer = saveSimkl;
     const attempt = ++simklAttempt;
-    simklNote = { text: '', bad: false };
+    simklNote = '';
     const saved = await writer(null).catch(() => false);
     if (attempt !== simklAttempt || writer !== saveSimkl) return;
-    simklNote = saved
-      ? null
-      : { text: 'Couldn’t disconnect it. Try again in a moment.', bad: true };
+    simklNote = saved ? null : 'Couldn’t disconnect it. Try again in a moment.';
   }
 
   async function connectSimkl() {
@@ -441,7 +439,7 @@
     const pin = await requestPin(clientId);
     if (attempt !== simklAttempt) return;
     if (!pin) {
-      simklNote = { text: 'Couldn’t get a code from SIMKL. Try again in a moment.', bad: true };
+      simklNote = 'Couldn’t get a code from SIMKL. Try again in a moment.';
       return;
     }
     simklPin = pin;
@@ -455,22 +453,19 @@
       if (answer.kind === 'authorized') {
         simklPin = null;
         simklNote = (await saveSimkl(answer.token))
-          ? { text: 'Connected', bad: false }
-          : { text: 'Couldn’t reach the source service.', bad: true };
+          ? 'Connected'
+          : 'Couldn’t reach the source service.';
         return;
       }
       if (answer.kind === 'failed') {
         simklPin = null;
-        simklNote = {
-          text: 'Couldn’t reach the source service.',
-          bad: true,
-        };
+        simklNote = 'Couldn’t reach the source service.';
         return;
       }
       if (answer.kind === 'slowDown') wait += 5;
     }
     simklPin = null;
-    simklNote = { text: 'The code expired — try again.', bad: true };
+    simklNote = 'The code expired — try again.';
   }
 
   function cancelSimkl() {
@@ -1070,7 +1065,7 @@
             label="Disconnect"
             question="Disconnect SIMKL?"
             detail="Den stops syncing your watch history with it, on every device."
-            disabled={disabled || simklNote?.text === ''}
+            disabled={disabled || simklNote === ''}
             onconfirm={() => void disconnectSimkl()}
           />
         </div>
@@ -1096,14 +1091,14 @@
           />
         </div>
       {/if}
-      {#if simklNote?.text}<p
+      {#if simklNote}<p
           class="status"
-          class:bad={simklNote.bad}
-          role={simklNote.bad ? 'alert' : 'status'}
+          class:bad={simklNote !== 'Connected'}
+          role={simklNote === 'Connected' ? 'status' : 'alert'}
         >
-          {i18n.phrase(simklNote.text)}
+          {i18n.phrase(simklNote)}
         </p>{/if}
-      {#if simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.'}<Button
+      {#if simklNote === 'Couldn’t disconnect it. Try again in a moment.'}<Button
           variant="secondary"
           label={i18n.phrase('Retry')}
           {disabled}

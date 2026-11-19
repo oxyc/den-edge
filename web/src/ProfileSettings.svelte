@@ -3,7 +3,7 @@
   the Owner PIN, asked once per session and again after any profile switch.
 -->
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy } from 'svelte';
   import Button from './components/Button.svelte';
   import PinInput from './components/PinInput.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
@@ -29,14 +29,11 @@
   });
   let saving = $state(false);
   type PreferenceChanges = Parameters<ProfilePreferences['patch']>[0];
-  type PreferenceFailure = {
-    kind: 'write' | 'presentation' | 'policy';
-    authority?: ProfileSession;
-    changes?: PreferenceChanges;
-  };
+  type PreferenceFailure =
+    | ['profile.policySaveFailed']
+    | ['profile.saveFailed' | 'presentation', ProfileSession, PreferenceChanges, boolean];
   let failure = $state<PreferenceFailure | null>(null);
   let preferenceGeneration = 0;
-  let saveSession = untrack(() => session);
   const role = $derived(
     i18n.text(session.identity.kind === 'visitor' ? 'profile.visitor' : 'profile.kid'),
   );
@@ -48,12 +45,11 @@
   let unlockAttempt = 0;
 
   $effect.pre(() => {
-    const active = session;
-    if (active === saveSession) return;
-    saveSession = active;
-    preferenceGeneration++;
-    failure = null;
-    saving = false;
+    if (session) {
+      preferenceGeneration++;
+      failure = null;
+      saving = false;
+    }
   });
 
   onDestroy(() => {
@@ -96,7 +92,7 @@
     failure = null;
     const changed = (await profiles?.setKidPolicy(policy)) ?? false;
     if (generation === preferenceGeneration && active === session) {
-      if (!changed) failure = { kind: 'policy' };
+      if (!changed) failure = ['profile.policySaveFailed'];
       saving = false;
     }
     return changed;
@@ -127,7 +123,7 @@
         error,
       );
       if (generation === preferenceGeneration && active === session) {
-        failure = { kind: written ? 'presentation' : 'write', authority: active, changes };
+        failure = [written ? 'presentation' : 'profile.saveFailed', active, changes, written];
       }
     } finally {
       if (generation === preferenceGeneration && active === session) saving = false;
@@ -139,9 +135,8 @@
   }
 
   function retryPreferences() {
-    const retry = failure;
-    if (retry?.authority === session && retry.changes)
-      void savePreferences(retry.changes, retry.kind === 'presentation');
+    const failed = failure;
+    if (failed?.length === 4 && failed[1] === session) void savePreferences(failed[2], failed[3]);
   }
 </script>
 
@@ -199,13 +194,11 @@
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
       {#if failure}<div class="banner bad" role="alert">
           <span
-            >{failure.kind === 'write'
-              ? i18n.text('profile.saveFailed')
-              : failure.kind === 'policy'
-                ? i18n.text('profile.policySaveFailed')
-                : i18n.phrase('Saved, but not shown.')}</span
+            >{failure[0] === 'presentation'
+              ? i18n.phrase('Saved, but not shown.')
+              : i18n.text(failure[0])}</span
           >
-          {#if failure.kind !== 'policy'}<Button
+          {#if failure.length > 1}<Button
               variant="secondary"
               label={i18n.phrase('Retry')}
               disabled={saving}
