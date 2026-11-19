@@ -427,7 +427,7 @@ jobs:
       - name: WebKit TV engine-sensitive behavior
         run: >-
           DEN_TV_TEST_ENGINE=webkit npm run test:e2e:tv --
-          tv-navigation.spec.mjs -g "remote opens Settings" --repeat-each=30 --workers=10
+          tv-navigation.spec.mjs -g "remote opens Settings" --repeat-each=60 --workers=10
       - name: Retain native TV failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

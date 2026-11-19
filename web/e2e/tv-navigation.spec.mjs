@@ -569,6 +569,13 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   const diag = () => page.evaluate(() => window.__diag);
   const prior = await diag();
   await remoteTo(page, settings, ['ArrowUp', 'ArrowRight']);
+  {
+    const log = (await diag()).slice(prior.length);
+    const entered = log.findIndex((entry) => entry.what === 'focusin' && entry.inNav);
+    const escaped = log.slice(entered).filter((entry) => entry.what === 'focusin' && !entry.inNav);
+    if (escaped.length)
+      throw new Error(`ESCAPED ${JSON.stringify(escaped)} DIAG ${JSON.stringify(log)}`);
+  }
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Settings', level: 1 })).toBeVisible();
