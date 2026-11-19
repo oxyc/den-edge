@@ -286,7 +286,20 @@ test('a release the viewer picked is never switched away from, and the pick outl
     const remux = await fakeRemux(page, {
       delayMs: (release, _n, k) => (release === B && k > 3 ? 5_000 : 0),
     });
-    await page.goto(`${ORIGIN}/test/player.html`);
+    await page.route(`${ORIGIN}/playback/cast`, (route) => route.fulfill({ status: 204 }));
+    // A pick reaches a reload only as the season pack Scout groups it in (`releaseMemory`, cbcc7363), never as its
+    // filename, so this plays an episode (`?series&replaceEpisode` is S1 · E1) whose Scout list names each copy's group.
+    await page.route(`${ORIGIN}/scout/config/stream/series/**`, (route) =>
+      route.fulfill({
+        json: {
+          streams: RELEASES.map(({ filename }) => ({
+            url: `http://scout.test/config/p/${filename[0]}`,
+            behaviorHints: { filename, bingeGroup: `pack-${filename[0]}` },
+          })),
+        },
+      }),
+    );
+    await page.goto(`${ORIGIN}/test/player.html?series&replaceEpisode`);
     await playsTo(page, 1);
 
     await openOptionsPage(page, 'Stream');
