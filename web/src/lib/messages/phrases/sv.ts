@@ -1371,7 +1371,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Det gick inte att återkalla behörigheten. Försök igen om en stund.',
   'Couldn’t disconnect it. Try again in a moment.':
     'Det gick inte att koppla från. Försök igen om en stund.',
-  'Language saved, but not shown.': 'Språket sparades men visas inte.',
+  'Saved, but not shown.': 'Sparat, visas inte.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Länka webbläsaren till biblioteket eller acceptera en inbjudan för att se dess assistenter.',
   'Retry cleanup': 'Försök rensa igen',

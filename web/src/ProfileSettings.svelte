@@ -31,8 +31,8 @@
   type PreferenceChanges = Parameters<ProfilePreferences['patch']>[0];
   type PreferenceFailure = {
     kind: 'write' | 'presentation' | 'policy';
-    authority: ProfileSession;
-    retry?: () => void;
+    authority?: ProfileSession;
+    changes?: PreferenceChanges;
   };
   let failure = $state<PreferenceFailure | null>(null);
   let preferenceGeneration = 0;
@@ -91,73 +91,57 @@
     unknownRatings: 'allow' | 'block';
   }): Promise<boolean> {
     const active = session;
+    const generation = ++preferenceGeneration;
     saving = true;
     failure = null;
     const changed = (await profiles?.setKidPolicy(policy)) ?? false;
-    if (active === session) {
-      if (!changed) failure = { kind: 'policy', authority: active };
+    if (generation === preferenceGeneration && active === session) {
+      if (!changed) failure = { kind: 'policy' };
       saving = false;
     }
     return changed;
   }
 
-  async function presentLanguage(
-    active: ProfileSession,
-    generation: number,
-    language: NonNullable<PreferenceChanges['interfaceLanguage']>,
-  ) {
-    if (generation !== preferenceGeneration || active !== session) return;
+  async function savePreferences(changes: PreferenceChanges, presentationOnly = false) {
+    const active = session;
+    const generation = ++preferenceGeneration;
+    let written = presentationOnly;
     saving = true;
     failure = null;
     try {
-      rememberFreshPresentationLanguage(language);
-      active.presentIn(language);
-      await setInterfaceLanguage(language);
+      if (!written) {
+        await (active.preferences as ProfilePreferences).patch(changes);
+        written = true;
+      }
+      if (generation !== preferenceGeneration || active !== session) return;
+      if (changes.interfaceLanguage) {
+        rememberFreshPresentationLanguage(changes.interfaceLanguage);
+        active.presentIn(changes.interfaceLanguage);
+        await setInterfaceLanguage(changes.interfaceLanguage);
+      }
     } catch (error: unknown) {
-      console.warn('den: the saved profile language could not be presented', error);
-      if (generation === preferenceGeneration && active === session)
-        failure = {
-          kind: 'presentation',
-          authority: active,
-          retry: () => void presentLanguage(active, generation, language),
-        };
+      console.warn(
+        written
+          ? 'den: the saved profile language could not be presented'
+          : 'den: profile preference save failed',
+        error,
+      );
+      if (generation === preferenceGeneration && active === session) {
+        failure = { kind: written ? 'presentation' : 'write', authority: active, changes };
+      }
     } finally {
       if (generation === preferenceGeneration && active === session) saving = false;
     }
   }
 
-  async function writePreferences(changes: PreferenceChanges) {
-    const active = session;
-    const generation = ++preferenceGeneration;
-    saving = true;
-    failure = null;
-    try {
-      await (active.preferences as ProfilePreferences).patch(changes);
-    } catch (error: unknown) {
-      console.warn('den: profile preference save failed', error);
-      if (generation === preferenceGeneration && active === session) {
-        saving = false;
-        failure = {
-          kind: 'write',
-          authority: active,
-          retry: () => void writePreferences(changes),
-        };
-      }
-      return;
-    }
-    if (generation !== preferenceGeneration || active !== session) return;
-    if (changes.interfaceLanguage)
-      await presentLanguage(active, generation, changes.interfaceLanguage);
-    else saving = false;
-  }
-
   function save(changes: PreferenceChanges) {
-    void writePreferences(changes);
+    void savePreferences(changes);
   }
 
   function retryPreferences() {
     const retry = failure;
-    if (retry?.authority === session) retry.retry?.();
+    if (retry?.authority === session && retry.changes)
+      void savePreferences(retry.changes, retry.kind === 'presentation');
   }
 </script>
 
@@ -213,13 +197,13 @@
         </div>
       </div>
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
-      {#if failure?.authority === session}<div class="banner bad save-failure" role="alert">
+      {#if failure}<div class="banner bad" role="alert">
           <span
             >{failure.kind === 'write'
               ? i18n.text('profile.saveFailed')
               : failure.kind === 'policy'
                 ? i18n.text('profile.policySaveFailed')
-                : i18n.phrase('Language saved, but not shown.')}</span
+                : i18n.phrase('Saved, but not shown.')}</span
           >
           {#if failure.kind !== 'policy'}<Button
               variant="secondary"
@@ -331,12 +315,6 @@
   .title p,
   .banner {
     color: var(--muted);
-  }
-
-  .save-failure {
-    display: flex;
-    align-items: center;
-    gap: 12px;
   }
 
   h1 {

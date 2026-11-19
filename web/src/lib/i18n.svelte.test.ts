@@ -189,13 +189,13 @@ it('localizes the reduced-TV download management handoff', async () => {
 
 it('localizes a saved-language presentation failure without claiming the write failed', async () => {
   const cases = [
-    ['en', 'Language saved, but not shown.'],
-    ['es', 'Idioma guardado, pero no aplicado.'],
-    ['sv', 'Språket sparades men visas inte.'],
+    ['en', 'Saved, but not shown.'],
+    ['es', 'Guardado, no aplicado.'],
+    ['sv', 'Sparat, visas inte.'],
   ] as const;
 
   for (const [language, message] of cases) {
     await setInterfaceLanguage(language);
-    expect(i18n.phrase('Language saved, but not shown.')).toBe(message);
+    expect(i18n.phrase('Saved, but not shown.')).toBe(message);
   }
 });

@@ -408,37 +408,29 @@
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
   let simklNote = $state<{ text: string; bad: boolean } | null>(null);
-  let disconnectingSimkl = $state(false);
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
-  $effect(() => () => {
-    simklAttempt++;
-  });
   $effect(() => {
-    if (simklConnected) return;
-    untrack(() => {
-      simklAttempt++;
-      disconnectingSimkl = false;
-      if (simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.') simklNote = null;
-    });
+    const connected = simklConnected;
+    simklAttempt++;
+    if (!connected)
+      untrack(() => {
+        if (!simklNote?.text || simklNote.text === 'Couldn’t disconnect it. Try again in a moment.')
+          simklNote = null;
+      });
+    return () => simklAttempt++;
   });
 
   async function disconnectSimkl() {
-    if (disconnectingSimkl) return;
     const writer = saveSimkl;
     const attempt = ++simklAttempt;
-    disconnectingSimkl = true;
-    simklNote = null;
-    const saved = await writer(null).catch((error) => {
-      console.warn('den: SIMKL disconnect could not be saved', error);
-      return false;
-    });
+    simklNote = { text: '', bad: false };
+    const saved = await writer(null).catch(() => false);
     if (attempt !== simklAttempt || writer !== saveSimkl) return;
-    disconnectingSimkl = false;
-    if (!saved) {
-      simklNote = { text: 'Couldn’t disconnect it. Try again in a moment.', bad: true };
-    }
+    simklNote = saved
+      ? null
+      : { text: 'Couldn’t disconnect it. Try again in a moment.', bad: true };
   }
 
   async function connectSimkl() {
@@ -1078,7 +1070,7 @@
             label="Disconnect"
             question="Disconnect SIMKL?"
             detail="Den stops syncing your watch history with it, on every device."
-            disabled={disabled || disconnectingSimkl}
+            disabled={disabled || simklNote?.text === ''}
             onconfirm={() => void disconnectSimkl()}
           />
         </div>
@@ -1104,7 +1096,7 @@
           />
         </div>
       {/if}
-      {#if simklNote}<p
+      {#if simklNote?.text}<p
           class="status"
           class:bad={simklNote.bad}
           role={simklNote.bad ? 'alert' : 'status'}
@@ -1113,9 +1105,8 @@
         </p>{/if}
       {#if simklNote?.text === 'Couldn’t disconnect it. Try again in a moment.'}<Button
           variant="secondary"
-          label={disconnectingSimkl ? i18n.phrase('Trying again…') : i18n.phrase('Retry')}
-          busy={disconnectingSimkl}
-          disabled={disabled || disconnectingSimkl}
+          label={i18n.phrase('Retry')}
+          {disabled}
           onclick={() => void disconnectSimkl()}
         />{/if}
       <p class="foot">
