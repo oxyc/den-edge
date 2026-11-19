@@ -459,5 +459,10 @@ if (process.argv.includes('--capture')) {
   // the new chunk renumbers the shared import map, about +3 in each of six other startup chunks); the eager-copy draft
   // measured +206. The Worker adds +40. It adds no request outside that state, timer or polling. Allow the smallest
   // 128-byte boundary containing it, retaining 45.
-  if (coreTotalDelta > 127232) throw new Error('Browser total JS/CSS budget exceeded');
+  // A return visit with unsent work (#1401) draws at once and sends that work on the first refresh, and a cached
+  // opening pull no longer holds the write lane until it is adopted (the deadlock behind the return-visit e2e). All of
+  // it is in the library Worker's log, which the complete graph counts twice; startup is unchanged. CI measured the
+  // first draft at 127,368; dropping its redundant body cancels and the vault-less recovery clause takes about 90 off
+  // that. Allow the smallest 128-byte boundary containing it.
+  if (coreTotalDelta > 127360) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -137,6 +137,14 @@ everything the committed code imports is committed too.
   and its rows are unchanged. Main left 44 bytes of complete-graph margin and 17 of translation margin: the complete
   ceiling advances to 127,232 (45 bytes of margin) and the translation ceiling to 51,584 (35); the startup cap is
   unchanged. No request outside that state, timer, polling, listener or dependency is added.
+- A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
+  foreground refresh, and a cached opening pull takes the log's write lane only once a foreground refresh adopts it
+  (holding it earlier deadlocked against the service's ordered request lane). Measured in CI against main
+  `082bcab6`: the first half alone 127,196, the first draft of both 127,368; startup 10,604 → 10,659 is inside its
+  unchanged cap. All of it is in the library Worker's `log.ts` (+81 gzip bytes as one minified file), which the
+  complete graph counts twice. Dropped from the draft: body cancels the opening's abort signal already covers, and
+  sending vault-less recovery rows on the first refresh (they go on the next one). The complete ceiling advances by
+  one 128-byte step to 127,360; startup and translation ceilings are unchanged.
 - Consuming a segment scan the current play started (#1201) was measured on matched production builds at base
   `053a769e` and the change. Ordinary Browser startup moves 10,529 → 10,512 over the fixed baseline (-17 gzip bytes,
   minification; no startup code changed), while the complete non-translation graph moves 126,176 → 126,292 (+116);

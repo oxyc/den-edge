@@ -2988,18 +2988,14 @@ export class LibraryLog {
     // device check-in, in the service's ordered request lane) kept the refresh itself from ever being asked for.
     const askedAt = this.head;
     let early = opening && ask();
-    void early?.then(opening!.response, () => undefined);
-    const discardEarly = () => void early?.then((res) => res.body?.cancel()).catch(() => undefined);
+    void early?.catch(() => {});
     const body = async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
           if (!active()) return null;
-          // Another pass read past where the early read began: its page would take the cursor back, so ask again.
-          if (early && this.head !== askedAt) {
-            discardEarly();
-            early = undefined;
-          }
-          const res = await (early ?? ask());
+          // Another pass read past where the early read began: its page would take the cursor back, so ask again. Its
+          // unread body ends with the opening's signal.
+          const res = await (this.head === askedAt && early ? early : ask());
           early = undefined;
           opening?.response(res);
           // A cached opening read may finish before its retained overlay or foreground owner exists. Do not mutate
@@ -3156,13 +3152,8 @@ export class LibraryLog {
       this.writes = slot.catch(() => null);
       return slot;
     };
-    const run = opening
-      ? opening.ready.then((ready) => {
-          if (ready && opening.active()) return enter();
-          discardEarly();
-          return null;
-        })
-      : enter();
+    // Refused or superseded, it enters only to cancel its body (below).
+    const run = opening ? opening.ready.then(enter) : enter();
     const read = await run;
     if (read === null) return { changed: false, reachedHead: false };
     if (opening && !opening.active()) return { changed: false, reachedHead: false };
@@ -4874,7 +4865,7 @@ export class LibraryLog {
   private async restoreJournal(): Promise<LibraryLog> {
     this.projectJournal();
     await this.projectKept();
-    this.sendKeptNow = this.pendingActions > 0 || !!this.recoveryRows;
+    this.sendKeptNow = this.pendingActions > 0;
     return this;
   }
 
