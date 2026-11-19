@@ -357,9 +357,9 @@ jobs:
         # this is Playwright's documented workaround for its container.
         env:
           HOME: /root
-        run: npx playwright test missing-library.spec.mjs --repeat-each=30 --trace=on --workers=1
+        run: npx playwright test --grep-invert @soak --shard=${{ matrix.shard }}/4
       - name: Retain browser failure evidence
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: browser-failures-${{ matrix.shard }}-of-4
