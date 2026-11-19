@@ -142,9 +142,8 @@ export async function guardNetwork(target, origin = E2E_ORIGIN) {
         headers: { 'cache-control': 'no-store' },
         json: { error: 'not_found' },
       });
-    // `assets/` is the production build's own hashed files, which the production lane serves in place of `src/`.
     const source =
-      /^\/(?:test\/|src\/|assets\/|@|node_modules\/|favicon\.ico|worker-network-fixture\.)/.test(
+      /^\/(?:test\/|src\/|@|node_modules\/|favicon\.ico|worker-network-fixture\.)/.test(
         url.pathname,
       );
     if (url.origin === origin && source) return route.continue();
