@@ -256,6 +256,29 @@ describe('ScheduledLibraryServiceAuthority', () => {
     await scheduled.close();
   });
 
+  it('lets a read held before the first paint go, so the work foreground readiness releases runs at once', async () => {
+    vi.useFakeTimers();
+    const work = heldMaintenance();
+    const background = { run: vi.fn(async () => false) };
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port, {
+      background,
+    });
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledOnce();
+
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.pending[0]!.options?.stopWaiting?.aborted).toBe(true);
+    expect(background.run).toHaveBeenCalledOnce();
+    // The page is not parked in a fresh hold: the next read comes on the plain cadence.
+    expect(work.run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(work.run).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+  });
+
   it('pauses maintenance under the page’s own player and catches up when it closes', async () => {
     vi.useFakeTimers();
     const work = maintenance();
