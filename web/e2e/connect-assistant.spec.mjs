@@ -372,20 +372,21 @@ async function linkThroughDialog(hostPage, dialog) {
   hostPage.on('pageerror', (e) => lines.push(`pageerror ${e.message}`));
   hostPage.on('requestfailed', (r) => lines.push(`requestfailed ${r.url()} ${r.failure()?.errorText}`));
   hostPage.on('worker', (w) => lines.push(`worker ${w.url()}`));
-  await hostPage.context().tracing.start({ screenshots: true, snapshots: true });
+  const tracing = hostPage.context().tracing;
+  const ownTrace = await tracing.start({ screenshots: true, snapshots: true }).then(
+    () => true,
+    () => false,
+  );
   try {
     await hostPage.goto(`${ORIGIN}/test/settings.html`);
     await hostPage.getByRole('button', { name: /Linked devices/, timeout: 20_000 }).click();
   } catch (error) {
-    await hostPage
-      .context()
-      .tracing.stop({ path: test.info().outputPath('host-trace.zip') })
-      .catch(() => undefined);
-    await test.info().attach('host-console', { body: lines.join('\n'), contentType: 'text/plain' });
+    if (ownTrace)
+      await tracing.stop({ path: test.info().outputPath('host-trace.zip') }).catch(() => undefined);
     console.log(`HOST-DIAG\n${lines.join('\n')}`);
     throw error;
   }
-  await hostPage.context().tracing.stop();
+  if (ownTrace) await tracing.stop();
   const devices = hostPage.getByRole('region', { name: 'Linked devices' });
   await devices.getByRole('button', { name: 'Get a code' }).click();
   const code = await devices.locator('.code').textContent();
