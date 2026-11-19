@@ -452,6 +452,11 @@ export class LibraryLog {
   /** Told how each edit answered before it was sent came to end; the authority turns that into what the page sees. */
   onDeferred: ((delivery: DeferredDelivery) => void) | null = null;
   /**
+   * den-edge has just refused to start this library (`refused` turned true). Any write can be the one it refuses, not
+   * only an edit made by hand, so the page is told here rather than only by an edit's own `onDeferred`.
+   */
+  onRefused: (() => void) | null = null;
+  /**
    * A refresh changed what this browser holds and has not said so yet: one that read page N and failed on N+1 keeps
    * the rows of N, and the next refresh to finish reports them, where it may find nothing new of its own.
    */
@@ -4287,9 +4292,11 @@ export class LibraryLog {
     const refusals = REFUSALS[res.status];
     if (!refusals) return;
     if (res.status === 403 && code === 'new_libraries_closed') {
+      const first = !this.refused;
       this.refused = true;
       this.refusedAt = Date.now();
       forgetLibraryCredential();
+      if (first) this.onRefused?.();
       return;
     }
     if (refusals !== 'any' && !refusals.includes(code)) return;
