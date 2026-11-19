@@ -49,6 +49,9 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
   let pushedWrite = 0;
   let pulledWrite = 0;
   const deviceWrites = [];
+  /** Each of the device's batches, tagged with the playback phase the test was in when it arrived. */
+  const deviceBatches = [];
+  let phase = 'startup';
   let deliveryArmed = false;
   const waiters = new Set();
   const deliveryTimers = new Set();
@@ -176,6 +179,11 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
         if (name === 'device') {
           deviceWrote = Date.now();
           deviceWrites.push(deviceWrote);
+          deviceBatches.push({
+            phase,
+            writes: request.postDataJSON().writes.length,
+            conflicts: conflicts.length,
+          });
           if (!held) pushedWrite = deviceWrote;
           else if (deviceWrites.length === 1) push();
           // The second save stays private to the device: its replacement supersedes it before the next delivery.
@@ -194,6 +202,10 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
     arrivals,
     controls,
     deviceWrites,
+    deviceBatches,
+    markPhase: (name) => {
+      phase = name;
+    },
     armLostDelivery: () => {
       deliveryArmed = true;
       // `Writer ready` means its device heartbeat batch has finished, but the page may not have pulled that batch
@@ -203,6 +215,7 @@ function sharedEdge({ loseOnePeriodicDelivery = false } = {}) {
       pushedWrite = 0;
       pulledWrite = 0;
       deviceWrites.length = 0;
+      deviceBatches.length = 0;
       arrivals.length = 0;
     },
     close: () => {
@@ -231,7 +244,7 @@ async function openWithDevice(browser, page, options = {}) {
   });
   // The heading arrives before WindowedPosterRow's observer and animation-frame materialization. A controlled clock
   // must not pause those frames while the visible title is still only its light navigation proxy.
-  await waitForMaterializedPoster(page, 'Movie 1002');
+  await waitForMaterializedPoster(page, 'Movie 1001');
 
   // A controlled writer fixes the logical producer/viewer timeline while the Worker's pull and the delivery
   // debounce remain on wall time. Slow startup and locator work can then never change which periodic save occurs.
@@ -372,6 +385,7 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
   try {
     const clock = homeClock(page);
     const playing = play(PLAYED, 600);
+    edge.markPhase('first');
     await playing.writeAt(0);
     await expect(clock).toBeVisible({ timeout: 70_000 });
     await expect(clock).toHaveText(/^1\d:\d\d$/);
@@ -389,9 +403,11 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
     // Advance the logical producer phases explicitly: first save, lost 30 s periodic, then the 60 s replacement.
     // Hold the viewer at 70 s before releasing that replacement, so neither startup nor locator time can move the
     // assertion past the old row's accepted retention budget.
+    edge.markPhase('lost');
     await playing.writeAt(WRITE_EVERY_MS);
     await setViewerTime(page, timeline + LOST_DELIVERY_OBSERVED_MS);
     await expect(clock).toHaveText('11:10');
+    edge.markPhase('replacement');
     await playing.writeAt(2 * WRITE_EVERY_MS);
     expect(writerEvents, 'the controlled phases came only from explicit playback saves').toEqual(
       [0, WRITE_EVERY_MS, 2 * WRITE_EVERY_MS].map((elapsed) => ({
@@ -404,8 +420,11 @@ test('a title playing on the TV keeps its clock on Home between the TV’s pushe
       samples.filter((text) => text === null),
       'the live clock never retired',
     ).toEqual([]);
-    expect(edge.deviceWrites, 'only the intended first, lost, and replacement saves').toHaveLength(
-      3,
+    expect(
+      edge.deviceBatches,
+      'only the intended first, lost, and replacement saves reached den-edge',
+    ).toEqual(
+      ['first', 'lost', 'replacement'].map((name) => ({ phase: name, writes: 1, conflicts: 0 })),
     );
     expect(
       edge.arrivals,
