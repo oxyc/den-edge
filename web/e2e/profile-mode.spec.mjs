@@ -696,6 +696,76 @@ test('preview Kid and Visitor Settings are personal while household administrati
   await expect(page.getByLabel('Audio language')).toHaveValue('da');
 });
 
+test('profile preference failure repaints live, retries exactly, and cannot cross replacement', async ({
+  page,
+}) => {
+  await guardNetwork(page);
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({
+        version: 1,
+        mode: 'persistent',
+        profileId: '00000000000000000000000000000001',
+      }),
+    ),
+  );
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${FIXTURE}?settings&preferenceRetry`);
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+
+  await page.evaluate(() => window.denProfileModeFixture.failNextPreferenceSave());
+  await page.getByLabel('Audio language').selectOption('da');
+  const settings = page.locator('.profile-settings');
+  await expect(settings.getByRole('alert')).toContainText('Couldn’t save that. Try again.');
+
+  await page.evaluate(() => window.denProfileModeFixture.setLanguage('es'));
+  await expect(settings.getByRole('alert')).toContainText(
+    'No se pudo guardar. Inténtalo de nuevo.',
+  );
+  await page.evaluate(() => window.denProfileModeFixture.setLanguage('sv'));
+  await expect(settings.getByRole('alert')).toContainText('Det gick inte att spara. Försök igen.');
+  await page.evaluate(() => window.denProfileModeFixture.setLanguage('en'));
+
+  await settings.getByRole('button', { name: 'Retry' }).click();
+  await expect(settings.getByRole('alert')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => window.denProfileModeFixture.snapshot().effectivePreferences.audioLanguage,
+      ),
+    )
+    .toBe('da');
+
+  await page.evaluate(() => window.denProfileModeFixture.failNextPreferenceSave());
+  await page.getByLabel('Audio language').selectOption('en');
+  const staleRetry = settings.getByRole('button', { name: 'Retry' });
+  await expect(staleRetry).toBeVisible();
+  await staleRetry.evaluate((button) => (globalThis.staleProfileRetry = button));
+
+  await page.getByRole('button', { name: 'Switch profile, current Kids' }).click();
+  await page.getByRole('button', { name: 'Use Visitor' }).click();
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect
+    .poll(() => page.evaluate(() => window.denProfileModeFixture.snapshot().preferencesIdentity))
+    .toMatchObject({ kind: 'visitor' });
+  await expect(settings.getByRole('alert')).toHaveCount(0);
+
+  // A detached control from the replaced Kid cannot replay its intent against the new Visitor authority.
+  await page.evaluate(() => globalThis.staleProfileRetry.click());
+  expect(
+    await page.evaluate(
+      () => window.denProfileModeFixture.snapshot().effectivePreferences.audioLanguage,
+    ),
+  ).not.toBe('en');
+});
+
 // A Kid's Settings at phone width: the Owner PIN prompt's field fills the prompt, and the Content limit controls are
 // two labelled rows. The PIN field was a few characters wide in WebKit, where a grid item with `justify-items: start`
 // shrinks to its content and the field's `width: 100%` then resolves against that.

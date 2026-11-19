@@ -99,6 +99,17 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Settings retries (#1045, #1296) were measured by the hosted gate on the PR head rebased onto main `20463fa0`
+  (core delta 127,284, translations 51,689): core delta 127,629 (+345), translations 51,722 (+33), startup 206,967
+  (within its cap). The core growth is all in the lazy Settings route: the profile-preference and SIMKL-disconnect
+  generation/session fences that keep a late result from landing on a replaced session, and their Retry controls.
+  Turning the named failure objects into a typed tuple and reusing existing phrases for the SIMKL notes removed 53
+  bytes from the earlier draft. The one new phrase, "Saved, but not shown.", says a profile language was saved but could not be
+  presented. The fences must sit where each write starts and settles, so a lazy import cannot reduce the complete
+  graph. The complete ceiling advances from 127,360 to 127,744 (retaining 115) and the translation ceiling from
+  51,712 to 51,840 (retaining 118); the startup ceiling is unchanged. It adds no request, timer, listener or
+  dependency.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip

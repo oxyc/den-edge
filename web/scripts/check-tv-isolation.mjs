@@ -201,7 +201,10 @@ if (process.argv.includes('--capture')) {
   // fallback. The first draft measured 51,749; dropping the two fragments the parameterised Owner-PIN line replaced
   // removed 60. The catalogs are already lazy, and every phrase left is visible or spoken copy. Allow the next 128-byte
   // boundary, retaining 23.
-  if (current.translationGzip > 51712) throw new Error('Lazy translation catalog budget exceeded');
+  // Settings retries (#1045) add one phrase, "Saved, but not shown.", for a profile language that was saved but
+  // could not be presented: 51,722 in CI against main's 51,689 (+33, main at 20463fa0). The SIMKL notes reuse
+  // existing phrases. Allow the next 128-byte boundary, retaining 118.
+  if (current.translationGzip > 51840) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -468,5 +471,8 @@ if (process.argv.includes('--capture')) {
   // the `i18n.phrase`/`format` calls around the switcher's existing English copy and the Kid/Visitor/Owner description
   // helper. They render in the always-mounted switcher and its dialog; moving the dialog behind a dynamic import would
   // add a request to every open and still count here. Allow the next 128-byte boundary, retaining 118.
-  if (coreTotalDelta > 127360) throw new Error('Browser total JS/CSS budget exceeded');
+  // Settings retries (#1045) measured 127,629 in CI against main's 127,284 (+345, main at 20463fa0), all in the lazy
+  // Settings route: the profile-preference and SIMKL-disconnect generation/session fences and their Retry controls.
+  // Startup measures 206,967, within its cap. Allow the smallest 128-byte boundary containing it, retaining 115.
+  if (coreTotalDelta > 127744) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -407,13 +407,29 @@
   let simklClientId = $state<string | null>(null);
   void fetchSimklClientId().then((id) => (simklClientId = id));
   let simklPin = $state<SimklPin | null>(null);
-  let simklNote = $state<{ text: string; bad: boolean } | null>(null);
+  let simklNote = $state<string | null>(null);
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
   let simklAttempt = 0;
-  $effect(() => () => {
+  $effect(() => {
+    const connected = simklConnected;
     simklAttempt++;
+    if (!connected)
+      untrack(() => {
+        if (!simklNote || simklNote === 'Couldn’t disconnect it. Try again in a moment.')
+          simklNote = null;
+      });
+    return () => simklAttempt++;
   });
+
+  async function disconnectSimkl() {
+    const writer = saveSimkl;
+    const attempt = ++simklAttempt;
+    simklNote = '';
+    const saved = await writer(null).catch(() => false);
+    if (attempt !== simklAttempt || writer !== saveSimkl) return;
+    simklNote = saved ? null : 'Couldn’t disconnect it. Try again in a moment.';
+  }
 
   async function connectSimkl() {
     const clientId = simklClientId;
@@ -423,7 +439,7 @@
     const pin = await requestPin(clientId);
     if (attempt !== simklAttempt) return;
     if (!pin) {
-      simklNote = { text: 'Couldn’t get a code from SIMKL. Try again in a moment.', bad: true };
+      simklNote = 'Couldn’t get a code from SIMKL. Try again in a moment.';
       return;
     }
     simklPin = pin;
@@ -436,21 +452,20 @@
       if (attempt !== simklAttempt) return;
       if (answer.kind === 'authorized') {
         simklPin = null;
-        if (await saveSimkl(answer.token)) simklNote = { text: 'Connected to SIMKL.', bad: false };
+        simklNote = (await saveSimkl(answer.token))
+          ? 'Connected'
+          : 'Couldn’t reach the source service.';
         return;
       }
       if (answer.kind === 'failed') {
         simklPin = null;
-        simklNote = {
-          text: 'Couldn’t reach SIMKL. Check your connection and try again.',
-          bad: true,
-        };
+        simklNote = 'Couldn’t reach the source service.';
         return;
       }
       if (answer.kind === 'slowDown') wait += 5;
     }
     simklPin = null;
-    simklNote = { text: 'The code expired — try again.', bad: true };
+    simklNote = 'The code expired — try again.';
   }
 
   function cancelSimkl() {
@@ -1050,8 +1065,8 @@
             label="Disconnect"
             question="Disconnect SIMKL?"
             detail="Den stops syncing your watch history with it, on every device."
-            {disabled}
-            onconfirm={() => void saveSimkl(null)}
+            disabled={disabled || simklNote === ''}
+            onconfirm={() => void disconnectSimkl()}
           />
         </div>
       {:else if simklPin}
@@ -1076,9 +1091,19 @@
           />
         </div>
       {/if}
-      {#if simklNote}<p class="status" class:bad={simklNote.bad} role="status">
-          {simklNote.text}
+      {#if simklNote}<p
+          class="status"
+          class:bad={simklNote !== 'Connected'}
+          role={simklNote === 'Connected' ? 'status' : 'alert'}
+        >
+          {i18n.phrase(simklNote)}
         </p>{/if}
+      {#if simklNote === 'Couldn’t disconnect it. Try again in a moment.'}<Button
+          variant="secondary"
+          label={i18n.phrase('Retry')}
+          {disabled}
+          onclick={() => void disconnectSimkl()}
+        />{/if}
       <p class="foot">
         SIMKL (<a href="https://simkl.com" target="_blank" rel="noreferrer noopener">simkl.com</a>)
         syncs your watch history and records what you watch. {simkl
