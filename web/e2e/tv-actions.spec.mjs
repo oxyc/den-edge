@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge, routeGuestEdge } from './guest-edge.mjs';
-import { captureDiagnostics } from './diag-1376.mjs';
+import { recordFocusTrail, withPageState } from './tv-focus-diagnostics.mjs';
 
 const film = (id) => ({
   id,
@@ -60,6 +60,7 @@ async function setup(page) {
       return matches.call(this, selector);
     };
   });
+  await recordFocusTrail(page);
   await routeGuestEdge(page, newEdge());
   await page.route('**/tmdb/**', (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -114,15 +115,6 @@ async function setup(page) {
 test('TV search opens a poster without action menus and Back restores it', async ({ page }) => {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const flushDiag = await captureDiagnostics(page, test.info());
-  try {
-    await body(page, errors);
-  } finally {
-    await flushDiag();
-  }
-});
-
-async function body(page, errors) {
   await setup(page);
 
   const search = page.getByRole('button', { name: 'Search', exact: true });
@@ -133,7 +125,9 @@ async function body(page, errors) {
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/search/);
   const editor = page.locator('section.search').getByRole('searchbox');
-  await expect(editor).toBeFocused();
+  await withPageState(page, '[data-route-page][data-active="true"] section.search', () =>
+    expect(editor).toBeFocused(),
+  );
   await page.keyboard.type('Movie');
 
   const card = page.getByRole('link', { name: /Movie 1/ }).first();
@@ -180,4 +174,4 @@ async function body(page, errors) {
   await expect(editor).toHaveValue('Movie');
   await expect(card).toBeFocused({ timeout: 5_000 });
   expect(errors).toEqual([]);
-}
+});
