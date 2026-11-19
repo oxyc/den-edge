@@ -1377,6 +1377,216 @@ describe('LibraryLog', () => {
     }
   });
 
+  describe('a return visit read from den-edge with work kept here', () => {
+    /** A library whose last visit kept `write`'s work unsent, and then lost its kept facts. */
+    async function keptWithoutFacts(write: (log: LibraryLog) => Promise<unknown>) {
+      const server = await edge([row(1)], [], 'generation-1');
+      const { data, vault } = memoryVault();
+      let refuseWrites = false;
+      let posts = 0;
+      const urls: string[] = [];
+      const connection: typeof fetch = async (input, init) => {
+        urls.push(String(input));
+        if (init?.method === 'POST') {
+          posts++;
+          if (refuseWrites) throw new TypeError('offline');
+        }
+        const response = await server.fetchImpl(input, init);
+        const headers = new Headers(response.headers);
+        headers.set('x-den-wire-min', '4');
+        return new Response(response.body, { status: response.status, headers });
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      refuseWrites = true;
+      await write(log);
+      await vi.waitFor(() => expect(log.pendingActions).toBe(1));
+      await vi.waitFor(() => expect(posts).toBe(1));
+      log.close();
+      refuseWrites = false;
+      for (const key of [...data.keys()])
+        if (key.endsWith(':library-facts.v1:manifest')) data.delete(key);
+      return { vault, connection, urls, posts: () => posts };
+    }
+
+    const heartbeat: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+    };
+
+    it('draws a kept row without deferred policy or a send, and sends it on the first refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const library = await keptWithoutFacts((log) => log.write(heartbeat));
+      const sent = library.posts();
+      let release!: () => void;
+      const deferred = new Promise<void>((resolve) => (release = resolve));
+      const policy = vi.spyOn(syncLoader, 'ensureDeferredSyncPolicy').mockReturnValue(deferred);
+      try {
+        let opened: LibraryLog | null | undefined;
+        void LibraryLog.open(LIBRARY_KEY, library.connection, undefined, library.vault).then(
+          (value) => (opened = value),
+        );
+        await vi.waitFor(() =>
+          expect(opened, 'the open answers before deferred policy loads').toBeTruthy(),
+        );
+        const reopened = opened!;
+        expect(reopened.fromCache).toBe(false);
+        expect(reopened.settings('devices')).toMatchObject(heartbeat);
+        expect(library.posts(), 'opening sends nothing').toBe(sent);
+        expect(reopened.pendingActions).toBe(1);
+
+        release();
+        library.urls.length = 0;
+        await reopened.refresh(25);
+        expect(
+          library.urls.some((url) => url.includes('wait=')),
+          'the first refresh is not held while work waits to be sent',
+        ).toBe(false);
+        expect(library.posts(), 'the kept row is sent once').toBe(sent + 1);
+        expect(reopened.pendingActions).toBe(0);
+        expect(reopened.settings('devices')).toMatchObject(heartbeat);
+
+        await reopened.refresh();
+        expect(library.posts(), 'settled work is not sent again').toBe(sent + 1);
+        reopened.close();
+      } finally {
+        release();
+        policy.mockRestore();
+        warn.mockRestore();
+      }
+    });
+
+    it('draws kept ops once deferred policy loads, without sending them before the first refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const title = { type: 'movie' as const, id: 2 };
+      const library = await keptWithoutFacts((log) =>
+        log.write(addToWatchlist(blankTitle(title, 0), at(1000))),
+      );
+      const sent = library.posts();
+      const reopened = (await LibraryLog.open(
+        LIBRARY_KEY,
+        library.connection,
+        undefined,
+        library.vault,
+      ))!;
+      try {
+        expect(reopened.fromCache).toBe(false);
+        expect(reopened.title(title)?.status.value).toBe('watchlist');
+        expect(library.posts(), 'opening sends nothing').toBe(sent);
+        expect(reopened.pendingActions).toBe(1);
+
+        await reopened.refresh();
+        expect(library.posts(), 'the kept op is sent once').toBe(sent + 1);
+        expect(reopened.pendingActions).toBe(0);
+        expect(reopened.title(title)?.status.value).toBe('watchlist');
+      } finally {
+        reopened.close();
+        warn.mockRestore();
+      }
+    });
+
+    it('leaves kept work kept when the log closes before a foreground refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const library = await keptWithoutFacts((log) => log.write(heartbeat));
+      const sent = library.posts();
+      try {
+        const speculative = (await LibraryLog.open(
+          LIBRARY_KEY,
+          library.connection,
+          undefined,
+          library.vault,
+        ))!;
+        speculative.close();
+        const next = (await LibraryLog.open(
+          LIBRARY_KEY,
+          library.connection,
+          undefined,
+          library.vault,
+        ))!;
+        expect(library.posts(), 'neither open sent the kept row').toBe(sent);
+        expect(next.pendingActions).toBe(1);
+        await next.refresh();
+        expect(library.posts()).toBe(sent + 1);
+        expect(next.pendingActions).toBe(0);
+        next.close();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  it('lets writes and reads past a cached opening pull that waits for its foreground refresh', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const server = await edge([row(1)], [], 'generation-1');
+    const { vault } = memoryVault();
+    let refuseWrites = false;
+    let posts = 0;
+    let changes = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST') {
+        posts++;
+        if (refuseWrites) throw new TypeError('offline');
+      } else if (String(input).includes('/changes?')) changes++;
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '4');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    refuseWrites = true;
+    const kept: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+    };
+    await first.write(kept);
+    await vi.waitFor(() => expect(first.pendingActions).toBe(1));
+    first.close();
+    refuseWrites = false;
+    const sent = posts;
+    const read = changes;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    try {
+      expect(log.fromCache).toBe(true);
+      expect(changes, 'the opening pull starts with the open').toBe(read + 1);
+      // The service orders its requests: a write that waited here for the foreground refresh kept the request that
+      // starts that refresh from ever running, and the kept work was never sent.
+      const fresh: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'tracker',
+        values: { connected: { value: { bool: true }, at: at(1002) } },
+      };
+      let wrote = false;
+      void log.write(fresh).then(() => (wrote = true));
+      await vi.waitFor(() => expect(wrote, 'a write does not wait for adoption').toBe(true));
+      expect(posts, 'the fresh write was sent').toBe(sent + 1);
+      expect(log.pendingActions, 'the kept work still waits').toBe(1);
+      // A read of the log sends kept work after it, as every pass does.
+      await expect(log.readToHead(), 'nor does a read wait').resolves.toBe(true);
+      expect(posts).toBe(sent + 2);
+      expect(log.pendingActions).toBe(0);
+
+      const before = changes;
+      // That read's caller reports nothing: the page learns the kept work went (its "Waiting to sync" count) from the
+      // next refresh, or it never does.
+      await expect(log.refresh(), 'the refresh says what the read changed').resolves.toBe(true);
+      // The early page predates the read above: taken now it would move the cursor back, so the adopted pass asks
+      // again from where the log is.
+      expect(changes).toBe(before + 1);
+      expect(posts, 'the adopted opening pull sends nothing again').toBe(sent + 2);
+      expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
+      expect(log.settings('devices')).toMatchObject(kept);
+      expect(log.settings('tracker')).toMatchObject(fresh);
+      await expect(log.refresh(), 'and says it once').resolves.toBe(false);
+    } finally {
+      log.close();
+      warn.mockRestore();
+    }
+  });
+
   it('cancels an unadopted cached pull when its speculative log closes', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { vault } = memoryVault();
