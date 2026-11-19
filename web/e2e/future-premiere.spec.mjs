@@ -1,11 +1,13 @@
 // The real Browser/LG/webOS/supported-Tizen composition: Library mounts Detail, owns the playback boundary and
 // supplies Continue from the active profile. A known-future title with no current-series Continue must stop there,
-// before the player or source addon, even when another series has a newer overlapping S1E1 Continue coordinate.
+// before the player or source addon, even when another series has a newer overlapping S1E1 Continue coordinate. (A
+// future-premiere series' own Continue target is covered in `detailPresentation.test.ts`: den-core does not produce
+// a playable Continue entry for a series with no aired episode, so the fixture cannot reach it.)
 import { expect, test } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
-const series = (id, firstAir, lastAired = null) => ({
+const series = (id, firstAir) => ({
   id,
   name: id === 2007 ? 'Future Series' : 'Other Series',
   ...(firstAir ? { first_air_date: firstAir } : {}),
@@ -17,12 +19,12 @@ const series = (id, firstAir, lastAired = null) => ({
   vote_count: 500,
   genres: [{ id: 18, name: 'Drama' }],
   seasons: [{ season_number: 1, name: 'Season 1', episode_count: 2 }],
-  last_episode_to_air: lastAired,
+  last_episode_to_air: null,
   aggregate_credits: { cast: [], crew: [] },
   recommendations: { results: [] },
 });
 
-async function open(page, { firstAir = '2099-01-01', lastAired, query = '' } = {}) {
+async function open(page, { firstAir = '2099-01-01', query = '' } = {}) {
   await guardNetwork(page);
   await page.route('**/routes', (route) => route.fulfill({ json: {} }));
   const boundaryRequests = [];
@@ -50,9 +52,7 @@ async function open(page, { firstAir = '2099-01-01', lastAired, query = '' } = {
         },
       });
     const id = Number(path.match(/\/tv\/(\d+)/)?.[1] ?? 2007);
-    return route.fulfill({
-      json: series(id, id === 2007 ? firstAir : '2020-01-01', id === 2007 ? lastAired : undefined),
-    });
+    return route.fulfill({ json: series(id, id === 2007 ? firstAir : '2020-01-01') });
   });
   await page.route('https://image.tmdb.org/**', (route) =>
     route.fulfill({
@@ -87,26 +87,6 @@ for (const profile of ['Kid', 'Owner'])
     });
     expect(boundaryRequests).toEqual([]);
   });
-
-test('a real current-series Continue still crosses the future-title playback boundary', async ({
-  page,
-}) => {
-  // Continue is computed against the series' episode layout, which needs an aired episode to resume into.
-  const boundaryRequests = await open(page, {
-    lastAired: { season_number: 1, episode_number: 2 },
-    query: '&current-series-continue&direct-play&owner',
-  });
-  // Continue reaches the page after its episode layout is read, so the target (and the Play it enables) is not there
-  // when the title heading first draws.
-  await expect(
-    page.locator('header.hero').getByRole('link', { name: /^(Play|Resume)$/ }),
-  ).toBeVisible({ timeout: 15_000 });
-  await expect
-    .poll(() => boundaryRequests.find(({ url }) => url.endsWith('/remux/releases'))?.body, {
-      timeout: 15_000,
-    })
-    .toMatchObject({ season: 1, episode: 1 });
-});
 
 test('an explicitly addressed future-series episode still crosses the playback boundary', async ({
   page,

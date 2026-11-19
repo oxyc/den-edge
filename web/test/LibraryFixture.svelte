@@ -299,24 +299,13 @@
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
             : []),
           // A newer, coordinate-overlapping Continue entry for another series must never supply the open title's
-          // target. The current-series variant proves that a real authoritative Continue remains playable even when
-          // the title's first-air date is in the future.
+          // target.
           ...(params.has('other-series-continue')
             ? [
-                blankTitle({ type: 'tv', id: 2002 }, downloadAt + 1),
+                blankTitle({ type: 'tv', id: 2002 }, 10_000),
                 {
                   ...blankEpisode({ type: 'tv', id: 2002 }, 1, 1),
-                  progress: { value: 0.4, at: [downloadAt + 1, 0, 'test'], viewing: 1 },
-                } satisfies EpisodeRow,
-              ]
-            : []),
-          ...(params.has('current-series-continue')
-            ? [
-                blankTitle({ type: 'tv', id: 2007 }, downloadAt),
-                {
-                  ...blankEpisode({ type: 'tv', id: 2007 }, 1, 1),
-                  // Recent: Continue Watching drops a resume point left long ago.
-                  progress: { value: 0.4, at: [downloadAt, 0, 'test'], viewing: 1 },
+                  progress: { value: 0.4, at: [10_000, 0, 'test'], viewing: 1 },
                 } satisfies EpisodeRow,
               ]
             : []),
