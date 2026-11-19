@@ -184,7 +184,7 @@
   if (scanned && parseCode(scanned)) void link();
 </script>
 
-<section class:embedded>
+<section class:embedded data-startup-outcome={embedded ? undefined : 'pairing'}>
   {#if !embedded}<h1>{__DEN_TV__ ? 'Open your Den library' : 'Link your Apple TV'}</h1>{/if}
   {#if links.moved}
     <p class="sub" role="status">
