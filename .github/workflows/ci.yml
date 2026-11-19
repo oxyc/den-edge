@@ -561,11 +561,17 @@ jobs:
           TV_WEBKIT: ${{ needs.e2e_tv_webkit.result }}
           ANDROID_TV: ${{ needs.android-tv.result }}
           ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
+        # One `test` per line: `bash -e` ignores a failure inside an `&&` list that is not the script's last command,
+        # so a chain of them followed by the Android check let a failed web-checks or e2e pass this gate.
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
             test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_CHROMIUM" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
           else
-            test "$CHECKS" = success && test "$E2E" = success && test "$E2E_PRODUCTION" = success && test "$TV_CHROMIUM" = success && test "$TV_WEBKIT" = success
+            test "$CHECKS" = success
+            test "$E2E" = success
+            test "$E2E_PRODUCTION" = success
+            test "$TV_CHROMIUM" = success
+            test "$TV_WEBKIT" = success
             if [ "$ANDROID_CHANGED" = true ]; then
               test "$ANDROID_TV" = success
             else
