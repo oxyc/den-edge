@@ -321,7 +321,7 @@ test(
     };
     for (
       let cycle = 0;
-      cycle < 3 || (soak && performance.now() - started < soakMinutes * 60_000);
+      cycle < 4 || (soak && performance.now() - started < soakMinutes * 60_000);
       cycle++
     ) {
       const titleId = 1002 + (cycle % 3);
