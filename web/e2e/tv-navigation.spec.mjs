@@ -524,10 +524,49 @@ test('reduced Tizen hands download management to a supported browser', async ({ 
 test('remote opens Settings and Back returns to the previously focused navigation item', async ({
   page,
 }) => {
+  // TEMPORARY DIAGNOSTICS (#1376)
+  await page.addInitScript(() => {
+    window.__diag = [];
+    const note = (what, extra = {}) =>
+      window.__diag.push({
+        what,
+        path: location.pathname,
+        scrollY: Math.round(scrollY),
+        ...extra,
+      });
+    addEventListener(
+      'focusin',
+      (e) => {
+        const t = e.target;
+        note('focusin', {
+          tag: t.tagName,
+          label: (t.getAttribute?.('aria-label') ?? t.textContent ?? '').trim().slice(0, 30),
+          inBar: !!t.closest?.('.tv-bar'),
+          inNav: !!t.closest?.('.tv-bar nav'),
+          stack: new Error().stack.split('\n').slice(2, 5).join(' | '),
+        });
+      },
+      true,
+    );
+    for (const m of ['pushState', 'replaceState']) {
+      const orig = history[m];
+      history[m] = function (...args) {
+        note(m, { to: String(args[2]) });
+        return orig.apply(this, args);
+      };
+    }
+    addEventListener(
+      'keydown',
+      (e) => note('keydown', { key: e.key, activeInBar: !!document.activeElement?.closest?.('.tv-bar') }),
+      true,
+    );
+  });
   await setup(page);
   await browse(page);
 
   const settings = page.getByRole('link', { name: 'Settings', exact: true });
+  const diag = () => page.evaluate(() => window.__diag);
+  const prior = await diag();
   await remoteTo(page, settings, ['ArrowUp', 'ArrowRight']);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/settings$/);
@@ -580,7 +619,12 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await expect(hideWatched).toBeFocused();
 
   await page.keyboard.press('Escape');
-  await expect(page).toHaveURL(/\/$/);
+  try {
+    await expect(page).toHaveURL(/\/$/);
+  } catch (error) {
+    const log = (await diag()).slice(prior.length);
+    throw new Error(`${error.message}\nDIAG ${JSON.stringify(log)}`);
+  }
   await expect(settings).toBeFocused({ timeout: 5_000 });
 });
 
