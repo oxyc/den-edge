@@ -272,10 +272,11 @@
     // compatibility S1E1 fallback. Hand that target through too; an explicitly addressed episode remains
     // independently playable even when the title has not premiered.
     const coordinate = playRequest.episode == null ? playbackTarget : playRequest;
-    // Keyed by the request's own fields, not its object: the Router rewrites the address (and so replaces the
-    // object) without making a new request.
-    const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
-    if (!active || !d || !onplayhere || !coordinate || handledPlayRequest === requestKey) return;
+    if (!active || !d || !onplayhere || !coordinate) return;
+    // Keyed by the resolved coordinate and filename, not the request's object: the Router replaces that object on
+    // every address rewrite without making a new request.
+    const requestKey = `${coordinate.season ?? ''}:${coordinate.episode ?? ''}:${playRequest.filename ?? ''}`;
+    if (handledPlayRequest === requestKey) return;
     handledPlayRequest = requestKey;
     onplayhere(d.title, coordinate.season, coordinate.episode, playRequest.filename);
   });
