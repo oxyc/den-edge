@@ -1397,7 +1397,7 @@
           model={model ?? undefined}
           allowed={entitled}
           bind:this={sourcesPanel}
-          imdb={d.imdbId}
+          imdb={ref.type === 'tv' && !sourceCoord ? undefined : d.imdbId}
           {active}
           season={ref.type === 'tv' ? sourceCoord?.season : undefined}
           episode={sourceCoord?.episode}
