@@ -469,6 +469,8 @@ export class LibraryLog {
     adopt: () => void;
     cancel: () => void;
   };
+  /** An open read from den-edge drew kept work without sending it: the first refresh is not held, and sends it. */
+  private sendKeptNow = false;
   /** Cached restore side work shares one revocable lifetime, including membership and the adopted first pull. */
   private cachedAuthority?: { cancel: () => void };
   private head = 0;
@@ -2933,7 +2935,8 @@ export class LibraryLog {
         if (this.openingPass === opening) this.openingPass = undefined;
       }
     }
-    if (waitSeconds > 0) await this.awaitChange(waitSeconds, stopWaiting);
+    if (waitSeconds > 0 && !this.sendKeptNow) await this.awaitChange(waitSeconds, stopWaiting);
+    this.sendKeptNow = false;
     return (await this.pass()).changed;
   }
 
@@ -4790,10 +4793,13 @@ export class LibraryLog {
     return kept;
   }
 
-  /** What the work kept in this browser will do once sent, shown now: projected, and nothing sent. */
+  /**
+   * What the work kept in this browser will do once sent, shown now: projected, and nothing sent. Only kept semantic
+   * ops wait for the deferred policy; rows carry their merge semantics.
+   */
   private async projectKept(): Promise<void> {
     const kept = await this.keptWork();
-    if (kept.length) await ensureDeferredSyncPolicy();
+    if (kept.some((work) => work.kind === 'ops')) await ensureDeferredSyncPolicy();
     for (const work of kept) this.projectWork(work);
   }
 
@@ -4834,9 +4840,15 @@ export class LibraryLog {
     return queued;
   }
 
+  /**
+   * Draw accepted actions and the work kept in this browser, without sending that work: the open answers with what
+   * this browser holds, and the first foreground refresh sends it (`sendKeptNow`), as the cached open does. Native
+   * Den likewise draws its local store at launch and pushes after its first pull.
+   */
   private async restoreJournal(): Promise<LibraryLog> {
     this.projectJournal();
-    await this.replay();
+    await this.projectKept();
+    this.sendKeptNow = this.pendingActions > 0 || !!this.recoveryRows;
     return this;
   }
 
