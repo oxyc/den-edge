@@ -99,6 +99,13 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
+  foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
+  non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip
+  bytes as one minified file). CI measured the merged head at 127,284 against #1158's 127,360 ceiling (an earlier
+  draft measured 127,368 on main `082bcab6` before its redundant body cancels were dropped). No ceiling changes. It
+  adds no request, timer, listener or dependency.
+
 - Localizing the profile switcher (#1158) was measured by the hosted gate at exact base `d4d42ac1` (core delta
   127,190, translations 51,549, startup 207,012) and the PR head: translations 51,689 (+140), core delta 127,242
   (+52), startup 207,061 (+49, within its cap). The translations are the two new PIN-field labels, the

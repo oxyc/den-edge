@@ -469,6 +469,8 @@ export class LibraryLog {
     adopt: () => void;
     cancel: () => void;
   };
+  /** An open read from den-edge drew kept work without sending it: the first refresh is not held, and sends it. */
+  private sendKeptNow = false;
   /** Cached restore side work shares one revocable lifetime, including membership and the adopted first pull. */
   private cachedAuthority?: { cancel: () => void };
   private head = 0;
@@ -2925,16 +2927,24 @@ export class LibraryLog {
    */
   async refresh(waitSeconds = 0, stopWaiting?: AbortSignal): Promise<boolean> {
     const opening = this.openingPass;
+    let finished: { changed: boolean };
     if (opening) {
       opening.adopt();
       try {
-        return (await opening.result).changed;
+        finished = await opening.result;
       } finally {
         if (this.openingPass === opening) this.openingPass = undefined;
       }
+    } else {
+      if (waitSeconds > 0 && !this.sendKeptNow) await this.awaitChange(waitSeconds, stopWaiting);
+      this.sendKeptNow = false;
+      finished = await this.pass();
     }
-    if (waitSeconds > 0) await this.awaitChange(waitSeconds, stopWaiting);
-    return (await this.pass()).changed;
+    // Said here, and only here: a pass whose caller does not report (`readToHead`) leaves what it changed for the next
+    // refresh that finishes.
+    if (!finished.changed) return false;
+    this.unreported = false;
+    return true;
   }
 
   /**
@@ -2972,17 +2982,28 @@ export class LibraryLog {
     const active = () => opening?.active() ?? true;
     // Null when den-edge couldn't be read (a page, or the rest of them); `unreported` keeps what the pages read did.
     // `missing` when den-edge holds no log for this library: nothing was read to a head.
-    const run = this.writes.then(async (): Promise<'head' | 'missing' | null> => {
+    const ask = () =>
+      this.send(
+        `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
+        { headers: this.headers(), ...(opening ? { signal: opening.signal } : {}) },
+        // An opening response belongs to no foreground authority yet. Observe its protocol minimum only after
+        // the same adoption barrier as its rows, generation and cursor.
+        opening === undefined,
+      );
+    // An opening read starts at once but takes the write lane only once adopted. Holding the lane while it waited for
+    // the foreground refresh kept every write and read of this log behind that refresh, and one queued first (the
+    // device check-in, in the service's ordered request lane) kept the refresh itself from ever being asked for.
+    const askedAt = this.head;
+    let early = opening && ask();
+    void early?.catch(() => {});
+    const body = async (): Promise<'head' | 'missing' | null> => {
       try {
         for (;;) {
           if (!active()) return null;
-          const res = await this.send(
-            `/lib/${this.keys.id}/changes?since=${this.head}&limit=1000`,
-            { headers: this.headers(), ...(opening ? { signal: opening.signal } : {}) },
-            // An opening response belongs to no foreground authority yet. Observe its protocol minimum only after
-            // the same adoption barrier as its rows, generation and cursor.
-            opening === undefined,
-          );
+          // Another pass read past where the early read began: its page would take the cursor back, so ask again. Its
+          // unread body ends with the opening's signal.
+          const res = await (this.head === askedAt && early ? early : ask());
+          early = undefined;
           opening?.response(res);
           // A cached opening read may finish before its retained overlay or foreground owner exists. Do not mutate
           // any visible/log authority from that response until both boundaries accept it. A superseded open cancels
@@ -3132,20 +3153,26 @@ export class LibraryLog {
       } catch {
         return null;
       }
-    });
-    this.writes = run.catch(() => null);
+    };
+    const enter = () => {
+      const slot = this.writes.then(body);
+      this.writes = slot.catch(() => null);
+      return slot;
+    };
+    // Refused or superseded, it enters only to cancel its body (below).
+    const run = opening ? opening.ready.then(enter) : enter();
     const read = await run;
     if (read === null) return { changed: false, reachedHead: false };
     if (opening && !opening.active()) return { changed: false, reachedHead: false };
     // A generation change in this pass is read from zero, but its write-back (`replay`, below) has yet to land: a
     // reader that must act on a current row waits for the next pass (recovery-code §7).
     const reachedHead = read === 'head' && this.generationChanges === generationsBefore;
-    const changed = this.unreported;
-    this.unreported = false;
     this.persist();
     // Rows that arrived may carry actions to project; with none, the projections already stand.
-    if (changed) this.projectJournal();
-    return { changed: (await this.replay(opening?.active)) || changed, reachedHead };
+    if (this.unreported) this.projectJournal();
+    // Kept work that reached den-edge is a change too; `refresh` says so, whichever pass sent it.
+    if (await this.replay(opening?.active)) this.unreported = true;
+    return { changed: this.unreported, reachedHead };
   }
 
   /**
@@ -4790,10 +4817,13 @@ export class LibraryLog {
     return kept;
   }
 
-  /** What the work kept in this browser will do once sent, shown now: projected, and nothing sent. */
+  /**
+   * What the work kept in this browser will do once sent, shown now: projected, and nothing sent. Only kept semantic
+   * ops wait for the deferred policy; rows carry their merge semantics.
+   */
   private async projectKept(): Promise<void> {
     const kept = await this.keptWork();
-    if (kept.length) await ensureDeferredSyncPolicy();
+    if (kept.some((work) => work.kind === 'ops')) await ensureDeferredSyncPolicy();
     for (const work of kept) this.projectWork(work);
   }
 
@@ -4834,9 +4864,15 @@ export class LibraryLog {
     return queued;
   }
 
+  /**
+   * Draw accepted actions and the work kept in this browser, without sending that work: the open answers with what
+   * this browser holds, and the first foreground refresh sends it (`sendKeptNow`), as the cached open does. Native
+   * Den likewise draws its local store at launch and pushes after its first pull.
+   */
   private async restoreJournal(): Promise<LibraryLog> {
     this.projectJournal();
-    await this.replay();
+    await this.projectKept();
+    this.sendKeptNow = this.pendingActions > 0;
     return this;
   }
 
