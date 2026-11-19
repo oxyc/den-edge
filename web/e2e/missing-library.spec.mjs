@@ -24,7 +24,16 @@ test('a library den-edge will not start keeps the edit, hands off to Linked devi
 }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const edge = { missing: true };
+  const log = [];
+  const t0 = Date.now();
+  const stamp = (line) => log.push(`${Date.now() - t0} ${line}`);
+  page.on('console', (m) => stamp(`console.${m.type()} ${m.text()}`));
+  page.on('pageerror', (e) => stamp(`pageerror ${e.message}`));
+  page.on('request', (r) => stamp(`req ${r.method()} ${r.url()}`));
+  page.on('requestfailed', (r) => stamp(`reqfailed ${r.url()} ${r.failure()?.errorText}`));
+  page.on('response', (r) => stamp(`res ${r.status()} ${r.url()}`));
   await routeLibraryEdge(page, edge);
+  edge.trace = log;
   const reads = () => edge.libraryRequests.filter(({ path }) => path.endsWith('/changes')).length;
   // One maintenance pass: going back online schedules one at once, and its read is what den-edge sees of it.
   const maintenancePass = async () => {
@@ -36,10 +45,16 @@ test('a library den-edge will not start keeps the edit, hands off to Linked devi
 
   await openTitle(page, 1500);
   const love = page.getByRole('button', { name: 'Love', exact: true });
+  stamp('CLICK love');
   await love.click();
 
   const alert = page.getByRole('alert');
-  await expect(alert).toContainText(NOTICE);
+  try {
+    await expect(alert).toContainText(NOTICE);
+  } catch (error) {
+    await test.info().attach('capture.txt', { body: log.join('\n') });
+    throw error;
+  }
   await expect(alert).not.toContainText('Waiting to sync');
   // Receipt setup fails for the same reason; its Try again cannot succeed, so it must not stand beside the notice.
   await expect(page.getByText('Saved playback progress couldn’t be updated')).toHaveCount(0);
