@@ -37,6 +37,17 @@ test('a saved language and Automatic subtitles read correctly before deferred po
   ]);
   const subtitles = page.locator('#subtitle-language select');
   const language = page.locator('#interface-language select');
+  // Opening the library also checks this device in: one `set:devices` write, a second after the first reads settle
+  // (RoutedLibrary). When the invite page left before its own check-in, that write lands on this page, and in CI it
+  // was still kept unsent at the reload below (a fourth batch, started 23 ms after it). Any kept work makes the next
+  // Worker replay it before it opens, which needs deferred policy: Settings then never drew. Let the check-in finish
+  // first: this device listed, and nothing waiting to sync.
+  await page.locator('#linked-devices > button.row').click();
+  await expect(page.locator('#linked-devices .device-self')).toBeVisible({ timeout: 30_000 });
+  await page.locator('#diagnostics > button.row').click();
+  await expect(
+    page.locator('#diagnostics-panel dl > div', { hasText: 'Waiting to sync' }).locator('dd'),
+  ).toHaveText('Nothing', { timeout: 30_000 });
   // Swedish, then back to Automatic: the stored row now holds the cleared subtitle keys, which only den-core reads.
   for (const [select, value] of [
     [subtitles, 'sv'],

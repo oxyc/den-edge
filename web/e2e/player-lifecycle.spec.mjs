@@ -43,6 +43,18 @@ async function trackIntervals(page) {
   });
 }
 
+/**
+ * Until the session's media is really playing. `paused` turning false is no sign of it: in a CI failure it read false
+ * 1.4 s before `/direct/session` was answered and 1.8 s before the first playlist was asked for, so the position the
+ * test then set was gone once the stream loaded and played from 0.
+ */
+const mediaPlaying = (page) =>
+  page.waitForFunction(
+    () => (document.querySelector('.player video')?.currentTime ?? 0) > 0,
+    undefined,
+    { timeout: 30_000 },
+  );
+
 async function mockPlayer(
   page,
   {
@@ -135,13 +147,11 @@ test('unknown media duration uses trusted title runtime only for the saved fract
   await page.goto(`${ORIGIN}/test/player.html`);
   await started;
   const video = page.locator('.player video');
-  await page.waitForFunction(
-    () => document.querySelector('.player video')?.paused === false,
-    undefined,
-    { timeout: 30_000 },
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
   );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
@@ -166,13 +176,11 @@ test('unknown episode duration prefers its exact runtime over the series estimat
   });
   await page.goto(`${ORIGIN}/test/player.html?series&episodes`);
   const video = page.locator('.player video');
-  await page.waitForFunction(
-    () => document.querySelector('.player video')?.paused === false,
-    undefined,
-    { timeout: 30_000 },
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
   );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
@@ -221,13 +229,11 @@ test('late runtime from a replaced episode cannot become the active denominator'
   await firstStarted;
   await page.getByTestId('replace-player-episode').evaluate((button) => button.click());
   const video = page.locator('.player video');
-  await page.waitForFunction(
-    () => document.querySelector('.player video')?.paused === false,
-    undefined,
-    { timeout: 30_000 },
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
   );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
@@ -256,13 +262,11 @@ test('unknown media duration without trustworthy runtime remains fail-closed', a
   await mockPlayer(page, { sessionAnswer: { ...session, duration: 0 } });
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
-  await page.waitForFunction(
-    () => document.querySelector('.player video')?.paused === false,
-    undefined,
-    { timeout: 30_000 },
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
   );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
@@ -360,11 +364,7 @@ test('a play writes its position within seconds of starting, and again on resume
     const writes = page.getByTestId('player-progress-writes');
     const written = async () =>
       JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
-    await page.waitForFunction(
-      () => document.querySelector('.player video')?.paused === false,
-      undefined,
-      { timeout: 30_000 },
-    );
+    await mediaPlaying(page);
 
     // The first part-way position goes out a moment after playback starts, not at the one-minute report.
     await expect(writes).toHaveText('1', { timeout: 5_000 });

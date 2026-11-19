@@ -66,9 +66,11 @@ class MemoryVault implements Vault {
 
 class FactVault extends MemoryVault {
   async page(prefix: string, after: string | undefined, limit: number) {
+    // IndexedDB orders keys by code unit, as `after` is compared here; `localeCompare` would order them by collation
+    // and cost about a tenth of a 2,300-row import test.
     return [...this.values]
       .filter(([key]) => key.startsWith(prefix) && (after === undefined || key > after))
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .slice(0, limit);
   }
   async commit(changes: readonly VaultChange[]) {
