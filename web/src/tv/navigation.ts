@@ -42,6 +42,8 @@ const DETAIL_ENTRY =
   '[data-route-page][data-active="true"] .hero-actions .main-action, ' +
   '[data-route-page][data-active="true"] .hero-actions .pill';
 
+const SEARCH_INPUT = '[data-route-page][data-active="true"] .tv-search-input';
+
 function focusIdentity(element: HTMLElement): string | undefined {
   if (element.id) return `#${CSS.escape(element.id)}`;
   const key = element.dataset.tvFocusKey;
@@ -227,9 +229,11 @@ export function installTVNavigation(): () => void {
   const focusSearchDuringActivation = (event: Event) => {
     if (!searchButton(event.target)) return;
     flushSync();
-    document
-      .querySelector<HTMLInputElement>('[data-route-page][data-active="true"] .tv-search-input')
-      ?.focus({ preventScroll: true });
+    const field = document.querySelector<HTMLInputElement>(SEARCH_INPUT);
+    if (field) field.focus({ preventScroll: true });
+    // Before the library has mounted, the shell holds this Search request and sends it once a Router listens
+    // (`App.svelte`). Teach the route change that follows to focus the field when its page arrives.
+    else rememberAt(routeKey('/search'), SEARCH_INPUT);
   };
 
   const restoreSoon = (selector?: string) => {

@@ -89,13 +89,15 @@
   $effect(() => syncIdentities());
 
   // The bar is the shell's and is up before the library loads, so a page it asks for in the meantime has no Router to
-  // hear it. The last such request is held and sent again once a Router announces itself.
+  // hear it. The last such request is held, out of every other listener's sight (the window's capture runs first),
+  // and sent whole once a Router announces itself.
   let routing = false;
   let held: { path: string; replace?: boolean } | undefined;
   onMount(() => {
     const hold = (event: Event) => {
-      if (!routing && (links.current || links.browsing))
-        held = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+      if (routing || !(links.current || links.browsing)) return;
+      held = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+      event.stopImmediatePropagation();
     };
     const release = () => {
       routing = true;
@@ -103,10 +105,10 @@
       held = undefined;
       if (request) navigate(request.path, request.replace);
     };
-    document.addEventListener('den:navigate', hold);
+    window.addEventListener('den:navigate', hold, { capture: true });
     document.addEventListener('den:routing', release);
     return () => {
-      document.removeEventListener('den:navigate', hold);
+      window.removeEventListener('den:navigate', hold, { capture: true });
       document.removeEventListener('den:routing', release);
     };
   });
