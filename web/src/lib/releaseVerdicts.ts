@@ -53,39 +53,6 @@ export function autoSwitchedNotice(
   return `${fromLabel} ${why} — playing ${toLabel} instead.`;
 }
 
-/**
- * What the session restarted once the link is measured names, if anything: the release the viewer chose, and never
- * one den-remux picked before it knew the link. A named release is kept however far it is over the link, so naming
- * den-remux's own first pick would keep a 4K copy on a link that carries a quarter of it; named nothing, it picks again
- * under the measured limit.
- */
-export function releaseAfterMeasure(chosen: string | undefined): { filename: string } | undefined {
-  return chosen ? { filename: chosen } : undefined;
-}
-
-/**
- * den-remux's conversion presets (`job::preset_for`): 1080p at 8 Mbit/s where the link carries that and 384 kbit/s
- * of audio, else 720p. A session started before the link was known was converted at 1080p.
- */
-const PRESET_1080_BITRATE = 8_000_000;
-const PRESET_AUDIO_BITRATE = 384_000;
-
-/**
- * Whether a session started before the link was measured has to be started again under `maxBitrate`: only when what
- * den-remux chose needs more than it — a copy by its average bitrate, size over duration, as den-remux's own `over`
- * judges it, and a conversion when the link wouldn't take its 1080p preset. A session that doesn't say its size or
- * duration can't be judged, and is started again as it always was.
- */
-export function restartAfterMeasure(
-  session: Pick<Session, 'duration' | 'release' | 'video'>,
-  maxBitrate: number,
-): boolean {
-  if (session.video?.transcoded) return maxBitrate < PRESET_1080_BITRATE + PRESET_AUDIO_BITRATE;
-  const size = session.release.size;
-  if (!(size > 0) || !(session.duration > 0)) return true;
-  return (size * 8) / session.duration > maxBitrate;
-}
-
 /** The releases this browser can't play, by filename, each with den-remux's reason (empty when it gave none). */
 export function unplayable(releases: readonly Release[] | null | undefined): Map<string, string> {
   const refused = new Map<string, string>();

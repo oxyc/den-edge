@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge, routeGuestEdge } from './guest-edge.mjs';
+import { recordFocusTrail, withPageState } from './tv-focus-diagnostics.mjs';
 
 const soak = process.env.DEN_TV_SOAK === '1';
 const soakMinutes = Number(process.env.DEN_TV_SOAK_MINUTES ?? 30);
@@ -55,6 +56,7 @@ test(
     if (soak) test.setTimeout(soakMinutes * 60_000 + 120_000);
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    await recordFocusTrail(page);
     await routeGuestEdge(page, newEdge());
     await page.route('**/atlas/manifest.json', (route) =>
       route.fulfill({
@@ -224,7 +226,16 @@ test(
     await expect(
       page.getByRole('navigation', { name: 'Main navigation' }).locator(':focus'),
     ).toHaveCount(1);
-    await more.focus();
+    // Menu focus now activates its page. Return through a real directional move before continuing this Home soak;
+    // programmatic focus alone deliberately does not impersonate remote intent.
+    const home = page.getByRole('link', { name: 'Home', exact: true });
+    await search.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(home).toBeFocused();
+    await expect(page).toHaveURL(/\/$/);
+    await withPageState(page, '[data-route-page][data-active="true"] .billboard', () =>
+      more.focus(),
+    );
     await page.screenshot({ path: info.outputPath('tv-home.png') });
     const baselineWorkers = page.workers().length;
     const heroPagingMs = [];

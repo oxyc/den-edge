@@ -53,12 +53,14 @@ async function remoteTo(page, locator, keys, rounds = 12) {
       if (await focusedInside(locator)) return;
       // Match a physical remote's repeat cadence and give route/row updates a rendering frame.
       await page.waitForTimeout(80);
+      // Label text alone cannot tell a navigation item from page content scrolled beneath the fixed bar.
       trail.push(
-        await page.evaluate(
-          () =>
-            document.activeElement?.getAttribute('aria-label') ??
-            document.activeElement?.textContent?.trim(),
-        ),
+        await page.evaluate(() => {
+          const active = document.activeElement;
+          const label = active?.getAttribute('aria-label') ?? active?.textContent?.trim();
+          const place = active?.closest('.tv-bar nav') ? 'nav' : 'outside nav';
+          return `${label} [${place}, scrollY ${Math.round(scrollY)}]`;
+        }),
       );
       if (await focusedInside(locator)) return;
     }
@@ -242,6 +244,60 @@ test('a touch preview opens Search and focuses its editor within the activating 
   } finally {
     await context.close();
   }
+});
+
+test('LG touch APIs do not parse Search before TV intent', async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 },
+    hasTouch: true,
+    userAgent:
+      'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.270 Safari/537.36 WebAppManager',
+  });
+  const page = await context.newPage();
+  try {
+    await page.addInitScript(() => {
+      window.__tvSearchPreloaded = false;
+      document.addEventListener('den:tv-search-preloaded', () => {
+        window.__tvSearchPreloaded = true;
+      });
+    });
+    await setup(page);
+    await browse(page);
+    expect(await page.evaluate(() => window.__tvSearchPreloaded)).toBe(false);
+
+    await page.getByRole('button', { name: 'Search', exact: true }).tap();
+    await expect(page).toHaveURL(/\/search/);
+    await expect.poll(() => page.evaluate(() => window.__tvSearchPreloaded)).toBe(true);
+    await expect(page.locator('section.search').getByRole('searchbox')).toBeFocused();
+  } finally {
+    await context.close();
+  }
+});
+
+test('directional menu focus switches TV pages without Select', async ({ page }) => {
+  await setup(page);
+  await browse(page);
+
+  const search = page.getByRole('button', { name: 'Search', exact: true });
+  await remoteTo(page, search, ['ArrowUp', 'ArrowLeft']);
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/search`);
+
+  await page.keyboard.press('ArrowRight');
+  const home = page.getByRole('link', { name: 'Home', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/`);
+  await expect(home).toBeFocused();
+
+  await page.keyboard.press('ArrowRight');
+  const movies = page.getByRole('link', { name: 'Movies', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/movies`);
+  await expect(movies).toHaveAttribute('aria-current', 'page');
+  await expect(movies).toBeFocused();
+
+  await page.keyboard.press('ArrowRight');
+  const series = page.getByRole('link', { name: 'Series', exact: true });
+  await expect(page).toHaveURL(`${E2E_ORIGIN}/series`);
+  await expect(series).toHaveAttribute('aria-current', 'page');
+  await expect(series).toBeFocused();
 });
 
 test('TV Search opens when the legacy browser has no userActivation API', async ({ page }) => {
@@ -528,6 +584,35 @@ test('remote opens Settings and Back returns to the previously focused navigatio
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/$/);
   await expect(settings).toBeFocused({ timeout: 5_000 });
+});
+
+// den-edge#1376: with the page scrolled, content sits geometrically above the fixed bar. Up from a bar item must not
+// hand focus to it: that ends the menu focus sweep, so the next destination is pushed instead of replacing the
+// sweep's entries and Back lands on an intermediate tab.
+test('Up from a navigation item stays in the bar while the page is scrolled', async ({ page }) => {
+  await setup(page);
+  await browse(page);
+  await page.evaluate(() => {
+    const spacer = document.createElement('div');
+    spacer.style.height = '5000px';
+    // A control the scrolled page has carried up beneath the fixed bar, above every navigation item.
+    const hidden = document.createElement('button');
+    hidden.id = 'under-the-bar';
+    hidden.textContent = 'Scrolled content';
+    hidden.style.cssText = 'position:absolute;top:300px;left:200px;width:200px;height:60px';
+    spacer.append(hidden);
+    document.body.append(spacer);
+    scrollTo({ top: 600, behavior: 'instant' });
+  });
+  await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(8);
+
+  const settings = page.getByRole('link', { name: 'Settings', exact: true });
+  await settings.focus();
+  await page.keyboard.press('ArrowUp');
+  await page.waitForTimeout(250);
+  const stayed = await page.evaluate(() => !!document.activeElement?.closest('.tv-bar nav'));
+  expect(stayed, 'Up from the bar moved focus out of it').toBe(true);
+  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(8);
 });
 
 test('directional focus remains inside a native modal until remote Back closes it', async ({

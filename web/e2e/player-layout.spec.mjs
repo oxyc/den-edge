@@ -10,6 +10,10 @@ import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 
+// Each case launches its own browser and shares nothing with the others. Run in parallel, they spread over the
+// workers and CI's shards instead of holding one worker for the whole file, the suite's longest by far.
+test.describe.configure({ mode: 'parallel' });
+
 const hls = new URL('./media/hls/', import.meta.url);
 const release = {
   label: 'The.Movie.2001.2160p.WEB-DL.DV.H.265-FLUX',

@@ -56,7 +56,22 @@ const episodes = (n) => ({
 async function guest(page) {
   const seasons = [];
   const errors = [];
-  page.on('pageerror', (error) => errors.push(error.message));
+  // The document a navigation is leaving can still start work until the next one commits. Linux WebKit refuses a
+  // fetch started then and logs "Fetch API cannot load <url> due to access control checks.", which Playwright turns
+  // into a page error. In CI the outgoing page's deferred-policy fetch started 25 ms after `goto` began and failed
+  // 2 ms later, before the next document booted. Only that diagnostic, and only while the main frame is navigating
+  // away, is set aside: every error from the document on screen still fails the test.
+  let leaving = false;
+  page.on('request', (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) leaving = true;
+  });
+  page.on('framenavigated', (frame) => {
+    if (frame === page.mainFrame()) leaving = false;
+  });
+  page.on('pageerror', (error) => {
+    if (leaving && error.message.endsWith(' due to access control checks.')) return;
+    errors.push(error.message);
+  });
   await routeGuestEdge(page, newEdge());
   await routeTmdb(page, (route) => {
     const path = new URL(route.request().url()).pathname;

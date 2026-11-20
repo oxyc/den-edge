@@ -525,8 +525,8 @@ export function estimateToLink(
 
 /**
  * The `maxBitrate` a session through the public relay asks with: the one this player already measured, else the one
- * this browser remembers. Undefined only with neither — and only then is the session's link measured inside it and the
- * session perhaps replaced (`restartAfterMeasure`).
+ * this browser remembers. Undefined only with neither — and only then is the session's link measured inside it, for the
+ * next session to ask with; the one playing is never replaced for it.
  */
 export function relayLimit(
   route: string,

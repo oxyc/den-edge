@@ -1908,6 +1908,57 @@ describe('LibraryLogAuthority', () => {
     );
   });
 
+  it('queues an online heartbeat without probing an exact instance refused at start', async () => {
+    await ensureSyncPolicy();
+    const vault = memoryVault(true);
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    let posts = 0;
+    const fetchImpl: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        posts++;
+        return new Response('{"error":"new_libraries_closed"}', {
+          status: 403,
+          headers: protocol,
+        });
+      }
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    const log = (await LibraryLog.open(KEY, fetchImpl, undefined, vault))!;
+    const clock = await openClockStore(vault, {
+      key: 'refused-heartbeat-clock',
+      createDevice: () => '0123456789abcdef',
+    });
+    const opened = authority(log, clock, 'online', fetchImpl, undefined, {
+      libraryKey: KEY,
+      vault,
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        opened.command({ kind: 'watchlist.add', title: movie }, 'refused-title'),
+      ).resolves.toMatchObject({ outcome: 'applied' });
+      await vi.waitFor(() => expect(log.refused).toBe(true));
+      const refusedPosts = posts;
+
+      await expect(
+        opened.command({ kind: 'device.heartbeat', name: 'Browser' }, 'queued-heartbeat'),
+      ).resolves.toMatchObject({
+        outcome: 'applied',
+        delivery: 'queued',
+        affected: [{ kind: 'devices' }, { kind: 'connections' }],
+      });
+      expect(posts).toBe(refusedPosts);
+      expect(log.settings('devices')?.values['0123456789abcdef.name']?.value).toEqual({
+        string: 'Browser',
+      });
+      expect(log.pendingActions).toBe(2);
+    } finally {
+      log.close();
+      warn.mockRestore();
+    }
+  });
+
   it('tells the page how an edit answered before it was sent came to end', async () => {
     const { log, authority } = await localAuthority();
     const events: unknown[] = [];
@@ -2167,7 +2218,14 @@ describe('LibraryLogAuthority', () => {
     await reopened.close();
   });
 
-  it('joins managed movie and episode receipts from the Edge callback through durable service readback without assistant consent', async () => {
+  // Opt in like log.edge.test.ts: this runs the real Rust callback/drain through `cargo test`, which compiles the
+  // whole den-edge test binary first when it is not built (~275 s cold, far past this test's budget). CI builds it
+  // before `npm test` and sets DEN_EDGE_REAL_RECOVERY=1.
+  // Run: cargo test --locked --no-run && DEN_EDGE_REAL_RECOVERY=1 npm test -- src/lib/libraryLogAuthority.test.ts
+  it('joins managed movie and episode receipts from the Edge callback through durable service readback without assistant consent', async ({
+    skip,
+  }) => {
+    skip(process.env.DEN_EDGE_REAL_RECOVERY !== '1', 'opt-in: DEN_EDGE_REAL_RECOVERY=1');
     let published: string | null = null;
     const fetchImpl: typeof fetch = async (input, init) => {
       expect(String(input)).toBe('/assistant/dropbox');
@@ -2200,7 +2258,15 @@ describe('LibraryLogAuthority', () => {
     const now = Date.now();
     const edge = spawnSync(
       'cargo',
-      ['test', 'joined_production_contract_edge_bridge', '--', '--ignored'],
+      [
+        'test',
+        '--locked',
+        '--bin',
+        'den-edge',
+        'joined_production_contract_edge_bridge',
+        '--',
+        '--ignored',
+      ],
       {
         cwd: repo,
         env: {

@@ -27,7 +27,7 @@ Fire TV product name.
    TV, enable **Install unknown apps** for Downloader in Developer Options. Menu names vary slightly by release.
 2. In Downloader, enter the current versioned GitHub URL directly:
 
-   `https://github.com/oxyc/den-edge/releases/download/tv-android-v1.0.1/den-tv-android.apk`
+   `https://github.com/oxyc/den-edge/releases/download/tv-android-v1.0.2/den-tv-android.apk`
 
 3. Open the completed download, choose **Install**, then launch **Den** from the TV's apps row. Android may offer to
    delete the downloaded installer afterward; doing so does not remove the installed app.
@@ -42,7 +42,7 @@ For a TV that exposes the traditional network-debugging port:
 
 ```sh
 cd ~/Downloads
-curl -fL https://github.com/oxyc/den-edge/releases/download/tv-android-v1.0.1/den-tv-android.apk \
+curl -fL https://github.com/oxyc/den-edge/releases/download/tv-android-v1.0.2/den-tv-android.apk \
   -o den-tv-android.apk
 adb connect TV_IP:5555
 adb install -r den-tv-android.apk
@@ -92,8 +92,8 @@ You only need to repeat installation if the small launcher itself changes or LG 
 2. Install the appropriate desktop build—or the `universal.apk` on Android—from the
    [latest webOS Dev Manager release](https://github.com/webosbrew/dev-manager-desktop/releases/latest). It is a
    community GUI installer and does not require LG's SDK or IDE.
-3. Download [`den-tv-webos.ipk`](https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.1/den-tv-webos.ipk)
-   directly from Den's current versioned LG release.
+3. Download [`den-tv-webos.ipk`](https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.3/den-tv-webos.ipk)
+   directly from Den's newest LG release.
 4. In webOS Dev Manager, add a Developer Mode device using the TV's IP and passphrase. Open its **Apps** view, choose
    **Install**, select `den-tv-webos.ipk`, and launch Den when installation finishes.
 
@@ -105,7 +105,7 @@ You only need to repeat installation if the small launcher itself changes or LG 
 2. Open the `.dmg`, drag **webOS Dev Manager** to **Applications**, and launch it. If macOS blocks the first launch,
    Control-click the app in Finder, choose **Open**, and confirm. Allow Local Network access when macOS asks; if the
    TV cannot be found, check **System Settings › Privacy & Security › Local Network**.
-3. Download [`den-tv-webos.ipk`](https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.1/den-tv-webos.ipk); it will
+3. Download [`den-tv-webos.ipk`](https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.3/den-tv-webos.ipk); it will
    normally be in the Mac's **Downloads** folder.
 4. With **Developer Mode** and **Key Server** enabled on the TV, open webOS Dev Manager and choose **Add Device**.
    Select the Developer Mode setup, enter any friendly name plus the TV's IP address and six-character passphrase,
@@ -133,7 +133,7 @@ Install
 
 ```sh
 cd ~/Downloads
-curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.1/den-tv-webos.tar.gz
+curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-webos-v1.0.3/den-tv-webos.tar.gz
 tar -xzf den-tv-webos.tar.gz
 ./den-tv-webos/install.sh TV_IP
 ```
@@ -180,10 +180,10 @@ package.
    and TV must be on the same LAN.
 2. Download the widget for the TV's model year:
 
-   - **2024 or newer (Tizen 8+):** [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen.wgt)
+   - **2024 or newer (Tizen 8+):** [`den-tv-tizen.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.2.6/den-tv-tizen.wgt)
      (the same file is also published explicitly as `den-tv-tizen8.wgt`).
-   - **2022–2023 (Tizen 6.5–7):** [`den-tv-tizen6.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen6.5.wgt).
-   - **2020–2021 (Tizen 5.5–6.0):** [`den-tv-tizen5.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen5.5.wgt).
+   - **2022–2023 (Tizen 6.5–7):** [`den-tv-tizen6.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.2.6/den-tv-tizen6.5.wgt).
+   - **2020–2021 (Tizen 5.5–6.0):** [`den-tv-tizen5.5.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.2.6/den-tv-tizen5.5.wgt).
 
    The model year matters, not the purchase year. Samsung identifies it in the TV's support/about screen and model
    number.
@@ -203,7 +203,8 @@ The 2020–2021 widget is compiled separately for Chromium 69, uses classic rath
 TV-only runtime polyfills. It does not add legacy code to Den Web or the newer TV packages. It remains unqualified
 until its pairing, library persistence, navigation and AVPlay journeys pass on real 2020/2021 hardware. Den does not
 support 2018–2019 models. For 2017 models (Tizen 3), each Samsung release carries
-`den-tv-tizen3-experimental.wgt`: a non-module Chromium 47 build with a JavaScript policy core and old-engine CSS
+[`den-tv-tizen3-experimental.wgt`](https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.2.6/den-tv-tizen3-experimental.wgt):
+a non-module Chromium 47 build with a JavaScript policy core and old-engine CSS
 fallbacks, covered by packaged E2E but not yet tested on a real TV. Install it the same way as the other widgets; it
 is published so it can be tested on real hardware (#728), and is not supported until pairing, persistence,
 navigation and AVPlay pass there.
@@ -218,7 +219,7 @@ Download the unsigned archive and pass the profile name and the serial shown by 
 
 ```sh
 cd ~/Downloads
-curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.1.0/den-tv-tizen-unsigned.tar.gz
+curl -fLO https://github.com/oxyc/den-edge/releases/download/tv-samsung-v2.2.6/den-tv-tizen-unsigned.tar.gz
 tar -xzf den-tv-tizen-unsigned.tar.gz
 cd den-tv-tizen
 ./install.sh DenSamsung TV_SERIAL

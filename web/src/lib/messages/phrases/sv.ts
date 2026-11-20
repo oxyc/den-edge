@@ -144,7 +144,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Back: 'Tillbaka',
   'Back 10 seconds': 'Tillbaka 10 sekunder',
   'Back or forward 10 seconds': 'Tillbaka eller framåt 10 sekunder',
-  'back to the Owner': 'tillbaka till ägaren',
   Bingeable: 'Bingeable',
   Biopic: 'Biopic',
   'Blocked by parental controls': 'Blockerad av föräldrakontroll',
@@ -172,6 +171,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Chromecast with Google TV (4K)': 'Chromecast med Google TV (4K)',
   'Chromecast with Google TV (HD)': 'Chromecast med Google TV (HD)',
   'Connecting to the Chromecast…': 'Ansluter till Chromecast…',
+  'Confirm Owner PIN': 'Bekräfta ägarens PIN-kod',
   'Couldn’t connect to the Chromecast. Press Cast to try again.':
     'Det gick inte att ansluta till Chromecast. Tryck på Casta för att försöka igen.',
   'Den Cast player': 'Dens Cast-spelare',
@@ -640,7 +640,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Narco Series': 'Narco-serien',
   'Natural Disasters': 'Naturkatastrofer',
   Neck: 'Hals',
-  'Needed to switch from': 'Behövde byta från',
   'needs a download before it’s ready to play here.':
     'behöver en nedladdning innan den är redo att spelas här.',
   'Neo-Noir': 'Neo-Noir',
@@ -648,6 +647,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Netflix:': 'Netflix:',
   'New invite': 'Ny inbjudan',
   'New link': 'Ny länk',
+  'New Owner PIN': 'Ny ägar-PIN',
   'New name for': 'Nytt namn för',
   'New Releases': 'Nya släpp',
   News: 'Nyheter',
@@ -791,6 +791,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Prejudice: 'Fördomar',
   'Preview PIN:': 'Förhandsgranska PIN:',
   'Prime Video viewing history': 'Prime Video visningshistorik',
+  profile: 'profil',
   Profile: 'Profil',
   'Profile libraries need to rotate together. Key reset will be available after Den finishes that update.':
     'Profilbibliotek måste rotera tillsammans. Nyckelåterställning kommer att vara tillgänglig efter att Den har avslutat den uppdateringen.',
@@ -988,6 +989,10 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'simkl.com': 'simkl.com',
   'Skip back 10 seconds': 'Hoppa tillbaka 10 sekunder',
   'Skip forward 10 seconds': 'Hoppa framåt 10 sekunder',
+  'Skip Credits': 'Hoppa över eftertexter',
+  'Skip Intro': 'Hoppa över intro',
+  'Skip Preview': 'Hoppa över förhandstitt',
+  'Skip Recap': 'Hoppa över sammanfattning',
   Slasher: 'Slasher',
   'Slow-Burn and Bleak': 'Slow-Burn och Bleak',
   'Slow-Burn and Melancholy': 'Slow-Burn och Melankoli',
@@ -1366,6 +1371,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Det gick inte att återkalla behörigheten. Försök igen om en stund.',
   'Couldn’t disconnect it. Try again in a moment.':
     'Det gick inte att koppla från. Försök igen om en stund.',
+  'Saved, but not shown.': 'Sparat, visas inte.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Länka webbläsaren till biblioteket eller acceptera en inbjudan för att se dess assistenter.',
   'Retry cleanup': 'Försök rensa igen',
@@ -1414,4 +1420,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Namnbyte, borttagning och skapande av vuxenprofiler är inte tillgängliga på den här TV:n. De kommer att hanteras i Den på webben.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Den här TV:n är endast för visning. Profiladministration är inte tillgänglig på den här TV:n.',
+  'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.':
+    'Den här enhetens bibliotek finns inte på Den. Dina ändringar sparas här – gå med i hushållets bibliotek under Inställningar › Länkade enheter.',
+  'Open Linked devices': 'Öppna Länkade enheter',
 };

@@ -241,18 +241,44 @@ async fn detected(
             miss.headers_mut().insert(header::CACHE_CONTROL, value);
         }
     }
+    // Said only where no scan will change this answer, so a player stops asking again (`web/src/lib/skipdb.ts`).
+    // A scan pending and one just asked for stay alike: on this public route, telling them apart would say that
+    // somebody is watching the episode right now.
+    let settled = match tag {
+        "none" => Some("none"),
+        "unknown" if state.segments_key.is_some() => None,
+        "unknown" | "unavailable" => Some("unavailable"),
+        _ => None,
+    };
+    if let Some(settled) = settled {
+        miss.headers_mut().insert("x-den-skipdb", HeaderValue::from_static(settled));
+    }
     miss.extensions_mut().insert(crate::handler::SrcTag(tag));
     miss
 }
 
+/// What den-remux takes as `X-Den-Segments-Read`: HMAC-SHA256 of `SEGMENTS_KEY` under the label
+/// `den-remux/segments-read`, in lowercase hex. Which episodes have detected segments says what this household
+/// watches, so remux may answer reads only for this credential; derived rather than the key itself, so a read
+/// seen on the way cannot ask for a scan.
+fn segments_read_token(key: &str) -> String {
+    use hmac::{KeyInit, Mac};
+    let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key.as_bytes())
+        .expect("HMAC takes a key of any length");
+    mac.update(b"den-remux/segments-read");
+    crate::hex(&mac.finalize().into_bytes())
+}
+
 async fn remux_segments(state: &AppState, url: &str, rid: &str) -> Remux {
-    let Ok(out) = axum::http::Request::builder()
+    let mut out = axum::http::Request::builder()
         .method(Method::GET)
         .uri(url)
         .header(header::ACCEPT, "application/json")
-        .header("x-request-id", rid)
-        .body(Full::new(Bytes::new()))
-    else {
+        .header("x-request-id", rid);
+    if let Some(key) = state.segments_key.as_deref() {
+        out = out.header("x-den-segments-read", segments_read_token(key));
+    }
+    let Ok(out) = out.body(Full::new(Bytes::new())) else {
         return Remux::Unavailable;
     };
     match crate::tmdb::exchange(&state.relay_client, out, REMUX_ANSWER_BYTES, REMUX_TIMEOUT, "remux segments")
@@ -263,6 +289,8 @@ async fn remux_segments(state: &AppState, url: &str, rid: &str) -> Remux {
         }
         Ok((StatusCode::ACCEPTED, _, _)) => Remux::Pending,
         Ok((StatusCode::NOT_FOUND, _, _)) => Remux::Unknown,
+        // A 401 is remux refusing the read (no key here, or not the one remux has): it says nothing about the
+        // episode, so it is no reason to ask for a scan.
         _ => Remux::Unavailable,
     }
 }
@@ -838,12 +866,13 @@ mod tests {
         assert!(cache.join("tt0000303-s2e1.json").exists());
     }
 
-    /// A stand-in den-remux: answers `/remux/segments/…` with whatever `answer` holds and records each scan
-    /// request as (key header, body).
+    /// A stand-in den-remux: answers `/remux/segments/…` with whatever `answer` holds, records each read's
+    /// `x-den-segments-read` and each scan request as (key header, body).
     struct StandIn {
         base: String,
         answer: Shared<(StatusCode, &'static str)>,
         gets: Shared<u32>,
+        reads: Shared<Vec<Option<String>>>,
         scans: Shared<Vec<(Option<String>, String)>>,
     }
 
@@ -852,10 +881,11 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let answer = std::sync::Arc::new(std::sync::Mutex::new(answer));
         let gets = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let scans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (a, g, s) = (answer.clone(), gets.clone(), scans.clone());
+        let (a, g, r, s) = (answer.clone(), gets.clone(), reads.clone(), scans.clone());
         let app = axum::Router::new().fallback(move |req: Request| {
-            let (a, g, s) = (a.clone(), g.clone(), s.clone());
+            let (a, g, r, s) = (a.clone(), g.clone(), r.clone(), s.clone());
             async move {
                 if req.method() == Method::POST {
                     assert_eq!(req.uri().path(), "/remux/segments/scan");
@@ -866,17 +896,20 @@ mod tests {
                 }
                 assert!(req.uri().path().starts_with("/remux/segments/tt"), "{}", req.uri());
                 *crate::lock(&g) += 1;
+                let read = req.headers().get("x-den-segments-read").map(|v| v.to_str().unwrap().to_owned());
+                crate::lock(&r).push(read);
                 let (status, body) = *crate::lock(&a);
                 (status, body).into_response()
             }
         });
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        StandIn { base, answer, gets, scans }
+        StandIn { base, answer, gets, reads, scans }
     }
 
     use axum::response::IntoResponse;
 
-    const DETECTED: &str = r#"{"duration":2700.0,"intro":{"start":60.0,"end":150.5},"credits":{"start":2600.0,"end":2700.0},"method":"fingerprint","scanned_at":1}"#;
+    const DETECTED: &str = r#"{"duration":2700.0,"intro":{"start":60.0,"end":150.5},"credits":{"start":2600.0,"end":2700.0},"method":"fingerprint-v3"}"#;
+    const REFUSED: (StatusCode, &str) = (StatusCode::UNAUTHORIZED, "{\"status\":\"unauthorized\"}");
     const UNKNOWN: (StatusCode, &str) = (StatusCode::NOT_FOUND, "{\"status\":\"unknown\"}");
     const PENDING: (StatusCode, &str) = (StatusCode::ACCEPTED, "{\"status\":\"pending\"}");
 
@@ -1000,6 +1033,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
         assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "unknown");
+        assert!(resp.headers().get("x-den-skipdb").is_none(), "a scan may still answer this");
         scans(&remux, 1).await;
         let (key, body) = crate::lock(&remux.scans)[0].clone();
         assert_eq!(key.as_deref(), Some("segkey"));
@@ -1031,15 +1065,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
         assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "pending");
+        // Pending reads exactly like a scan just asked for: nothing says somebody is watching it right now.
+        assert!(resp.headers().get("x-den-skipdb").is_none());
         scans(&remux, 0).await;
 
-        // No key: remux is read, never asked to scan.
+        // No key: remux is read, never asked to scan, so the miss says none is coming.
         *crate::lock(&remux.answer) = UNKNOWN;
         let keyless = harness(&remux, None);
         let (answers, _) = skipdb("tt0000505");
         *crate::lock(&answers) = (StatusCode::OK, NOTHING);
         let resp = keyless.send("GET", "/skipdb/tt0000505/1/1", None, &[]).await;
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+        assert_eq!(resp.headers()["x-den-skipdb"], "unavailable");
+        scans(&remux, 0).await;
+
+        // A scan pending elsewhere (an Apple TV asks remux itself) may still land, key or not.
+        *crate::lock(&remux.answer) = PENDING;
+        let resp = keyless.send("GET", "/skipdb/tt0000505/1/2", None, &[]).await;
+        assert!(resp.headers().get("x-den-skipdb").is_none());
+    }
+
+    /// Scanned with nothing found: no scan will change it, and the miss says so.
+    #[tokio::test]
+    async fn a_scan_that_found_nothing_is_settled() {
+        let remux = remux((StatusCode::OK, r#"{"duration":2700.0,"intro":null,"credits":null}"#)).await;
+        let h = harness(&remux, Some("k"));
+        let (answers, _) = skipdb("tt0000511");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        let resp = h.send("GET", "/skipdb/tt0000511/1/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "none");
+        assert_eq!(resp.headers()["x-den-skipdb"], "none");
         scans(&remux, 0).await;
     }
 
@@ -1054,6 +1110,62 @@ mod tests {
         let resp = h.send("GET", "/skipdb/tt0000506/1/1", None, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=3600");
+    }
+
+    /// den-remux's own tests pin the same vector, so the credential the two derive cannot drift apart unnoticed.
+    #[test]
+    fn the_read_credential_is_the_one_remux_derives() {
+        assert_eq!(
+            segments_read_token("test-segments-key"),
+            "c656ffe8a477c793b0dd5308f2aaf68aab202c2773a3c587d5fc42c478b205c3"
+        );
+    }
+
+    /// Every read of remux carries the read credential, never the key itself; without a key there is none to send.
+    #[tokio::test]
+    async fn every_read_of_remux_carries_the_read_credential() {
+        let remux = remux((StatusCode::OK, DETECTED)).await;
+        let h = harness(&remux, Some("test-segments-key"));
+        let (answers, _) = skipdb("tt0000508");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        for e in 1..=2 {
+            let resp = h.send("GET", &format!("/skipdb/tt0000508/1/{e}?duration=2700"), None, &[]).await;
+            assert_eq!(resp.headers()["x-den-skipdb"], "detected");
+        }
+        let token = segments_read_token("test-segments-key");
+        assert_eq!(*crate::lock(&remux.reads), vec![Some(token.clone()), Some(token)]);
+
+        let keyless = harness(&remux, None);
+        let (answers, _) = skipdb("tt0000509");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        keyless.send("GET", "/skipdb/tt0000509/1/1", None, &[]).await;
+        assert_eq!(crate::lock(&remux.reads).last(), Some(&None));
+    }
+
+    /// Remux refusing the read (this box's key is not remux's, mid-rotation or mid-rollout) is "unavailable": the
+    /// short miss, and no scan asked for however often it is asked — a refusal says nothing about the episode. Once
+    /// remux answers again, so does this.
+    #[tokio::test]
+    async fn a_refused_read_is_unavailable_and_asks_for_no_scan() {
+        let remux = remux(REFUSED).await;
+        let h = harness(&remux, Some("not-remux-s-key"));
+        let (answers, _) = skipdb("tt0000510");
+        *crate::lock(&answers) = (StatusCode::OK, NOTHING);
+        for _ in 0..3 {
+            let resp = h.send("GET", "/skipdb/tt0000510/1/1?duration=2700", None, &[]).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], "public, max-age=30");
+            assert_eq!(resp.extensions().get::<crate::handler::SrcTag>().unwrap().0, "unavailable");
+            assert_eq!(resp.headers()["x-den-skipdb"], "unavailable");
+        }
+        assert_eq!(*crate::lock(&remux.gets), 3);
+        scans(&remux, 0).await;
+
+        *crate::lock(&remux.answer) = (StatusCode::OK, DETECTED);
+        let resp = h.send("GET", "/skipdb/tt0000510/1/1?duration=2700", None, &[]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["x-den-skipdb"], "detected");
+        scans(&remux, 0).await;
     }
 
     /// This box's own limit on asking SkipDB is not a reason to leave an episode without segments remux has.

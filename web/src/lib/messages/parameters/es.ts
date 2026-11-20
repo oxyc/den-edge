@@ -15,6 +15,8 @@ export const parameters = {
   'actions.openDetailsFor': 'Abrir detalles de {value}',
   'actions.switchProfileCurrent': 'Cambiar perfil, actual: {value}',
   'actions.use': 'Usar {value}',
+  'profile.ownerPinNeeded': 'Necesario para cambiar de {value} al perfil de propietario',
+  'profile.ageAndUnratedHidden': '{age} años o menos · títulos sin clasificar ocultos',
   'actions.browse': 'Explorar {value}',
   'actions.playTitle': 'Reproducir {value}',
   'actions.removeContinueWatching': 'Quitar {value} de Seguir viendo',
@@ -51,6 +53,8 @@ export const parameters = {
   'player.subtitles': 'Subtítulos: {subtitles}',
   'player.subtitleLoadFailed':
     'No se pudieron cargar los subtítulos {subtitle}. Tus subtítulos actuales no han cambiado.',
+  'player.subtitleNeedsRemux':
+    'Los subtítulos {subtitle} necesitan Den Remux en este reproductor. TorBox sigue reproduciendo hasta que cambies.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} segundos',
   'player.adjustSubtitleTiming': 'Ajustar sincronización de subtítulos ({offset})',
@@ -64,6 +68,9 @@ export const parameters = {
   'player.upNext': 'A continuación · {title}',
   'player.playsIn': 'Empieza en {seconds} s',
   'player.nextIn': 'Siguiente episodio en {seconds} segundos',
+  'player.autoSkipIn': 'Se omite en {seconds} s',
+  'player.autoSkipNotice':
+    'Se omite automáticamente en {seconds} segundos. Pausa o busca para seguir viendo.',
   'player.playNow': 'Reproducir ya: {title}',
   'player.resumedAt': 'Reanudado en {time}',
   'player.volume': 'Volumen {percent}%',

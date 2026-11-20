@@ -190,7 +190,21 @@ if (process.argv.includes('--capture')) {
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
   // unchanged initial-graph ceiling above remains the English startup contract.
-  if (current.translationGzip > 51200) throw new Error('Lazy translation catalog budget exceeded');
+  // The subtitle menu's "needs Den Remux" copy in Swedish and Spanish measured 51,262 against matched main's 51,187
+  // (+75), which sat 13 bytes under the 50 KiB ceiling. Allow the next 128-byte boundary after the one that leaves
+  // 66 bytes, retaining 194.
+  // The missing-library notice and its "Open Linked devices" action (#1212) in Swedish and Spanish measure 51,549
+  // against matched main's 51,439 (+110), which sat 17 bytes under this ceiling: no localized notice fits. Allow the
+  // next 128-byte boundary, retaining 35.
+  // The profile switcher's own copy (#1158) in Swedish and Spanish measured 51,689 in CI against main's 51,549 (+140,
+  // main at d4d42ac1): the two new PIN-field labels, the parameterised Owner-PIN and Kid age lines, and the `profile`
+  // fallback. The first draft measured 51,749; dropping the two fragments the parameterised Owner-PIN line replaced
+  // removed 60. The catalogs are already lazy, and every phrase left is visible or spoken copy. Allow the next 128-byte
+  // boundary, retaining 23.
+  // Settings retries (#1045) add one phrase, "Saved, but not shown.", for a profile language that was saved but
+  // could not be presented: 51,722 in CI against main's 51,689 (+33, main at 20463fa0). The SIMKL notes reuse
+  // existing phrases. Allow the next 128-byte boundary, retaining 118.
+  if (current.translationGzip > 51840) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -420,5 +434,51 @@ if (process.argv.includes('--capture')) {
   // recovered 108 gzip bytes. Its exact-key bounded scan is post-foreground in a lazy chunk; moving it eager would
   // exceed startup's remaining 13-byte margin. Keep that cap unchanged and allow the second 128-byte boundary: the
   // first leaves only 8 bytes against measured variance, while this one retains 136 bytes before final compaction.
-  if (coreTotalDelta > 124032) throw new Error('Browser total JS/CSS budget exceeded');
+  // Away from home, one transport (#1366): the player drives the cast page's video by message, and the cast page draws
+  // its own AirPlay and (on an iPhone) fullscreen buttons in the top bar's hole. Measured 124,589 locally, about 690
+  // over main's recorded 123,896, in the lazy Player chunk and the separately served cast page; startup is unchanged.
+  // The next boundary would leave 83 bytes against #1282's run-to-run variance, so allow the one after it, retaining
+  // 211.
+  // Physical LG startup attribution adds 16 gzip bytes to the initial graph and 44 bytes to the complete graph on
+  // matched base/head builds (207,111 -> 207,127; 124,681 -> 124,725). The two fixed phase names and their calls must
+  // be eager: a lazy boundary would begin after the profile handover/metadata flushes they identify and add a request
+  // to the measured path. Both existing caps stay unchanged; the complete-graph cap retains 75 bytes.
+  // Subtitles never switching the source, and AirPlay asking for the receiver-safe stream at once on an HEVC release,
+  // measured 124,863 locally against matched main's 124,681 (+182), all in the lazy Player chunk: the subtitle menu's
+  // explicit Den Remux switch and its notice, and the codec lookup. Startup is unchanged (10,715 -> 10,712). With the
+  // LG attribution above that is about 124,907; allow the second boundary past the first one's 65 bytes, retaining 149.
+  // The auto-skip grace period (#1208: the Apple TV's 8 s visible countdown, cancelled by playback interaction)
+  // measured 125,524 against matched main's 125,051 (+473, main at 0321382f), all in the lazy Player chunk: the pure
+  // decision, the countdown and its once-spoken notice, the pause/seek cancellation, the reset fences and the desktop
+  // Skip button's missing `pointer-events`. It adds no timer, request or listener beyond the existing media-event
+  // handlers; startup moves 10,719 -> 10,725. Allow the smallest 128-byte boundary containing it, retaining 44.
+  // Bounded Reel requests and the fail-closed relay fallback (#1257/#1258) measured 126,176 against matched main's
+  // 125,524 (+652, main at 2d35b3f1). About 133 is the deadlines and fallback; about 520 is the poorer compression of
+  // the transport negotiation as its own lazy chunk, loaded only when a carried trailer is first tried. That split
+  // takes startup 10,725 -> 10,529 (-196). Allow the smallest 128-byte boundary containing it, retaining 32.
+  // Consuming a segment scan the current play started (#1201) measured 126,292 against matched main's 126,176 (+116,
+  // main at 053a769e), all in the lazy Player chunk: up to three re-asks of a miss on the existing progress tick, the
+  // episode fence and den-edge's settled-miss header. No timer, listener or startup code; startup moves 10,529 ->
+  // 10,512. Allow the smallest 128-byte boundary containing it, retaining 44.
+  // The missing-library notice (#1212) measured 127,187 against matched main's 126,292 (+895, main at 251484fd). Only
+  // the typed `refused-start` status is on the startup path (+20: its getter and codec case); the notice copy, its
+  // Linked devices action and the row reveal are a lazy `MissingLibraryNotice` chunk (+666), fetched only while a
+  // library is refused, plus its registry entry, load effect and slot. Startup moves 10,512 -> 10,642 (appMain +102;
+  // the new chunk renumbers the shared import map, about +3 in each of six other startup chunks); the eager-copy draft
+  // measured +206. The Worker adds +40. It adds no request outside that state, timer or polling. Allow the smallest
+  // 128-byte boundary containing it, retaining 45.
+  // Localizing the profile switcher (#1158) measured 127,242 in CI against main's 127,190 (+52, main at d4d42ac1):
+  // the `i18n.phrase`/`format` calls around the switcher's existing English copy and the Kid/Visitor/Owner description
+  // helper. They render in the always-mounted switcher and its dialog; moving the dialog behind a dynamic import would
+  // add a request to every open and still count here. Allow the next 128-byte boundary, retaining 118.
+  // Settings retries (#1045) measured 127,629 in CI against main's 127,284 (+345, main at 20463fa0), all in the lazy
+  // Settings route: the profile-preference and SIMKL-disconnect generation/session fences and their Retry controls.
+  // Startup measures 206,967, within its cap. Allow the smallest 128-byte boundary containing it, retaining 115.
+  // Ending a read held before first paint (#1378) measured 127,771 against main's 127,740 (+31, main at 5a8eef62): one
+  // branch in the library Worker's foreground-ready handler, which every Worker graph carries. A lazy split cannot
+  // reduce it. Startup is unchanged within chunk-hash churn. Allow the smallest 128-byte boundary, retaining 101.
+  // Keeping the old link when a legacy key-reset marker is unreadable (#1252) measured 127,951: one storage probe and one
+  // branch in `forgetMoved`, in the links module every Browser graph carries. A lazy split cannot reduce it. Startup is
+  // unchanged. Allow the next 128-byte boundary, retaining 49.
+  if (coreTotalDelta > 128000) throw new Error('Browser total JS/CSS budget exceeded');
 }

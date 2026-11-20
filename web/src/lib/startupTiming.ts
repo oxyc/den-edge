@@ -173,6 +173,8 @@ export const STARTUP_LONG_TASK_PHASES = [
   'tv_css',
   'tv_search',
   'viewport_measure',
+  'profile_handover',
+  'library_metadata',
   'home_shelves',
   'home_metadata',
   'home_hero',
@@ -193,7 +195,8 @@ const phaseWindows: Array<{
 
 /** Open one fixed, privacy-safe phase and return a close which includes its next paint. */
 export function beginStartupRenderPhase(phase: Exclude<StartupLongTaskPhase, 'other'>): () => void {
-  if (inWorker || typeof requestAnimationFrame !== 'function') return () => {};
+  if (inWorker || firsts.has('first poster') || typeof requestAnimationFrame !== 'function')
+    return () => {};
   if (phaseWindows.some((window) => window.phase === phase && window.end === undefined))
     return () => {};
   const window = { phase, start: performance.now(), end: undefined as number | undefined };

@@ -230,6 +230,45 @@ describe('ProfileSession presentation state', () => {
     expect(supportedProfileHousehold.alert).toBeNull();
   });
 
+  it('presents a refused library start as a join handoff, never as a wait for the connection', () => {
+    const version = { instance: 'i', generation: 'g', revision: 1 };
+    const missing = legacyProfileSession(
+      'missing-library',
+      false,
+      { status: { kind: 'refused-start', version } } as unknown as LibraryModel,
+      content(),
+    );
+    expect(missing.missingLibrary).toBe(true);
+    // Its notice is the lazy MissingLibraryNotice; the generic alert says nothing, least of all "Waiting to sync".
+    expect(missing.alert).toBeNull();
+
+    // The ordinary outage notice is a read-only status; it never offers the join handoff.
+    const offline = legacyProfileSession(
+      'offline-library',
+      false,
+      {
+        status: {
+          kind: 'read-only',
+          version,
+          reason:
+            'Saved on this device. Waiting to sync—keep this browser’s data until it reconnects.',
+        },
+      } as unknown as LibraryModel,
+      content(),
+    );
+    expect(offline.missingLibrary).toBe(false);
+    expect(offline.alert).toContain('Waiting to sync');
+
+    const ready = legacyProfileSession(
+      'found-library',
+      false,
+      { status: { kind: 'ready', version } } as unknown as LibraryModel,
+      content(),
+    );
+    expect(ready.missingLibrary).toBe(false);
+    expect(ready.alert).toBeNull();
+  });
+
   it('keeps a household wire fence visible through a distinct active profile model', () => {
     const householdModel = {
       status: {

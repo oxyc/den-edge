@@ -37,9 +37,35 @@ const candidate = (sourcePlan: SourcePlan): TrailerCandidate => ({
   plan: sourcePlan,
 });
 
+/** The page's own host, which decides whether a relay Edge did not offer may be assumed. */
+const page = (hostname: string) =>
+  vi.stubGlobal('location', { hostname, protocol: 'https:', href: `https://${hostname}/` });
+
+/** A request that never answers, and fails only when its signal aborts — as an unanswered connection does. */
+const hanging = (asked: Array<{ url: string; signal?: AbortSignal | null }>): typeof fetch =>
+  vi.fn<typeof fetch>(
+    (input, init) =>
+      new Promise<Response>((_, reject) => {
+        asked.push({ url: String(input), signal: init?.signal });
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      }),
+  );
+
+/** Fake timers, with `AbortSignal.timeout` on them too: Node runs its own deadline outside the faked clock. */
+const fakeTime = () => {
+  vi.useFakeTimers();
+  vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const deadline = new AbortController();
+    setTimeout(() => deadline.abort(new DOMException('timed out', 'TimeoutError')), ms);
+    return deadline.signal;
+  });
+};
+
 beforeEach(() => {
   forgetWarmedTrailers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe('the v2 plan parser', () => {
@@ -334,23 +360,45 @@ describe('PlaybackCursor', () => {
     ['malformed', () => new Response('{}')],
     ['non-OK', () => new Response('{}', { status: 503 })],
     ['thrown', () => Promise.reject(new Error('transport unavailable'))],
-  ])('keeps the exact configured relay fallback when transport is %s', async (_name, answer) => {
-    const fetchImpl = vi.fn<typeof fetch>(async () => answer());
-    const cursor = new PlaybackCursor(
-      [
-        {
-          planUrl: '/custom/reel/sources/trailer.json?v=2',
-          plan: plan(carried()),
-        },
-      ],
-      { fetchImpl },
-    );
+  ])(
+    'assumes the exact configured relay only on a local page when transport is %s',
+    async (_name, answer) => {
+      const fetchImpl = vi.fn<typeof fetch>(async () => answer());
+      const open = () =>
+        new PlaybackCursor(
+          [
+            {
+              planUrl: '/custom/reel/sources/trailer.json?v=2',
+              plan: plan(carried()),
+            },
+          ],
+          { fetchImpl },
+        ).first();
 
+      page('edge.local');
+      await expect(open()).resolves.toMatchObject({
+        attemptType: 'relay',
+        url: `/custom/reel/${CAPABILITY}`,
+      });
+      expect(fetchImpl.mock.calls[0]?.[0]).toBe('/custom/reel/transport');
+
+      // Edge refuses a carried trailer on its public names, so with no answer there is nothing to try.
+      page('d.example');
+      await expect(open()).resolves.toBeNull();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('on a public page moves past an unanswered carried source to the next one', async () => {
+    page('d.example');
+    const cursor = new PlaybackCursor(
+      [candidate(plan(carried(), external('https://video.example/next.mp4')))],
+      { fetchImpl: async () => new Response('{}', { status: 502 }) },
+    );
     await expect(cursor.first()).resolves.toMatchObject({
-      attemptType: 'relay',
-      url: `/custom/reel/${CAPABILITY}`,
+      attemptType: 'external',
+      url: 'https://video.example/next.mp4',
     });
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe('/custom/reel/transport');
   });
 
   it.each([403, 410])('does not bypass an explicit %s capability rejection', async (status) => {
@@ -493,6 +541,142 @@ describe('PlaybackCursor', () => {
     resolveResponse?.(new Response('{}'));
     await expect(first).resolves.toBeNull();
     await expect(duplicate).resolves.toBeNull();
+  });
+});
+
+describe('request bounds before a trailer mounts', () => {
+  const ask = { surface: 'audible', player: 'native' } as const;
+  const lazy = (id: string): TrailerCandidate => ({ planUrl: `/reel/sources/${id}.json?v=2` });
+  const transportAnswer = (extra: Record<string, unknown> = {}) =>
+    new Response(
+      JSON.stringify({
+        v: 2,
+        capability: CAPABILITY,
+        attempts: [{ type: 'relay', url: `/reel/${CAPABILITY}` }],
+        ...extra,
+      }),
+    );
+
+  it('gives up a discovery that never answers at its bound, aborting the request', async () => {
+    fakeTime();
+    const asked: Array<{ url: string; signal?: AbortSignal | null }> = [];
+    let settled = false;
+    const found = prepareTrailers('/reel', 'movie', { tmdb: 42 }, ROUTES, ask, {
+      fetchImpl: hanging(asked),
+    }).finally(() => (settled = true));
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(settled).toBe(false);
+    expect(asked[0]?.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(found).resolves.toEqual([]);
+    expect(asked[0]?.signal?.aborted).toBe(true);
+  });
+
+  it('keeps a slow discovery that answers inside its bound', async () => {
+    fakeTime();
+    const fetchImpl: typeof fetch = () =>
+      new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  v: 2,
+                  meta: { links: [{ planUrl: '../../sources/a.json?v=2' }] },
+                  primary: null,
+                  primaryPlan: null,
+                }),
+              ),
+            ),
+          9_000,
+        ),
+      );
+    const found = prepareTrailers('/reel', 'movie', { tmdb: 42 }, ROUTES, ask, { fetchImpl });
+    await vi.advanceTimersByTimeAsync(9_000);
+    await expect(found).resolves.toEqual([{ planUrl: '/reel/sources/a.json?v=2' }]);
+  });
+
+  it('moves to the next candidate when a lazy plan never answers', async () => {
+    fakeTime();
+    const asked: Array<{ url: string; signal?: AbortSignal | null }> = [];
+    const cursor = new PlaybackCursor(
+      [lazy('slow'), candidate(plan(external('https://video.example/next.mp4')))],
+      { fetchImpl: hanging(asked) },
+    );
+    const first = cursor.first();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(first).resolves.toMatchObject({
+      candidate: 1,
+      url: 'https://video.example/next.mp4',
+    });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.signal?.aborted).toBe(true);
+  });
+
+  it.each([
+    ['local', 'edge.local', { attemptType: 'relay', url: `/reel/${CAPABILITY}` }],
+    ['public', 'd.example', null],
+  ])('treats an unanswered transport as failed on a %s page', async (_name, host, want) => {
+    fakeTime();
+    page(host);
+    const asked: Array<{ url: string; signal?: AbortSignal | null }> = [];
+    const first = new PlaybackCursor([candidate(plan(carried()))], {
+      fetchImpl: hanging(asked),
+    }).first();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    if (want) await expect(first).resolves.toMatchObject(want);
+    else await expect(first).resolves.toBeNull();
+    expect(asked.map((request) => request.url)).toEqual(['/reel/transport']);
+    expect(asked[0]?.signal?.aborted).toBe(true);
+  });
+
+  it('bounds the second transport round of an IPv4 hint on its own', async () => {
+    fakeTime();
+    page('edge.local');
+    const bodies: unknown[] = [];
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetchImpl: typeof fetch = (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      signals.push(init?.signal);
+      if (bodies.length === 1) return Promise.resolve(transportAnswer({ ipv4HintWanted: true }));
+      return new Promise((_, reject) =>
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason)),
+      );
+    };
+    const first = new PlaybackCursor([candidate(plan(carried()))], {
+      fetchImpl,
+      lookupIpv4: async () => '203.0.113.7',
+    }).first();
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(bodies).toEqual([
+      { capability: CAPABILITY },
+      { capability: CAPABILITY, ipv4Hint: '203.0.113.7' },
+    ]);
+    expect(signals[1]?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(first).resolves.toMatchObject({ attemptType: 'relay' });
+    expect(signals[1]?.aborted).toBe(true);
+  });
+
+  it('gives one cursor move a total budget across unanswered candidates', async () => {
+    fakeTime();
+    const asked: Array<{ url: string; signal?: AbortSignal | null }> = [];
+    const first = new PlaybackCursor(
+      [lazy('a'), lazy('b'), candidate(plan(external('https://video.example/late.mp4')))],
+      { fetchImpl: hanging(asked) },
+    ).first();
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    await expect(first).resolves.toBeNull();
+    expect(asked.map((request) => request.url)).toEqual([
+      '/reel/sources/a.json?v=2',
+      '/reel/sources/b.json?v=2',
+    ]);
+    expect(asked.every((request) => request.signal?.aborted)).toBe(true);
   });
 });
 

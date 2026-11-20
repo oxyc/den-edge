@@ -1,9 +1,8 @@
 // The stamp saying how a stream is delivered, on an iPhone, through the real app: a guest's Hearth, the title's page,
-// Play, and the player as Library mounts it. Where WebKit plays HLS itself, a subtitle the viewer wants starts on Den
-// Remux (`subtitle-system-player.spec.mjs`): the page rules TorBox out itself, so Hearth never tries it and says
-// nothing about it. That stamp was a plain label there, and a tap on it did nothing. The path is now named in the
-// player's options, whose Source page offers the switch to TorBox where TorBox may play, and, where it can't, the
-// reason, with the switch shown and disabled.
+// Play, and the player as Library mounts it. Where WebKit plays HLS itself, a subtitle the viewer wants still starts
+// on TorBox: only the viewer's own switch moves to Den Remux (`subtitle-system-player.spec.mjs`). The path is named in
+// the player's options, whose Source page offers the switch to the other path where it may play, and, where it can't,
+// the reason, with the switch shown and disabled.
 import { test, expect, devices, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -122,13 +121,29 @@ async function iphone(browser, locale, { airPlay = false } = {}) {
   return context;
 }
 
+/** The title's one release as Scout lists it, with the video codec Scout read for it. */
+const listedRelease = (codec) => ({
+  url: `${ORIGIN}/den/p/ticket1`,
+  behaviorHints: { filename: release.filename },
+  attributes: { label: release.label, codec },
+});
+
 /**
  * A guest of a host whose Hearth answers playback with `hearth(body)`, the title in `originalLanguage`, and the media
- * of both paths served. Returns every playback request body.
+ * of both paths served. Scout lists `streams` for the title where given, each list request counted in
+ * `sourceLookups`. Returns every playback request body.
  */
 async function guestPlayer(
   page,
-  { hearth, originalLanguage, automaticSubtitles = false, playbackSourcePolicy, airPlayReports },
+  {
+    hearth,
+    originalLanguage,
+    automaticSubtitles = false,
+    playbackSourcePolicy,
+    airPlayReports,
+    streams,
+    sourceLookups = [],
+  },
 ) {
   const edge = newEdge();
   await routeGuestEdge(page, edge);
@@ -167,6 +182,11 @@ async function guestPlayer(
   await page.route(`${ORIGIN}/remux/releases`, (route) =>
     route.fulfill({ json: { releases: [release] } }),
   );
+  if (streams)
+    await page.route(`${ORIGIN}/den/~${GID}/stream/movie/tt42.json`, (route) => {
+      sourceLookups.push(route.request().url());
+      return route.fulfill({ json: { streams } });
+    });
   await page.route(`${ORIGIN}/playback/**`, (route) => {
     if (airPlayReports && new URL(route.request().url()).pathname.endsWith('/cast'))
       airPlayReports.push(route.request().postDataJSON());
@@ -295,6 +315,17 @@ async function swedishSourceSheet(page) {
   return sheet;
 }
 
+/**
+ * The player's next selected session, waited for from now. Hearth's answer reaches the route handler before the player
+ * has applied it, and the player arms the replacement's AirPlay stall watch only as it selects it (`[Den playback]
+ * selected`); a fake clock run between the two passes before that watch exists and fires nothing.
+ */
+const nextSelection = (page) =>
+  page.waitForEvent('console', {
+    predicate: (message) => message.text().startsWith('[Den playback] {"event":"selected"'),
+    timeout: 30_000,
+  });
+
 /** What a tap at a control's centre lands on: the control itself (or something inside it), or what is over it. */
 const tapLandsOnStamp = (stamp) =>
   stamp.evaluate((el) => {
@@ -306,7 +337,7 @@ const tapLandsOnStamp = (stamp) =>
 test.describe('the delivery stamp on an iPhone, through the real app', () => {
   test.skip(!existsSync(webkit.executablePath()), 'WebKit is not installed here');
 
-  test('on Den Remux for a subtitle, the stamp offers TorBox, and the switch from the sheet plays it', async () => {
+  test('a subtitle wanted never starts on Den Remux; the switches from the sheet move between the paths', async () => {
     const browser = await webkit.launch();
     try {
       const page = await (await iphone(browser, 'sv-SE')).newPage();
@@ -318,30 +349,17 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         hearth: (body) => ({ json: body.directFailed ? remuxAnswer : torboxAnswer }),
       });
       // A Hebrew title in a Swedish browser wants Swedish subtitles, which the system player shows only from a
-      // playlist: the page asked for Den Remux itself, so Hearth never tried TorBox.
+      // playlist. That never rules TorBox out: it plays, and nothing replaces it.
       expect(playback).toHaveLength(1);
-      expect(playback[0]).toMatchObject({ player: 'native', directFailed: true });
+      expect(playback[0]).toMatchObject({ player: 'native' });
+      expect(playback[0]).not.toHaveProperty('directFailed');
 
       const stamp = page.getByTestId('playback-source');
-      await expect(stamp).toHaveText('Den Remux');
+      await expect(stamp).toHaveText('TorBox');
       await expect(page.locator('.player video')).not.toHaveAttribute('controls', '');
       await expect(page.locator('.player nav.web-transport')).toHaveCount(1);
-      const sheet = await swedishSourceSheet(page);
-      await expect(sheet).toBeVisible();
-      await expect(sheet).toContainText('Spelas via Den Remux');
-      const toTorbox = sheet.getByRole('menuitem', { name: 'Byt till TorBox' });
-      await expect(toTorbox).not.toHaveAttribute('aria-disabled', 'true');
-      // The subtitle can't come along: the system player shows only a playlist's, and TorBox's names none.
-      await expect(toTorbox).toContainText('Stänger av undertexter');
+      await page.waitForTimeout(1_000);
       expect(playback).toHaveLength(1);
-
-      await toTorbox.tap();
-      await expect(stamp).toHaveText('TorBox', { timeout: 30_000 });
-      await expect(page.locator('.player video')).not.toHaveAttribute('controls', '');
-      await expect(page.locator('.player nav.web-transport')).toHaveCount(1);
-      expect(playback).toHaveLength(2);
-      expect(playback[1]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
-      expect(playback[1]).not.toHaveProperty('directFailed');
       // Nothing is named showing that the system player could not show.
       expect(
         await page.evaluate(() =>
@@ -351,14 +369,29 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         ),
       ).toBe(false);
 
-      // And back, from the same page while TorBox plays.
-      const back = await swedishSourceSheet(page);
-      await expect(back).toContainText('Spelas direkt från TorBox');
-      await back.getByRole('menuitem', { name: 'Byt till Den Remux' }).tap();
+      const sheet = await swedishSourceSheet(page);
+      await expect(sheet).toBeVisible();
+      await expect(sheet).toContainText('Spelas direkt från TorBox');
+      const toRemux = sheet.getByRole('menuitem', { name: 'Byt till Den Remux' });
+      await expect(toRemux).not.toHaveAttribute('aria-disabled', 'true');
+      expect(playback).toHaveLength(1);
+
+      await toRemux.tap();
       await expect(stamp).toHaveText('Den Remux', { timeout: 30_000 });
       await expect(page.locator('.player video')).not.toHaveAttribute('controls', '');
       await expect(page.locator('.player nav.web-transport')).toHaveCount(1);
-      expect(playback[2]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
+      expect(playback).toHaveLength(2);
+      expect(playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
+
+      // And back, from the same page while Den Remux plays.
+      const back = await swedishSourceSheet(page);
+      await expect(back).toContainText('Spelas via Den Remux');
+      await back.getByRole('menuitem', { name: 'Byt till TorBox' }).tap();
+      await expect(stamp).toHaveText('TorBox', { timeout: 30_000 });
+      await expect(page.locator('.player video')).not.toHaveAttribute('controls', '');
+      await expect(page.locator('.player nav.web-transport')).toHaveCount(1);
+      expect(playback[2]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
+      expect(playback[2]).not.toHaveProperty('directFailed');
     } catch (error) {
       await savePageTraces();
       throw error;
@@ -500,8 +533,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayTarget(true);
       });
 
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(3);
+      await receiverSafe;
       expect(playback[1]).toMatchObject({
         player: 'airplay',
         directOnly: true,
@@ -524,6 +559,82 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       await expect
         .poll(() => airPlayReports.find((report) => report.kind === 'airplay'))
         .toMatchObject({ kind: 'airplay', reached: 'started', delivery: 'direct' });
+    } catch (error) {
+      await savePageTraces();
+      throw error;
+    } finally {
+      contexts.length = 0;
+      await browser.close();
+    }
+  });
+
+  // TorBox's managed HLS carries HEVC in MPEG-TS, which an AirPlay 2 TV such as LG's never plays: on such a release
+  // the receiver-safe stream is asked for the moment AirPlay begins, with the playhead still moving — no stall.
+  test('AirPlay on a TorBox HEVC release asks for the receiver-safe stream at once', async () => {
+    const browser = await webkit.launch();
+    try {
+      const page = await (await iphone(browser, 'en-US', { airPlay: true })).newPage();
+      const playback = await guestPlayer(page, {
+        originalLanguage: 'en',
+        streams: [listedRelease('hevc')],
+        hearth: (body) => {
+          if (body.player === 'airplay' && body.filename)
+            return {
+              status: 409,
+              json: { error: 'direct_unavailable', cause: 'torbox_receiver_unsupported' },
+            };
+          return { json: torboxAnswer };
+        },
+      });
+      expect(playback).toHaveLength(1);
+      await page.evaluate(() => {
+        window.setAirPlayAvailability('available');
+        window.setAirPlayTarget(true);
+      });
+
+      // Well inside the stall watch's 12 s, which could not have asked.
+      await expect.poll(() => playback.length, { timeout: 5_000 }).toBe(3);
+      expect(playback[1]).toMatchObject({
+        player: 'airplay',
+        directOnly: true,
+        filename: 'fixture.mkv',
+      });
+      expect(playback[2]).toMatchObject({ player: 'airplay', directOnly: true });
+      expect(playback[2]).not.toHaveProperty('filename');
+      expect(playback.some((request) => request.directFailed)).toBe(false);
+      await page.evaluate(() => window.setAirPlayTarget(false));
+      await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
+    } catch (error) {
+      await savePageTraces();
+      throw error;
+    } finally {
+      contexts.length = 0;
+      await browser.close();
+    }
+  });
+
+  test('AirPlay on a TorBox H.264 release keeps its stream', async () => {
+    const browser = await webkit.launch();
+    try {
+      const page = await (await iphone(browser, 'en-US', { airPlay: true })).newPage();
+      const sourceLookups = [];
+      const playback = await guestPlayer(page, {
+        originalLanguage: 'en',
+        streams: [listedRelease('h264')],
+        sourceLookups,
+        hearth: () => ({ json: torboxAnswer }),
+      });
+      const looked = sourceLookups.length;
+      await page.evaluate(() => {
+        window.setAirPlayAvailability('available');
+        window.setAirPlayTarget(true);
+      });
+      // The codec was looked up for this, and said H.264, which the receiver plays from TorBox as it is.
+      await expect.poll(() => sourceLookups.length, { timeout: 5_000 }).toBeGreaterThan(looked);
+      await page.waitForTimeout(1_000);
+      expect(playback).toHaveLength(1);
+      await page.evaluate(() => window.setAirPlayTarget(false));
+      await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
     } catch (error) {
       await savePageTraces();
       throw error;
@@ -559,8 +670,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayTarget(true);
       });
 
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(3);
+      await receiverSafe;
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(4);
       expect(playback[3]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
@@ -629,8 +742,10 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
         window.setAirPlayAvailability('available');
         window.setAirPlayTarget(true);
       });
+      const receiverSafe = nextSelection(page);
       await page.clock.runFor(12_001);
       await expect.poll(() => playback.length).toBe(5);
+      await receiverSafe;
       await page.clock.runFor(12_001);
       await expect(page.getByTestId('playback-source')).toHaveText('Source');
       expect(playback).toHaveLength(5);
@@ -668,60 +783,6 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(playback).toHaveLength(1);
       await page.evaluate(() => window.setAirPlayTarget(false));
       await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
-    } catch (error) {
-      await savePageTraces();
-      throw error;
-    } finally {
-      contexts.length = 0;
-      await browser.close();
-    }
-  });
-
-  test('on Den Remux for a subtitle, a switch Hearth refuses for want of TorBox leaves it disabled, saying so', async () => {
-    const browser = await webkit.launch();
-    try {
-      const page = await (await iphone(browser, 'sv-SE')).newPage();
-      // Before the page loads, so the controls' hide timer is on the clock `swedishSourceSheet` holds.
-      await page.clock.install();
-      // Hearth with Den Remux only: TorBox alone is refused bare, with no TorBox failure behind it.
-      const playback = await guestPlayer(page, {
-        originalLanguage: 'he',
-        automaticSubtitles: true,
-        hearth: (body) =>
-          body.directOnly
-            ? { status: 409, json: { error: 'direct_unavailable' } }
-            : { json: remuxAnswer },
-      });
-      // Profile startup may already have sent a full native request before the automatic-subtitle constraint
-      // settles. Select the request that actually chose Remux; arrival order is not its identity.
-      await expect
-        .poll(
-          () => playback.find((request) => request.player === 'native' && request.directFailed),
-          { timeout: 30_000 },
-        )
-        .toMatchObject({ player: 'native', directFailed: true });
-      const stamp = page.getByTestId('playback-source');
-      const menuBarrier = playback.length;
-      const sheet = await swedishSourceSheet(page);
-      expect(playback).toHaveLength(menuBarrier);
-      // Only a request after this action can prove that this switch asked Hearth for TorBox alone.
-      const switchBarrier = playback.length;
-      await sheet.getByRole('menuitem', { name: 'Byt till TorBox' }).tap();
-      await expect(sheet).toBeHidden();
-      await expect
-        .poll(() => playback.slice(switchBarrier).find((request) => request.directOnly), {
-          timeout: 30_000,
-        })
-        .toMatchObject({ directOnly: true });
-      expect(playback).toHaveLength(switchBarrier + 1);
-      await expect(stamp).toHaveText('Den Remux');
-
-      await swedishSourceSheet(page);
-      await expect(sheet).toContainText('Den här Hearth har ingen TorBox att spela från');
-      await expect(sheet.getByRole('menuitem', { name: 'Byt till TorBox' })).toHaveAttribute(
-        'aria-disabled',
-        'true',
-      );
     } catch (error) {
       await savePageTraces();
       throw error;

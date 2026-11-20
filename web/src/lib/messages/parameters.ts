@@ -14,6 +14,8 @@ export const PARAMETER_FALLBACKS = {
   'actions.openDetailsFor': 'Open details for {value}',
   'actions.switchProfileCurrent': 'Switch profile, current {value}',
   'actions.use': 'Use {value}',
+  'profile.ownerPinNeeded': 'Needed to switch from {value} back to the Owner',
+  'profile.ageAndUnratedHidden': '{age} and under · unrated hidden',
   'actions.browse': 'Browse {value}',
   'actions.playTitle': 'Play {value}',
   'actions.removeContinueWatching': 'Remove {value} from Continue Watching',
@@ -48,6 +50,8 @@ export const PARAMETER_FALLBACKS = {
   'player.audioTrack': 'Audio track: {track}',
   'player.subtitles': 'Subtitles: {subtitles}',
   'player.subtitleLoadFailed': 'Couldn’t load {subtitle} subtitles. Current subtitles unchanged.',
+  'player.subtitleNeedsRemux':
+    '{subtitle} subtitles need Den Remux on this player. TorBox keeps playing until you switch.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} seconds',
   'player.adjustSubtitleTiming': 'Adjust subtitle timing ({offset})',
@@ -61,6 +65,9 @@ export const PARAMETER_FALLBACKS = {
   'player.upNext': 'Up next · {title}',
   'player.playsIn': 'Plays in {seconds} s',
   'player.nextIn': 'Next episode in {seconds} seconds',
+  'player.autoSkipIn': 'Auto-skip in {seconds}s',
+  'player.autoSkipNotice':
+    'Skips automatically in {seconds} seconds. Pause or seek to keep watching.',
   'player.playNow': 'Play now: {title}',
   'player.resumedAt': 'Resumed at {time}',
   'player.volume': 'Volume {percent}%',

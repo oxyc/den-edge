@@ -43,6 +43,18 @@ async function trackIntervals(page) {
   });
 }
 
+/**
+ * Until the session's media is really playing. `paused` turning false is no sign of it: in a CI failure it read false
+ * 1.4 s before `/direct/session` was answered and 1.8 s before the first playlist was asked for, so the position the
+ * test then set was gone once the stream loaded and played from 0.
+ */
+const mediaPlaying = (page) =>
+  page.waitForFunction(
+    () => (document.querySelector('.player video')?.currentTime ?? 0) > 0,
+    undefined,
+    { timeout: 30_000 },
+  );
+
 async function mockPlayer(
   page,
   {
@@ -135,11 +147,11 @@ test('unknown media duration uses trusted title runtime only for the saved fract
   await page.goto(`${ORIGIN}/test/player.html`);
   await started;
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
+  );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
@@ -164,21 +176,28 @@ test('unknown episode duration prefers its exact runtime over the series estimat
   });
   await page.goto(`${ORIGIN}/test/player.html?series&episodes`);
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
+  );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
 
-  await expect
-    .poll(async () => {
-      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
-      return saved.seconds === 31 ? saved.fraction : 0;
-    })
-    .toBeCloseTo(31 / 120, 2);
+  // Keep this wait in the page. While the HLS fixture is satisfying segment requests, a locator read can sit behind
+  // those Node-side route callbacks for the whole assertion timeout even after the production publication arrives.
+  // The predicate still requires the exact episode denominator; the series fallback (31 / 600) cannot pass.
+  await page.waitForFunction(
+    (expected) => {
+      const text = document.querySelector('[data-testid="player-progress"]')?.textContent;
+      if (!text) return false;
+      const saved = JSON.parse(text);
+      return saved.seconds === 31 && Math.abs(saved.fraction - expected) < 0.005;
+    },
+    31 / 120,
+    { timeout: 5_000 },
+  );
 });
 
 test('late runtime from a replaced episode cannot become the active denominator', async ({
@@ -217,17 +236,20 @@ test('late runtime from a replaced episode cannot become the active denominator'
   await firstStarted;
   await page.getByTestId('replace-player-episode').evaluate((button) => button.click());
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
+  );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
   await expect
-    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
-    .toMatchObject({ fraction: 31 / 180, seconds: 31, playing: false });
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 31 && saved.playing === false ? saved.fraction : 0;
+    })
+    .toBeCloseTo(31 / 180, 3);
 
   releaseFirst();
   await video.evaluate(async (element) => {
@@ -236,24 +258,77 @@ test('late runtime from a replaced episode cannot become the active denominator'
     element.pause();
   });
   await expect
-    .poll(async () => JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}'))
-    .toMatchObject({ fraction: 32 / 180, seconds: 32, playing: false });
+    .poll(async () => {
+      const saved = JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+      return saved.seconds === 32 && saved.playing === false ? saved.fraction : 0;
+    })
+    .toBeCloseTo(32 / 180, 3);
 });
 
 test('unknown media duration without trustworthy runtime remains fail-closed', async ({ page }) => {
   await mockPlayer(page, { sessionAnswer: { ...session, duration: 0 } });
   await page.goto(`${ORIGIN}/test/player.html`);
   const video = page.locator('.player video');
-  await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-    timeout: 30_000,
-  });
+  await video.evaluate((element) =>
+    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 }),
+  );
+  await mediaPlaying(page);
   await video.evaluate((element) => {
-    Object.defineProperty(element, 'duration', { configurable: true, get: () => 0 });
     element.currentTime = 31;
     element.pause();
   });
 
   await expect(page.getByTestId('player-progress-writes')).toHaveText('0');
+});
+
+test('native HLS with an unknown length saves on pause and pagehide, and the next visit resumes there', async () => {
+  // WebKit plays this playlist natively and it names no EXT-X-START, so the player's own seek is the only resume.
+  const browser = await webkit.launch();
+  try {
+    const context = await browser.newContext();
+    // The engine never reports a length for the whole visit, as an unresolved HLS/TV pipeline does.
+    await context.addInitScript(() => {
+      Object.defineProperty(HTMLMediaElement.prototype, 'duration', {
+        configurable: true,
+        get: () => Number.NaN,
+      });
+    });
+    const visit = async (path) => {
+      const page = await context.newPage();
+      await mockPlayer(page, { runtime: 2, sessionAnswer: { ...session, duration: 0 } });
+      await page.goto(`${ORIGIN}/test/player.html${path}`);
+      return page;
+    };
+    const saved = async (page) =>
+      JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
+
+    const first = await visit('');
+    const video = first.locator('.player video');
+    await first.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
+      undefined,
+      { timeout: 30_000 },
+    );
+    await video.evaluate((element) => {
+      element.pause();
+      element.currentTime = 31;
+    });
+    await expect.poll(() => saved(first)).toMatchObject({ seconds: 31, playing: false });
+    expect((await saved(first)).fraction).toBeCloseTo(31 / 120, 6);
+    const writes = Number(await first.getByTestId('player-progress-writes').textContent());
+    await first.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+    await expect(first.getByTestId('player-progress-writes')).toHaveText(String(writes + 1));
+    const stored = await saved(first);
+    expect(stored).toMatchObject({ seconds: 31, playing: false });
+    await first.close();
+
+    const second = await visit(`?resume=${stored.seconds}&resumeFraction=${stored.fraction}`);
+    await expect
+      .poll(() => second.locator('.player video').evaluate((element) => element.currentTime))
+      .toBeGreaterThanOrEqual(31);
+  } finally {
+    await browser.close();
+  }
 });
 
 test('playback progress clears startup and leaves no hls.js head poll behind', async () => {
@@ -296,9 +371,12 @@ test('a play writes its position within seconds of starting, and again on resume
     const writes = page.getByTestId('player-progress-writes');
     const written = async () =>
       JSON.parse((await page.getByTestId('player-progress').textContent()) ?? '{}');
-    await page.waitForFunction(() => !document.querySelector('.player video')?.paused, undefined, {
-      timeout: 30_000,
-    });
+    await mediaPlaying(page);
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) >= 1,
+      undefined,
+      { timeout: 30_000 },
+    );
 
     // The first part-way position goes out a moment after playback starts, not at the one-minute report.
     await expect(writes).toHaveText('1', { timeout: 5_000 });

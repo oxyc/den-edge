@@ -235,7 +235,7 @@
       // The same page at a new address: a search query that grew by a letter is not somewhere a person
       // navigated to, and giving it a history entry would bury the page they came from under the spelling
       // of what they typed. The entry is rewritten in place and the page keeps its scroll and its state.
-      if (replace) {
+      if (replace && (!__DEN_TV__ || key === requestedKey)) {
         clearTimeout(unwritten?.timer);
         unwritten = { path, timer: setTimeout(writeAddress, ADDRESS_WAIT_MS) };
         // Only the route and, once typing pauses, the address. The page itself is the one already on screen, so
@@ -314,14 +314,23 @@
       }
       restoring = true;
       if (push && address() !== path) {
-        position++;
-        for (const at of entries.keys()) if (at >= position) entries.delete(at);
         const pageKey =
           key.startsWith('title/') || key.startsWith('person/') || key.startsWith('service/')
             ? crypto.randomUUID()
             : key;
-        entries.set(position, { routeKey: key, pageKey });
-        history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
+        if (__DEN_TV__ && replace) {
+          entries.set(position, { routeKey: key, pageKey });
+          history.replaceState(
+            { denNavigation: { scope, position, profile: ownProfile } },
+            '',
+            path,
+          );
+        } else {
+          position++;
+          for (const at of entries.keys()) if (at >= position) entries.delete(at);
+          entries.set(position, { routeKey: key, pageKey });
+          history.pushState({ denNavigation: { scope, position, profile: ownProfile } }, '', path);
+        }
       }
       const visitKey = entries.get(position)?.pageKey ?? key;
       requestedPageKey = visitKey;

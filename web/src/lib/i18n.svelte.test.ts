@@ -186,3 +186,16 @@ it('localizes the reduced-TV download management handoff', async () => {
     expect(i18n.phrase('Couldn’t cancel that download. Try again.')).toBe(expected.cancelFailure);
   }
 });
+
+it('localizes a saved-language presentation failure without claiming the write failed', async () => {
+  const cases = [
+    ['en', 'Saved, but not shown.'],
+    ['es', 'Guardado, no aplicado.'],
+    ['sv', 'Sparat, visas inte.'],
+  ] as const;
+
+  for (const [language, message] of cases) {
+    await setInterfaceLanguage(language);
+    expect(i18n.phrase('Saved, but not shown.')).toBe(message);
+  }
+});

@@ -130,7 +130,11 @@ export class ScheduledLibraryServiceAuthority implements LibraryServiceAuthority
     if (observation.kind === 'foreground-ready') {
       if (!this.#foregroundReady) {
         this.#foregroundReady = true;
-        if (this.#eligible()) this.#schedule(0);
+        // A read held before the first paint (up to HELD_WAIT_SECONDS) keeps the work released here, the download
+        // pass, upgrade and delivery, waiting out its hold. Ending the hold lets its pass go on to that work now; the
+        // read is not restarted, so the page is not parked in a fresh hold while it is being used.
+        if (this.#running) this.#holding?.abort();
+        else if (this.#eligible()) this.#schedule(0);
       }
       this.#requestDelivery();
       return result;
@@ -378,7 +382,9 @@ export function librarySimklDelivery(
   };
 }
 
-function logStatus(log: LibraryLog): LibraryAuthorityStatus {
+export function logStatus(
+  log: Pick<LibraryLog, 'moved' | 'upgradeRequired' | 'refused' | 'readOnlyReason'>,
+): LibraryAuthorityStatus {
   if (log.moved) return { kind: 'moved' };
   if (log.upgradeRequired !== null)
     return {
@@ -390,6 +396,7 @@ function logStatus(log: LibraryLog): LibraryAuthorityStatus {
         requiredWire: log.upgradeRequired,
       },
     };
+  if (log.refused) return { kind: 'refused-start' };
   if (log.readOnlyReason) return { kind: 'read-only', reason: log.readOnlyReason };
   return { kind: 'ready' };
 }

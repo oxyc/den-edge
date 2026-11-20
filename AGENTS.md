@@ -62,6 +62,14 @@ rather than adding it.
 When a workaround and a removal both fix the symptom, remove. Compensating code outlives the browser bug it was
 written for, and the next reader cannot tell which is which.
 
+## Playback: subtitles never switch the source
+
+**Never start on, or switch to, Den Remux for subtitles unless the viewer explicitly switches to it.** A switch
+replaces a stream that plays fine, takes seconds to tens of seconds, and on iOS loses the tap that started playback;
+subtitles never justify it on their own. A subtitle the current stream can't show is offered as an explicit "Switch to
+Den Remux" in the subtitle menu instead. Viewer actions that need another stream (choosing AirPlay, a release, the
+Source switch) may replace it.
+
 ## Never write an unproven mechanism into a comment as fact
 
 Comments here explain why, which makes them the place a wrong theory does the most damage — it reads as established
@@ -91,6 +99,117 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Keeping the old link when a legacy key-reset marker is unreadable (#1252) was measured on the PR head rebased onto
+  main `f4123e9f`: core delta 127,951 locally (the hosted gate measured 127,889 with a longer log line; the figure moves
+  with chunk-hash churn), translations 51,722 (unchanged), startup 207,129 (unchanged). The growth is one storage probe
+  and one branch in `forgetMoved`, in the links module every Browser graph carries, so a lazy split cannot reduce the
+  complete graph. The complete ceiling advances from 127,872 to 128,000 (retaining 49); the translation and startup
+  ceilings are unchanged. It adds no request, timer, listener or dependency.
+
+- Ending a read held before first paint (#1378) was measured by the hosted gate, and reproduced locally, on the PR head
+  rebased onto main `5a8eef62` (core delta 127,740, translations 51,722, startup 206,998): core delta 127,771 (+31),
+  translations 51,722 (unchanged), startup 207,001 (+3; chunk-hash churn, the change is Worker-only). The growth is one
+  branch in the library Worker's `foreground-ready` handler. That is the Worker's own refresh loop, carried by every
+  Worker graph, so a lazy split cannot reduce the complete graph. The complete ceiling advances from 127,744 to 127,872
+  (retaining 101); the translation and startup ceilings are unchanged. It adds no request, timer, listener or
+  dependency.
+
+- Settings retries (#1045, #1296) were measured by the hosted gate on the PR head rebased onto main `20463fa0`
+  (core delta 127,284, translations 51,689): core delta 127,629 (+345), translations 51,722 (+33), startup 206,967
+  (within its cap). The core growth is all in the lazy Settings route: the profile-preference and SIMKL-disconnect
+  generation/session fences that keep a late result from landing on a replaced session, and their Retry controls.
+  Turning the named failure objects into a typed tuple and reusing existing phrases for the SIMKL notes removed 53
+  bytes from the earlier draft. The one new phrase, "Saved, but not shown.", says a profile language was saved but could not be
+  presented. The fences must sit where each write starts and settles, so a lazy import cannot reduce the complete
+  graph. The complete ceiling advances from 127,360 to 127,744 (retaining 115) and the translation ceiling from
+  51,712 to 51,840 (retaining 118); the startup ceiling is unchanged. It adds no request, timer, listener or
+  dependency.
+
+- A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
+  foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
+  non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip
+  bytes as one minified file). CI measured the merged head at 127,284 against #1158's 127,360 ceiling (an earlier
+  draft measured 127,368 on main `082bcab6` before its redundant body cancels were dropped). No ceiling changes. It
+  adds no request, timer, listener or dependency.
+
+- Localizing the profile switcher (#1158) was measured by the hosted gate at exact base `d4d42ac1` (core delta
+  127,190, translations 51,549, startup 207,012) and the PR head: translations 51,689 (+140), core delta 127,242
+  (+52), startup 207,061 (+49, within its cap). The translations are the two new PIN-field labels, the
+  parameterised Owner-PIN and Kid age lines and the `profile` fallback. The first draft measured 51,749; dropping
+  the two fragments the parameterised Owner-PIN line replaced removed 60. The core growth is the `i18n` calls around
+  the switcher's existing copy and its description helper. The catalogs are already lazy, and lazily importing the
+  switcher dialog would add a request to every open while still counting in the complete graph. Main kept 35
+  translation bytes and 42 complete-graph bytes, so the translation ceiling advances from 51,584 to 51,712
+  (retaining 23) and the complete ceiling from 127,232 to 127,360 (retaining 118). The startup ceiling is
+  unchanged. It adds no request, timer, listener or dependency.
+
+- Refused-start fresh-write fencing (#1392) was measured on clean, matched production builds at exact base
+  `d4d42ac1` and production/test head `08e93a63`, from equal-length detached worktree paths with identical lockfile
+  dependencies and Node/Vite toolchains. Browser startup moves 207,038 → 207,012 gzip bytes (-26), while its
+  complete JS/CSS graph moves 904,526 → 904,529 (+3); independently lazy Spanish/Swedish catalogs remain 51,549,
+  leaving the non-translation graph 852,977 → 852,980 (+3). LG/webOS startup moves 242,008 → 242,021 (+13),
+  complete moves 1,003,457 → 1,003,609 (+152), and non-translation moves 951,908 → 952,060 (+152).
+  Supported Tizen 8 startup moves 242,716 → 242,697 (-19), complete moves 1,324,069 → 1,324,155 (+86), and
+  non-translation moves 1,272,520 → 1,272,606 (+86). Reduced Tizen 3 startup moves 193,680 → 193,683 (+3),
+  complete moves 2,405,024 → 2,405,205 (+181), non-translation moves 2,353,381 → 2,353,562 (+181), and its
+  raw JS/CSS graph moves 8,350,689 → 8,351,714 (+1,025). Every target retains the same
+  JS/CSS file count (Browser 120, webOS 140, Tizen 8 151, Tizen 3 98) and unchanged translation graph (51,549 on
+  Browser/modern TV, 51,643 on Tizen 3); all target verifiers pass, and emitted products contain no source maps or
+  named coverage/instrumentation artifacts. The hosted exact-head budget gate also passes at startup 207,012,
+  complete 904,529, translations 51,549 and core delta 127,190, preserving 42 bytes of its existing margin.
+  Before retaining the delta, the implementation consolidates repeated refusal-time checks behind the existing
+  exact-`LibraryLog` `refusalWaiting` accessor and reuses the existing acknowledged-document and household-scope
+  helpers instead of adding another authority owner, queue, timer or transport. The fence must remain at the
+  existing serialized Worker write boundaries so a refusal established by an earlier held write also stops queued
+  document, settings, exact-CAS and bulk-row sends; moving it behind a page-level lazy import would omit non-page
+  writers or add an asynchronous authority gap. It adds no module, dynamic import, dependency, translation, route,
+  polling, task, listener, request during the wait, cache or persisted schema. No budget changes are required.
+
+- The missing-library recovery (#1212) was measured on matched production builds at base `251484fd` and the repair.
+  Only the typed `refused-start` status is on the startup path: the notice copy, its Open Linked devices action and the
+  row reveal are the lazy `MissingLibraryNotice` chunk (`MissingLibraryNoticeScreen`), fetched only while a library is
+  refused. Ordinary Browser startup moves 10,512 → 10,642 over the fixed baseline (+130). appMain accounts for +102:
+  +20 is the classification itself (the session getter and the page codec case; measured by building the status
+  alone), the rest the smallest lazy wiring (registry entry with its hashed chunk path and preload deps, load effect,
+  component slot). The new chunk also renumbers the shared import map, about +3 in each of six other startup chunks.
+  The complete non-translation graph moves 126,292 → 127,187 (+895): the lazy chunk +666 and the Worker's status and
+  codec +40, the rest that renumbering. ES/SV catalogs move 51,439 → 51,549 (+110). Measured and
+  rejected: the copy and action eager in `LibraryStatus` (startup +206); the notice importing Settings' `rows` (split
+  `rows` into its own chunk, adding a request to every Settings open); a `pageVisibility` import (its own startup chunk,
+  +148 and a request); and an `{#await import()}` slot (would pull Svelte's await runtime into startup, which no eager
+  code uses yet). The reveal opens the row through its own button and focuses it once its page is shown, so Settings
+  and its rows are unchanged. Main left 44 bytes of complete-graph margin and 17 of translation margin: the complete
+  ceiling advances to 127,232 (45 bytes of margin) and the translation ceiling to 51,584 (35); the startup cap is
+  unchanged. No request outside that state, timer, polling, listener or dependency is added.
+- Consuming a segment scan the current play started (#1201) was measured on matched production builds at base
+  `053a769e` and the change. Ordinary Browser startup moves 10,529 → 10,512 over the fixed baseline (-17 gzip bytes,
+  minification; no startup code changed), while the complete non-translation graph moves 126,176 → 126,292 (+116);
+  translations are unchanged. All of it is in the existing lazy Player chunk: the re-ask schedule (the Apple TV's
+  45 s, 120 s and last-12-minutes re-asks), the per-episode reset and reading den-edge's settled-miss
+  `x-den-skipdb`. It must sit with the player clock that drives it; no timer, interval, listener or request beyond
+  those three re-asks is added. The complete ceiling advances to 126,336, the smallest 128-byte boundary containing
+  the build (44 bytes of margin); the startup and translation ceilings are unchanged.
+- Bounded Reel prepare/plan/transport requests and the fail-closed relay fallback (#1257/#1258) were measured on
+  matched production builds at base `2d35b3f1` and the repair. Ordinary Browser startup moves 10,725 → 10,529 over
+  the fixed baseline (-196 gzip bytes), while the complete non-translation graph moves 125,524 → 126,176 (+652);
+  translations are unchanged. About 133 bytes are the four deadlines and the local-page relay check; about 520 are the
+  poorer compression of Edge's transport negotiation as its own lazy `reelTransport` chunk. That chunk is fetched only
+  the first time a carried trailer is tried, and it imports nothing at runtime: a lazy module importing `reel.ts`
+  pulled it out of the eager PosterCard chunk and fragmented `ipv4`/`retryAfter` (-1,142 startup, +1,381 complete),
+  while keeping everything inline cost +118 startup. Trailers are second-class, so the startup saving wins. The
+  complete ceiling advances to 126,208, the smallest 128-byte boundary containing the build (32 bytes of margin); the
+  startup and translation ceilings are unchanged.
+- The auto-skip grace period (#1208) was measured on matched production builds at base `0321382f` and the repair.
+  Ordinary Browser startup moves 207,115 → 207,121 gzip bytes (+6, minification; no startup code changed), while
+  the complete graph moves 902,103 → 902,753 (+650). Independently lazy Spanish/Swedish catalogs account for +177,
+  leaving the non-translation graph 125,051 → 125,524 (+473), all in the existing lazy Player chunk: the pure
+  countdown decision, the countdown and its once-spoken notice, pause/seek cancellation, the session/release fences
+  and the desktop Skip button's missing `pointer-events` (it could not be clicked). It must sit with the player clock
+  that decides it; another split would add a request mid-playback and cannot reduce the complete graph. No timer,
+  interval, request or dependency is added: the existing `timeupdate`/progress tick drives the deadline, and
+  cancellation reuses the element's existing `pause`/`seeking` handlers. The complete non-translation ceiling advances
+  from 125,056 to 125,568, the smallest 128-byte boundary containing the matched build, retaining 44 bytes. Startup
+  and translation ceilings are unchanged.
 - Broader profile-lifecycle availability (#544) was measured on matched production builds at base `1fdda1db` and
   production head `572d327d`. Ordinary Browser startup moves 206,577 → 206,567 gzip bytes (-10), while its
   complete JS/CSS graph moves 895,308 → 895,653 (+345). Independently lazy Spanish/Swedish catalogs move

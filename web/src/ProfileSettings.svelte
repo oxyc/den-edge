@@ -28,7 +28,12 @@
     return value ? { ...value, interfaceLanguage: i18n.language } : undefined;
   });
   let saving = $state(false);
-  let failure = $state<string | null>(null);
+  type PreferenceChanges = Parameters<ProfilePreferences['patch']>[0];
+  type PreferenceFailure =
+    | ['profile.policySaveFailed']
+    | ['profile.saveFailed' | 'presentation', ProfileSession, PreferenceChanges, boolean];
+  let failure = $state<PreferenceFailure | null>(null);
+  let preferenceGeneration = 0;
   const role = $derived(
     i18n.text(session.identity.kind === 'visitor' ? 'profile.visitor' : 'profile.kid'),
   );
@@ -39,8 +44,17 @@
   let verificationFailed = $state(false);
   let unlockAttempt = 0;
 
+  $effect.pre(() => {
+    if (session) {
+      preferenceGeneration++;
+      failure = null;
+      saving = false;
+    }
+  });
+
   onDestroy(() => {
     unlockAttempt++;
+    preferenceGeneration++;
   });
 
   async function unlock() {
@@ -72,30 +86,52 @@
     maximumAge: number | null;
     unknownRatings: 'allow' | 'block';
   }): Promise<boolean> {
+    const active = session;
+    const generation = ++preferenceGeneration;
     saving = true;
     failure = null;
     const changed = (await profiles?.setKidPolicy(policy)) ?? false;
-    if (!changed) failure = i18n.text('profile.policySaveFailed');
-    saving = false;
+    if (generation === preferenceGeneration && active === session) {
+      if (!changed) failure = ['profile.policySaveFailed'];
+      saving = false;
+    }
     return changed;
   }
 
-  function save(changes: Parameters<ProfilePreferences['patch']>[0]) {
+  async function savePreferences(changes: PreferenceChanges, presentationOnly = false) {
+    const active = session;
+    const generation = ++preferenceGeneration;
+    let written = presentationOnly;
     saving = true;
     failure = null;
-    void (session.preferences as ProfilePreferences)
-      .patch(changes)
-      .then(() => {
-        if (!changes.interfaceLanguage) return;
+    try {
+      if (!written) {
+        await (active.preferences as ProfilePreferences).patch(changes);
+        written = true;
+      }
+      if (generation !== preferenceGeneration || active !== session) return;
+      if (changes.interfaceLanguage) {
         rememberFreshPresentationLanguage(changes.interfaceLanguage);
-        session.presentIn(changes.interfaceLanguage);
-        return setInterfaceLanguage(changes.interfaceLanguage);
-      })
-      .catch((error: unknown) => {
-        console.warn('den:p/pref-save', error);
-        failure = i18n.text('profile.saveFailed');
-      })
-      .finally(() => (saving = false));
+        active.presentIn(changes.interfaceLanguage);
+        await setInterfaceLanguage(changes.interfaceLanguage);
+      }
+    } catch (error: unknown) {
+      console.warn(written ? 'den:p/pref-present' : 'den:p/pref-save', error);
+      if (generation === preferenceGeneration && active === session) {
+        failure = [written ? 'presentation' : 'profile.saveFailed', active, changes, written];
+      }
+    } finally {
+      if (generation === preferenceGeneration && active === session) saving = false;
+    }
+  }
+
+  function save(changes: PreferenceChanges) {
+    void savePreferences(changes);
+  }
+
+  function retryPreferences() {
+    const failed = failure;
+    if (failed?.length === 4 && failed[1] === session) void savePreferences(failed[2], failed[3]);
   }
 </script>
 
@@ -151,7 +187,19 @@
         </div>
       </div>
       <SettingsNav variant="bar" sections={['playback', 'content', 'about']} />
-      {#if failure}<p class="banner bad" role="alert">{i18n.phrase(failure)}</p>{/if}
+      {#if failure}<div class="banner bad" role="alert">
+          <span
+            >{failure[0] === 'presentation'
+              ? i18n.phrase('Saved, but not shown.')
+              : i18n.text(failure[0])}</span
+          >
+          {#if failure.length > 1}<Button
+              variant="secondary"
+              label={i18n.phrase('Retry')}
+              disabled={saving}
+              onclick={retryPreferences}
+            />{/if}
+        </div>{/if}
       {#if !prefs}
         <p class="banner" role="status">{i18n.text('profile.loadingSettings')}</p>
       {:else}

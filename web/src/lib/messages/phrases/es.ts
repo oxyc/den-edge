@@ -147,7 +147,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Back: 'Atrás',
   'Back 10 seconds': 'Atrás 10 segundos',
   'Back or forward 10 seconds': 'Atrás o adelante 10 segundos',
-  'back to the Owner': 'volver al propietario',
   Bingeable: 'Atracones',
   Biopic: 'película biográfica',
   'Blocked by parental controls': 'Bloqueado por controles parentales',
@@ -175,6 +174,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Chromecast with Google TV (4K)': 'Chromecast con Google TV (4K)',
   'Chromecast with Google TV (HD)': 'Chromecast con Google TV (HD)',
   'Connecting to the Chromecast…': 'Conectando con el Chromecast…',
+  'Confirm Owner PIN': 'Confirmar PIN de propietario',
   'Couldn’t connect to the Chromecast. Press Cast to try again.':
     'No se pudo conectar con el Chromecast. Pulsa Transmitir para volver a intentarlo.',
   'Den Cast player': 'Reproductor de transmisión de Den',
@@ -656,7 +656,6 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Narco Series': 'Serie Narco',
   'Natural Disasters': 'Desastres Naturales',
   Neck: 'cuello',
-  'Needed to switch from': 'Necesario para cambiar de',
   'needs a download before it’s ready to play here.':
     'necesita una descarga antes de que esté listo para reproducirse aquí.',
   'Neo-Noir': 'Neo-Noir',
@@ -664,6 +663,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Netflix:': 'ZXQMARCA13ZXQ:',
   'New invite': 'Nueva invitación',
   'New link': 'Nuevo enlace',
+  'New Owner PIN': 'Nuevo PIN de propietario',
   'New name for': 'Nuevo nombre para',
   'New Releases': 'Nuevos lanzamientos',
   News: 'Noticias',
@@ -808,6 +808,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Prejudice: 'Prejuicio',
   'Preview PIN:': 'PIN de vista previa:',
   'Prime Video viewing history': 'Historial de visualización de Prime Video',
+  profile: 'perfil',
   Profile: 'Perfil',
   'Profile libraries need to rotate together. Key reset will be available after Den finishes that update.':
     'Las bibliotecas de perfiles deben rotar juntas. El restablecimiento de clave estará disponible después de que Den finalice esa actualización.',
@@ -1005,6 +1006,10 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'simkl.com': 'simkl.com',
   'Skip back 10 seconds': 'Retroceder 10 segundos',
   'Skip forward 10 seconds': 'Saltar 10 segundos hacia adelante',
+  'Skip Credits': 'Omitir créditos',
+  'Skip Intro': 'Omitir introducción',
+  'Skip Preview': 'Omitir avance',
+  'Skip Recap': 'Omitir resumen',
   Slasher: 'slasher',
   'Slow-Burn and Bleak': 'De combustión lenta y sombría',
   'Slow-Burn and Melancholy': 'A fuego lento y melancolía',
@@ -1385,6 +1390,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se pudo revocar. Inténtalo de nuevo en unos instantes.',
   'Couldn’t disconnect it. Try again in a moment.':
     'No se pudo desconectar. Inténtalo de nuevo en unos instantes.',
+  'Saved, but not shown.': 'Guardado, no aplicado.',
   'Link this browser to your library, or accept an invite, to see its assistants.':
     'Vincula este navegador a tu biblioteca o acepta una invitación para ver sus asistentes.',
   'Retry cleanup': 'Reintentar limpieza',
@@ -1434,4 +1440,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'El cambio de nombre, la eliminación y la creación de perfiles de adulto no están disponibles en este televisor. Se administrarán en Den en la web.',
   'This TV is viewer-only. Profile administration is not available on this TV.':
     'Este televisor es solo para visualización. La administración de perfiles no está disponible en este televisor.',
+  'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.':
+    'La biblioteca de este dispositivo no está en Den. Tus cambios se guardan aquí; únete a la biblioteca de tu hogar en Configuración › Dispositivos vinculados.',
+  'Open Linked devices': 'Abrir Dispositivos vinculados',
 };

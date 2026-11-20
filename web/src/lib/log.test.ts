@@ -1084,6 +1084,242 @@ describe('LibraryLog', () => {
     });
   });
 
+  it('keeps an edit to a library den-edge will not start, and stays refused until a read finds the log', async () => {
+    const server = await edge([], [], 'generation-1');
+    const { vault } = memoryVault();
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    let missing = true;
+    let unreachable = false;
+    let posts = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        posts++;
+        if (unreachable) throw new TypeError('offline');
+        if (missing)
+          return new Response('{"error":"new_libraries_closed"}', {
+            status: 403,
+            headers: protocol,
+          });
+      } else if (missing) return new Response('{}', { status: 404, headers: protocol });
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      for (const [name, value] of Object.entries(protocol)) headers.set(name, value);
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 2 }, 0), at(1000)));
+      await vi.waitFor(() => expect(log.refused).toBe(true));
+      const refusedPosts = posts;
+      expect(log.pendingActions, 'the refused edit is kept on this device').toBe(1);
+      expect(log.title({ type: 'movie', id: 2 })?.status.value).toBe('watchlist');
+
+      const freshTitle = { type: 'movie' as const, id: 3 };
+      await expect(
+        log.write(addToWatchlist(blankTitle(freshTitle, 0), at(1001))),
+      ).resolves.toBeTruthy();
+      const heartbeat: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'devices',
+        values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+      };
+      await expect(log.write(heartbeat)).resolves.toBeTruthy();
+      expect(log.title(freshTitle)?.status.value).toBe('watchlist');
+      expect(log.settings('devices')).toMatchObject(heartbeat);
+      expect(log.pendingActions, 'fresh work is kept without probing the refused start').toBe(3);
+      expect(posts).toBe(refusedPosts);
+
+      const exact: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'tracker',
+        values: { connected: { value: { bool: true }, at: at(1002) } },
+      };
+      await expect(log.writeAt(exact, 0)).resolves.toBe(false);
+      await expect(log.writeRows([exact])).resolves.toBe(false);
+      expect(
+        log.settings('tracker'),
+        'unstaged exact and bulk writes do not invent success',
+      ).toBeUndefined();
+      expect(posts).toBe(refusedPosts);
+
+      await log.refresh();
+      expect(posts, 'nothing is sent again within the ten-minute re-check').toBe(refusedPosts);
+      now += 10 * 60_000 - 1;
+      await log.refresh();
+      expect(posts).toBe(refusedPosts);
+
+      // The re-check does not get through: that says nothing about the log, so the refusal stands.
+      now += 2;
+      unreachable = true;
+      await log.refresh();
+      expect(posts).toBeGreaterThan(refusedPosts);
+      const unreachablePosts = posts;
+      expect(log.refused).toBe(true);
+
+      // Refused once more: another ten minutes.
+      unreachable = false;
+      await log.refresh();
+      expect(posts).toBeGreaterThan(unreachablePosts);
+      const rerefusedPosts = posts;
+      await log.refresh();
+      expect(posts).toBe(rerefusedPosts);
+      expect(log.refused).toBe(true);
+      expect(log.pendingActions).toBe(3);
+
+      // Another device in the household writes the log: one read finds it, and the kept edit goes.
+      missing = false;
+      await log.refresh();
+      expect(log.refused).toBe(false);
+      await vi.waitFor(() => expect(log.pendingActions).toBe(0));
+      expect(posts).toBeGreaterThan(rerefusedPosts);
+      log.close();
+    } finally {
+      clock.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('fences a second serialized write when a held first write establishes refused-start', async () => {
+    const { vault } = memoryVault();
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    let posts = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const firstEntered = new Promise<void>((resolve) => (entered = resolve));
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const connection: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        posts++;
+        entered();
+        await held;
+        return new Response('{"error":"new_libraries_closed"}', {
+          status: 403,
+          headers: protocol,
+        });
+      }
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      const first = log.write(addToWatchlist(blankTitle({ type: 'movie', id: 31 }, 0), at(1031)));
+      await firstEntered;
+      const second = log.write(addToWatchlist(blankTitle({ type: 'movie', id: 32 }, 0), at(1032)));
+      release();
+      await Promise.all([first, second]);
+      await vi.waitFor(() => expect(log.refused).toBe(true));
+      await vi.waitFor(() => expect(log.pendingActions).toBe(2));
+      expect(posts, 'the queued second write observes refusal at the serialized boundary').toBe(1);
+      expect(log.title({ type: 'movie', id: 31 })?.status.value).toBe('watchlist');
+      expect(log.title({ type: 'movie', id: 32 })?.status.value).toBe('watchlist');
+      log.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('tells the page once when any write is the one den-edge refuses to start', async () => {
+    const { vault } = memoryVault();
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    const connection: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST')
+        return new Response('{"error":"new_libraries_closed"}', {
+          status: 403,
+          headers: protocol,
+        });
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      let told = 0;
+      log.onRefused = () => told++;
+      // A write that is not an edit made by hand (no `onDeferred`) is the first refused.
+      const heartbeat: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'devices',
+        values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+      };
+      await log.write(heartbeat);
+      expect(log.refused).toBe(true);
+      expect(told).toBe(1);
+      await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 41 }, 0), at(1041)));
+      expect(told, 'a refusal already told is not told again').toBe(1);
+      log.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps refused-start waiting local to the exact LibraryLog instance', async () => {
+    const protocol = { 'x-den-generation': 'generation-1', 'x-den-wire-min': '4' };
+    let refusedPosts = 0;
+    const refusedConnection: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        refusedPosts++;
+        return new Response('{"error":"new_libraries_closed"}', {
+          status: 403,
+          headers: protocol,
+        });
+      }
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    let acceptedPosts = 0;
+    let acceptedHead = 0;
+    const acceptedConnection: typeof fetch = async (_input, init) => {
+      if (init?.method === 'PUT') return new Response(null, { status: 204, headers: protocol });
+      if (init?.method === 'POST') {
+        acceptedPosts++;
+        const body = JSON.parse(String(init.body)) as { writes: { k: string }[] };
+        return new Response(
+          JSON.stringify({
+            head: body.writes.length,
+            applied: body.writes.map(({ k }) => ({ k, seq: ++acceptedHead })),
+            conflicts: [],
+          }),
+          { status: 200, headers: protocol },
+        );
+      }
+      return new Response('{}', { status: 404, headers: protocol });
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const refused = (await LibraryLog.open(
+        LIBRARY_KEY,
+        refusedConnection,
+        undefined,
+        memoryVault().vault,
+      ))!;
+      const accepted = (await LibraryLog.open(
+        LIBRARY_KEY,
+        acceptedConnection,
+        undefined,
+        memoryVault().vault,
+      ))!;
+      await refused.write(addToWatchlist(blankTitle({ type: 'movie', id: 41 }, 0), at(1041)));
+      await vi.waitFor(() => expect(refused.refused).toBe(true));
+      await accepted.write(addToWatchlist(blankTitle({ type: 'movie', id: 42 }, 0), at(1042)));
+      await vi.waitFor(() => expect(acceptedPosts).toBe(1));
+      expect(accepted.title({ type: 'movie', id: 42 })?.status.value).toBe('watchlist');
+      expect(accepted.refused).toBe(false);
+      expect(refusedPosts).toBe(1);
+      refused.close();
+      accepted.close();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('starts one cached pull before deferred mixed work is atomically published and replayed', async () => {
     const server = await edge([row(1)], [], 'generation-1');
     const { vault } = memoryVault();
@@ -1165,6 +1401,216 @@ describe('LibraryLog', () => {
     } finally {
       release();
       policy.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  describe('a return visit read from den-edge with work kept here', () => {
+    /** A library whose last visit kept `write`'s work unsent, and then lost its kept facts. */
+    async function keptWithoutFacts(write: (log: LibraryLog) => Promise<unknown>) {
+      const server = await edge([row(1)], [], 'generation-1');
+      const { data, vault } = memoryVault();
+      let refuseWrites = false;
+      let posts = 0;
+      const urls: string[] = [];
+      const connection: typeof fetch = async (input, init) => {
+        urls.push(String(input));
+        if (init?.method === 'POST') {
+          posts++;
+          if (refuseWrites) throw new TypeError('offline');
+        }
+        const response = await server.fetchImpl(input, init);
+        const headers = new Headers(response.headers);
+        headers.set('x-den-wire-min', '4');
+        return new Response(response.body, { status: response.status, headers });
+      };
+      const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+      refuseWrites = true;
+      await write(log);
+      await vi.waitFor(() => expect(log.pendingActions).toBe(1));
+      await vi.waitFor(() => expect(posts).toBe(1));
+      log.close();
+      refuseWrites = false;
+      for (const key of [...data.keys()])
+        if (key.endsWith(':library-facts.v1:manifest')) data.delete(key);
+      return { vault, connection, urls, posts: () => posts };
+    }
+
+    const heartbeat: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+    };
+
+    it('draws a kept row without deferred policy or a send, and sends it on the first refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const library = await keptWithoutFacts((log) => log.write(heartbeat));
+      const sent = library.posts();
+      let release!: () => void;
+      const deferred = new Promise<void>((resolve) => (release = resolve));
+      const policy = vi.spyOn(syncLoader, 'ensureDeferredSyncPolicy').mockReturnValue(deferred);
+      try {
+        let opened: LibraryLog | null | undefined;
+        void LibraryLog.open(LIBRARY_KEY, library.connection, undefined, library.vault).then(
+          (value) => (opened = value),
+        );
+        await vi.waitFor(() =>
+          expect(opened, 'the open answers before deferred policy loads').toBeTruthy(),
+        );
+        const reopened = opened!;
+        expect(reopened.fromCache).toBe(false);
+        expect(reopened.settings('devices')).toMatchObject(heartbeat);
+        expect(library.posts(), 'opening sends nothing').toBe(sent);
+        expect(reopened.pendingActions).toBe(1);
+
+        release();
+        library.urls.length = 0;
+        await reopened.refresh(25);
+        expect(
+          library.urls.some((url) => url.includes('wait=')),
+          'the first refresh is not held while work waits to be sent',
+        ).toBe(false);
+        expect(library.posts(), 'the kept row is sent once').toBe(sent + 1);
+        expect(reopened.pendingActions).toBe(0);
+        expect(reopened.settings('devices')).toMatchObject(heartbeat);
+
+        await reopened.refresh();
+        expect(library.posts(), 'settled work is not sent again').toBe(sent + 1);
+        reopened.close();
+      } finally {
+        release();
+        policy.mockRestore();
+        warn.mockRestore();
+      }
+    });
+
+    it('draws kept ops once deferred policy loads, without sending them before the first refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const title = { type: 'movie' as const, id: 2 };
+      const library = await keptWithoutFacts((log) =>
+        log.write(addToWatchlist(blankTitle(title, 0), at(1000))),
+      );
+      const sent = library.posts();
+      const reopened = (await LibraryLog.open(
+        LIBRARY_KEY,
+        library.connection,
+        undefined,
+        library.vault,
+      ))!;
+      try {
+        expect(reopened.fromCache).toBe(false);
+        expect(reopened.title(title)?.status.value).toBe('watchlist');
+        expect(library.posts(), 'opening sends nothing').toBe(sent);
+        expect(reopened.pendingActions).toBe(1);
+
+        await reopened.refresh();
+        expect(library.posts(), 'the kept op is sent once').toBe(sent + 1);
+        expect(reopened.pendingActions).toBe(0);
+        expect(reopened.title(title)?.status.value).toBe('watchlist');
+      } finally {
+        reopened.close();
+        warn.mockRestore();
+      }
+    });
+
+    it('leaves kept work kept when the log closes before a foreground refresh', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const library = await keptWithoutFacts((log) => log.write(heartbeat));
+      const sent = library.posts();
+      try {
+        const speculative = (await LibraryLog.open(
+          LIBRARY_KEY,
+          library.connection,
+          undefined,
+          library.vault,
+        ))!;
+        speculative.close();
+        const next = (await LibraryLog.open(
+          LIBRARY_KEY,
+          library.connection,
+          undefined,
+          library.vault,
+        ))!;
+        expect(library.posts(), 'neither open sent the kept row').toBe(sent);
+        expect(next.pendingActions).toBe(1);
+        await next.refresh();
+        expect(library.posts()).toBe(sent + 1);
+        expect(next.pendingActions).toBe(0);
+        next.close();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  it('lets writes and reads past a cached opening pull that waits for its foreground refresh', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const server = await edge([row(1)], [], 'generation-1');
+    const { vault } = memoryVault();
+    let refuseWrites = false;
+    let posts = 0;
+    let changes = 0;
+    const connection: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST') {
+        posts++;
+        if (refuseWrites) throw new TypeError('offline');
+      } else if (String(input).includes('/changes?')) changes++;
+      const response = await server.fetchImpl(input, init);
+      const headers = new Headers(response.headers);
+      headers.set('x-den-wire-min', '4');
+      return new Response(response.body, { status: response.status, headers });
+    };
+    const first = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    refuseWrites = true;
+    const kept: SettingsRow = {
+      kind: 'set',
+      schema: 2,
+      name: 'devices',
+      values: { 'aaaaaaaaaaaaaaaa.seen': { value: { int: 1001 }, at: at(1001) } },
+    };
+    await first.write(kept);
+    await vi.waitFor(() => expect(first.pendingActions).toBe(1));
+    first.close();
+    refuseWrites = false;
+    const sent = posts;
+    const read = changes;
+    const log = (await LibraryLog.open(LIBRARY_KEY, connection, undefined, vault))!;
+    try {
+      expect(log.fromCache).toBe(true);
+      expect(changes, 'the opening pull starts with the open').toBe(read + 1);
+      // The service orders its requests: a write that waited here for the foreground refresh kept the request that
+      // starts that refresh from ever running, and the kept work was never sent.
+      const fresh: SettingsRow = {
+        kind: 'set',
+        schema: 2,
+        name: 'tracker',
+        values: { connected: { value: { bool: true }, at: at(1002) } },
+      };
+      let wrote = false;
+      void log.write(fresh).then(() => (wrote = true));
+      await vi.waitFor(() => expect(wrote, 'a write does not wait for adoption').toBe(true));
+      expect(posts, 'the fresh write was sent').toBe(sent + 1);
+      expect(log.pendingActions, 'the kept work still waits').toBe(1);
+      // A read of the log sends kept work after it, as every pass does.
+      await expect(log.readToHead(), 'nor does a read wait').resolves.toBe(true);
+      expect(posts).toBe(sent + 2);
+      expect(log.pendingActions).toBe(0);
+
+      const before = changes;
+      // That read's caller reports nothing: the page learns the kept work went (its "Waiting to sync" count) from the
+      // next refresh, or it never does.
+      await expect(log.refresh(), 'the refresh says what the read changed').resolves.toBe(true);
+      // The early page predates the read above: taken now it would move the cursor back, so the adopted pass asks
+      // again from where the log is.
+      expect(changes).toBe(before + 1);
+      expect(posts, 'the adopted opening pull sends nothing again').toBe(sent + 2);
+      expect(log.title({ type: 'movie', id: 1 })).toBeDefined();
+      expect(log.settings('devices')).toMatchObject(kept);
+      expect(log.settings('tracker')).toMatchObject(fresh);
+      await expect(log.refresh(), 'and says it once').resolves.toBe(false);
+    } finally {
+      log.close();
       warn.mockRestore();
     }
   });

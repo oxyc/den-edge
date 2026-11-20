@@ -33,6 +33,9 @@
   const fixtureLibraryId = '50724b489a92805f23be6bba897393c7';
   const fixtureMemberToken = 'a17b6bb5b7e47d81e1fc40e34fe289274301987448de937c7ad2f566094fdf50';
   const fixtureQuery = new URLSearchParams(location.search);
+  (
+    globalThis as typeof globalThis & { fixtureInterfaceLanguage?: typeof setInterfaceLanguage }
+  ).fixtureInterfaceLanguage = setInterfaceLanguage;
   const profileResetFixture =
     fixtureQuery.has('profiles') ||
     fixtureQuery.has('profiles-owner-only') ||
@@ -579,6 +582,7 @@
   let releaseTrackerCommand = () => {};
   const heldTrackerCommand = new Promise<void>((resolve) => (releaseTrackerCommand = resolve));
   const trackerCommands = { owner: [] as string[], replacement: [] as string[] };
+  let trackerDisconnectFailures = 0;
   const trackerSubscriptions = { owner: 0, replacement: 0 };
   const trackerViews = $state({
     owner: { connected: true, heldRemovals: [] as { type: 'movie' | 'tv'; id: number }[] },
@@ -641,7 +645,14 @@
       },
       async disconnectSimkl() {
         trackerCommands[name].push('disconnect');
-        if (name === 'owner') await heldTrackerCommand;
+        if (
+          name === 'owner' &&
+          fixtureQuery.has('tracker-disconnect-fail-once') &&
+          trackerDisconnectFailures++ === 0
+        )
+          throw new Error('fixture SIMKL disconnect refused');
+        if (name === 'owner' && !fixtureQuery.has('tracker-disconnect-fail-once'))
+          await heldTrackerCommand;
         trackerViews[name].connected = false;
         trackerViews[name].heldRemovals = [];
       },
@@ -677,6 +688,7 @@
     subscriptions: () => structuredClone(trackerSubscriptions),
     rebinds: () => structuredClone(trackerRebinds),
     retries: () => structuredClone(trackerRetries),
+    views: () => structuredClone($state.snapshot(trackerViews)),
     householdCommands: () => [...library.commandKinds],
   };
   (

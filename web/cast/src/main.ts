@@ -185,6 +185,9 @@ const video = document.querySelector('video')!;
 const statusPill = document.querySelector<HTMLElement>('#status')!;
 const castButton = document.querySelector<HTMLButtonElement>('#cast')!;
 const localPlayButton = document.querySelector<HTMLButtonElement>('#play-local')!;
+const outputs = document.querySelector<HTMLElement>('.outputs')!;
+const airPlayButton = document.querySelector<HTMLButtonElement>('#airplay')!;
+const fullscreenButton = document.querySelector<HTMLButtonElement>('#fullscreen')!;
 /** The receiver models the player names (`castCapabilities`); the viewer's pick is kept on this origin. */
 const PROFILES = ['legacy', 'gen3', 'ultra', 'google-tv-hd', 'google-tv-4k', 'streamer'];
 const kept = keptProfile();
@@ -324,6 +327,9 @@ const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
     'Playback failed': 'La reproducción falló',
     'Invalid media URL': 'URL multimedia no válida',
     Play: 'Reproducir',
+    AirPlay: 'AirPlay',
+    'Change AirPlay device': 'Cambiar dispositivo AirPlay',
+    Fullscreen: 'Pantalla completa',
   },
   sv: {
     'Cast to a TV': 'Casta till en tv',
@@ -338,6 +344,9 @@ const COPY: Record<Exclude<InterfaceLanguage, 'en'>, Record<string, string>> = {
     'Playback failed': 'Uppspelningen misslyckades',
     'Invalid media URL': 'Ogiltig medie-URL',
     Play: 'Spela',
+    AirPlay: 'AirPlay',
+    'Change AirPlay device': 'Byt AirPlay-enhet',
+    Fullscreen: 'Helskärm',
   },
 };
 const text = (english: string): string =>
@@ -392,6 +401,94 @@ function renderButton(): void {
   if (state === 'CONNECTED' || state === 'CONNECTING')
     castButton.setAttribute('aria-haspopup', 'menu');
   else castButton.removeAttribute('aria-haspopup');
+  renderOutputs();
+}
+
+type AirPlayVideo = HTMLVideoElement & {
+  webkitShowPlaybackTargetPicker?: () => void;
+  webkitCurrentPlaybackTargetIsWireless?: boolean;
+};
+const airPlayVideo = video as AirPlayVideo;
+/** Whether Safari has said an AirPlay device is on the network. Only Safari answers; elsewhere it stays false. */
+let airPlayAvailable = false;
+if (typeof airPlayVideo.webkitShowPlaybackTargetPicker === 'function') {
+  video.addEventListener('webkitplaybacktargetavailabilitychanged', (event) => {
+    airPlayAvailable = (event as Event & { availability?: string }).availability === 'available';
+    renderOutputs();
+  });
+  video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', renderOutputs);
+}
+airPlayButton.addEventListener('click', () => airPlayVideo.webkitShowPlaybackTargetPicker?.());
+
+/**
+ * An iPhone, where no element can be made fullscreen and the player's own fullscreen cannot reach this frame's video:
+ * only `webkitEnterFullscreen`, called from a press in this document, fills the screen. Everywhere else the player
+ * makes itself fullscreen, this frame included.
+ */
+const fullscreenVideo = video as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+const videoFullscreenOnly =
+  !document.fullscreenEnabled && typeof fullscreenVideo.webkitEnterFullscreen === 'function';
+fullscreenButton.addEventListener('click', () => fullscreenVideo.webkitEnterFullscreen?.());
+
+/** Whether the player has given the output buttons a place (`den-outputs-slot`). */
+let outputsSlotted = false;
+/** Whether the player has given the fullscreen button its place, in its dock (`den-outputs-slot`'s `fullscreen`). */
+let fullscreenSlotted = false;
+/** The output buttons shown, sent with every change so the player sizes the hole it leaves for them. */
+let reportedOutputs = '';
+
+/**
+ * AirPlay beside Cast where this page plays the session under the player's transport (`html.driven`); the player
+ * cannot open Safari's device list for a video in another document. It names the device while one is playing.
+ */
+function renderOutputs(): void {
+  const driven = document.documentElement.classList.contains('driven');
+  const wireless = !!airPlayVideo.webkitCurrentPlaybackTargetIsWireless;
+  airPlayButton.hidden = !driven || !(airPlayAvailable || wireless);
+  airPlayButton.classList.toggle('on', wireless);
+  airPlayButton.setAttribute('aria-pressed', String(wireless));
+  airPlayButton.setAttribute('aria-label', text(wireless ? 'Change AirPlay device' : 'AirPlay'));
+  airPlayButton.title = airPlayButton.getAttribute('aria-label')!;
+  const fullscreen = driven && videoFullscreenOnly;
+  fullscreenButton.hidden = !fullscreen || !fullscreenSlotted;
+  fullscreenButton.setAttribute('aria-label', text('Fullscreen'));
+  fullscreenButton.title = text('Fullscreen');
+  const shown = {
+    cast: !castButton.hidden,
+    airplay: !airPlayButton.hidden,
+    fullscreen,
+  };
+  const report = JSON.stringify(shown);
+  if (!driven || report === reportedOutputs) return;
+  reportedOutputs = report;
+  say('den-outputs', shown);
+}
+
+const OUTPUTS_BOX = ['left', 'top', 'width', 'height'] as const;
+
+/** Place `element` in `box`, in this page's pixels; false where the box isn't one (the player's controls hidden). */
+function placeIn(element: HTMLElement, box: unknown): boolean {
+  const valid =
+    !!box &&
+    typeof box === 'object' &&
+    OUTPUTS_BOX.every((key) => Number.isFinite((box as Record<string, unknown>)[key]));
+  if (valid)
+    for (const key of OUTPUTS_BOX)
+      element.style[key] = `${(box as Record<(typeof OUTPUTS_BOX)[number], number>)[key]}px`;
+  return valid;
+}
+
+/**
+ * The holes the player leaves for this page's buttons: `box` in its top bar for Cast and AirPlay, `fullscreen` at its
+ * own fullscreen button in its dock. Null while the player's controls are hidden.
+ */
+function placeOutputs(box: unknown, fullscreen: unknown): void {
+  // As the player's Cast button (`html.button`) this page is the button and nothing else: there is no hole to fill.
+  if (!document.documentElement.classList.contains('driven')) return;
+  outputsSlotted = placeIn(outputs, box);
+  outputs.hidden = !outputsSlotted;
+  fullscreenSlotted = placeIn(fullscreenButton, fullscreen);
+  fullscreenButton.hidden = !fullscreenSlotted || !videoFullscreenOnly;
 }
 
 /** Text over the video only when it says something the picture does not: casting, an error. Otherwise nothing. */
@@ -627,13 +724,16 @@ function announceDevices(): void {
   );
 }
 
+const PROGRESS_EVENTS = ['timeupdate', 'play', 'pause', 'volumechange'] as const;
+
 /** Stop this page's hls.js and the connection it was watching. Settles when its last report was answered. */
 function stopLocal(): Promise<void> {
   clearLocalPlay();
   const owner = localPlayback;
   localPlayback = undefined;
   if (owner?.loadedMetadata) video.removeEventListener('loadedmetadata', owner.loadedMetadata);
-  if (owner?.timeUpdate) video.removeEventListener('timeupdate', owner.timeUpdate);
+  if (owner?.timeUpdate)
+    for (const type of PROGRESS_EVENTS) video.removeEventListener(type, owner.timeUpdate);
   if (owner?.ended) video.removeEventListener('ended', owner.ended);
   if (owner?.error) video.removeEventListener('error', owner.error);
   const reported = owner?.watcher?.stop() ?? Promise.resolve();
@@ -719,6 +819,8 @@ async function loadLocal(load: LoadMessage, url: string): Promise<void> {
       currentTime: video.currentTime,
       duration: Number.isFinite(video.duration) ? video.duration : undefined,
       paused: video.paused,
+      volume: video.volume,
+      muted: video.muted,
     });
   };
   local.ended = () => {
@@ -737,7 +839,9 @@ async function loadLocal(load: LoadMessage, url: string): Promise<void> {
       local.watcher,
     );
   };
-  video.addEventListener('timeupdate', local.timeUpdate);
+  // The player's transport shows what this video does: a pause, a play or a volume change is reported at once, not at
+  // the next `timeupdate`.
+  for (const type of PROGRESS_EVENTS) video.addEventListener(type, local.timeUpdate);
   video.addEventListener('ended', local.ended);
   video.addEventListener('error', local.error);
   let hlsSupported: boolean;
@@ -1500,6 +1604,9 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     id?: unknown;
     generation?: unknown;
     layout?: unknown;
+    transport?: unknown;
+    box?: unknown;
+    fullscreen?: unknown;
     color?: unknown;
     iconSize?: unknown;
     profile?: unknown;
@@ -1510,11 +1617,26 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
   if (message.type === 'den-layout') {
     parentOrigin = event.origin;
     root.classList.toggle('button', message.layout === 'button');
+    // Playing here, the video has native controls only for a player that draws no transport of its own over it (one
+    // from before `transport`). With the player's, they would be a second set of controls under it.
+    const driven = message.layout === 'stage' && message.transport === true;
+    root.classList.toggle('driven', driven);
+    video.controls = message.layout === 'stage' && !driven;
+    outputs.hidden = driven && !outputsSlotted;
+    // As the player's Cast button there is no hole: the place it was given away from home goes with it.
+    if (!driven) {
+      outputsSlotted = fullscreenSlotted = false;
+      outputs.removeAttribute('style');
+      fullscreenButton.removeAttribute('style');
+    }
+    renderOutputs();
     // The player's own button colour and glyph size, so the glyph drawn here is the one beside it.
     if (typeof message.color === 'string' && CSS.supports('color', message.color))
       root.style.setProperty('--cast-fg', message.color);
     if (typeof message.iconSize === 'number' && message.iconSize >= 12 && message.iconSize <= 48)
       root.style.setProperty('--cast-icon', `${message.iconSize}px`);
+  } else if (message.type === 'den-outputs-slot') {
+    placeOutputs(message.box, message.fullscreen);
   } else if (message.type === 'den-focus') {
     castButton.focus();
   } else if (message.type === 'den-stop') {
@@ -1527,21 +1649,23 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     else if (!castStarted && pause) video.pause();
     else if (!castStarted && !blockedLocalLoad && video.paused) void playLocal(current);
   } else if (message.type === 'den-volume') {
-    if (
-      !current ||
-      message.id !== current.id ||
-      message.generation !== current.generation ||
-      !castStarted ||
-      !remotePlayer ||
-      !remoteController
-    )
-      return;
-    if (typeof message.level === 'number' && message.level >= 0 && message.level <= 1) {
-      remotePlayer.volumeLevel = message.level;
-      remoteController.setVolumeLevel();
+    if (!current || message.id !== current.id || message.generation !== current.generation) return;
+    const level =
+      typeof message.level === 'number' && message.level >= 0 && message.level <= 1
+        ? message.level
+        : undefined;
+    const muted = typeof message.muted === 'boolean' ? message.muted : undefined;
+    if (castStarted && remotePlayer && remoteController) {
+      if (level !== undefined) {
+        remotePlayer.volumeLevel = level;
+        remoteController.setVolumeLevel();
+      }
+      if (muted !== undefined && muted !== remotePlayer.isMuted) remoteController.muteOrUnmute();
+    } else if (!castStarted) {
+      // This page's own video, which the player's transport drives away from home.
+      if (level !== undefined) video.volume = level;
+      if (muted !== undefined) video.muted = muted;
     }
-    if (typeof message.muted === 'boolean' && message.muted !== remotePlayer.isMuted)
-      remoteController.muteOrUnmute();
   } else if (message.type === 'den-profile') {
     if (typeof message.profile !== 'string' || !PROFILES.includes(message.profile)) return;
     profile = message.profile;

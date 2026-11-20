@@ -51,7 +51,11 @@
   const receiptBoundary = query.has('receiptBoundary');
   const receiptDelayMs = Number(query.get('receiptDelayMs')) || 0;
   const resumeSeconds = Number(query.get('resume')) || undefined;
+  // `?resumeFraction`: the stored fraction beside `?resume`, as a library row saved it; otherwise seconds of a minute.
+  const resumeFraction = Number(query.get('resumeFraction')) || undefined;
   const hasNext = query.has('next');
+  // `?autoSkip`: Settings › Playback's auto-skip on, with a control that turns it off mid-play as a synced change would.
+  let autoSkip = $state(query.has('autoSkip'));
   // Which episode is next, so the dock's next-episode button has somewhere to go.
   const nextEpisode = query.has('nextEpisode') ? { season: 1, episode: 2 } : undefined;
   const reel = query.has('reel');
@@ -127,13 +131,17 @@
     {remux}
     {playback}
     {interfaceLanguage}
+    {autoSkip}
     {subtitleLanguage}
     {shownSubtitleLanguages}
     {maxSubtitlesPerLanguage}
     {playbackSourcePolicy}
     {preferredPlaybackSource}
     subtitles={[]}
-    resume={{ fraction: resumeSeconds ? resumeSeconds / 60 : 0, seconds: resumeSeconds }}
+    resume={{
+      fraction: resumeFraction ?? (resumeSeconds ? resumeSeconds / 60 : 0),
+      seconds: resumeSeconds,
+    }}
     next={hasNext ? 'S1 · E2' : undefined}
     {nextEpisode}
     {castPlayMs}
@@ -188,6 +196,11 @@
     type="button"
     data-testid="replace-player-episode"
     onclick={() => (playingAt = { season: 2, episode: 1 })}>Replace episode</button
+  >
+{/if}
+{#if query.has('autoSkip')}
+  <button type="button" data-testid="auto-skip-off" onclick={() => (autoSkip = false)}
+    >Turn auto-skip off</button
   >
 {/if}
 {#if languageControls}

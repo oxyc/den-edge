@@ -15,6 +15,8 @@ export const parameters = {
   'actions.openDetailsFor': 'Öppna information om {value}',
   'actions.switchProfileCurrent': 'Byt profil, aktuell: {value}',
   'actions.use': 'Använd {value}',
+  'profile.ownerPinNeeded': 'Behövs för att byta från {value} tillbaka till ägaren',
+  'profile.ageAndUnratedHidden': '{age} år och yngre · orankade titlar dolda',
   'actions.browse': 'Bläddra bland {value}',
   'actions.playTitle': 'Spela {value}',
   'actions.removeContinueWatching': 'Ta bort {value} från Fortsätt titta',
@@ -50,6 +52,8 @@ export const parameters = {
   'player.subtitles': 'Undertexter: {subtitles}',
   'player.subtitleLoadFailed':
     'Det gick inte att läsa in undertexterna {subtitle}. Dina nuvarande undertexter är oförändrade.',
+  'player.subtitleNeedsRemux':
+    'Undertexterna {subtitle} kräver Den Remux i den här spelaren. TorBox spelar vidare tills du byter.',
   'player.subtitleOffsetCompact': '{sign}{offset}s',
   'player.subtitleOffsetSpoken': '{sign}{offset} sekunder',
   'player.adjustSubtitleTiming': 'Justera undertextsynkronisering ({offset})',
@@ -63,6 +67,9 @@ export const parameters = {
   'player.upNext': 'Härnäst · {title}',
   'player.playsIn': 'Startar om {seconds} s',
   'player.nextIn': 'Nästa avsnitt om {seconds} sekunder',
+  'player.autoSkipIn': 'Hoppar över om {seconds} s',
+  'player.autoSkipNotice':
+    'Hoppas över automatiskt om {seconds} sekunder. Pausa eller spola för att fortsätta titta.',
   'player.playNow': 'Spela nu: {title}',
   'player.resumedAt': 'Fortsätter vid {time}',
   'player.volume': 'Volym {percent}%',

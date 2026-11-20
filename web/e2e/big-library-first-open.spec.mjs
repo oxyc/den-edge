@@ -9,6 +9,7 @@
 // `HEADED=1` shows the browser, with each round trip slowed by `ROUND_TRIP_MS` (e.g. 600) to watch the progress bar.
 
 import { test, expect, chromium } from '@playwright/test';
+import { writeFileSync } from 'node:fs';
 import { E2E_ORIGIN } from './base-url.mjs';
 import { newEdge } from './guest-edge.mjs';
 import { bigHousehold, routeBigHousehold } from './big-library.mjs';
@@ -55,7 +56,22 @@ test('a big household opens for the first time within its budget', async () => {
     const page = await context.newPage();
     await routeBigHousehold(page, edge);
     const cdp = await context.newCDPSession(page);
-    await cdp.send('Emulation.setCPUThrottlingRate', { rate: process.env.HEADED ? 1 : 4 });
+    await cdp.send('Emulation.setCPUThrottlingRate', {
+      rate: process.env.HEADED ? 1 : Number(process.env.DEN_FIRST_OPEN_CPU ?? 4),
+    });
+    if (process.env.DEN_FIRST_OPEN_PROFILE === '1') {
+      await cdp.send('Profiler.enable');
+      await cdp.send('Profiler.start');
+    }
+    let tracingComplete;
+    if (process.env.DEN_FIRST_OPEN_TRACE === '1') {
+      tracingComplete = new Promise((resolve) => cdp.once('Tracing.tracingComplete', resolve));
+      await cdp.send('Tracing.start', {
+        categories:
+          'devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.frame',
+        transferMode: 'ReturnAsStream',
+      });
+    }
     // Where the time went, printed with the result: each changes page and the page's startup milestones.
     const started = Date.now();
     const log = [];
@@ -77,6 +93,22 @@ test('a big household opens for the first time within its budget', async () => {
     await expect(page.locator('main section[aria-label="Continue Watching"]')).toBeVisible({
       timeout: 60_000,
     });
+    if (process.env.DEN_FIRST_OPEN_PROFILE === '1') {
+      const { profile } = await cdp.send('Profiler.stop');
+      writeFileSync(test.info().outputPath('cpu-profile.json'), JSON.stringify(profile));
+    }
+    if (tracingComplete) {
+      await cdp.send('Tracing.end');
+      const { stream } = await tracingComplete;
+      const chunks = [];
+      for (;;) {
+        const chunk = await cdp.send('IO.read', { handle: stream });
+        chunks.push(Buffer.from(chunk.data, chunk.base64Encoded ? 'base64' : 'utf8'));
+        if (chunk.eof) break;
+      }
+      await cdp.send('IO.close', { handle: stream });
+      writeFileSync(test.info().outputPath('timeline-trace.json'), Buffer.concat(chunks));
+    }
     reading = false;
     const ms = Date.now() - started;
     note('continue watching visible');

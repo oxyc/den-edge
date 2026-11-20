@@ -10,6 +10,10 @@ import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import { tapPhoneControl } from './player-options.mjs';
 
+// Each case launches its own browser and shares nothing with the others. Run in parallel, they spread over the
+// workers and CI's shards instead of holding one worker for the whole file.
+test.describe.configure({ mode: 'parallel' });
+
 const hls = new URL('./media/hls/', import.meta.url);
 const release = {
   label: 'The.Movie.2001.2160p.WEB-DL.DV.H.265-FLUX',
@@ -29,6 +33,8 @@ async function mockPlayer(page, audioTracks = TWO_TRACKS) {
   await routeTmdb(page, (route) => route.fulfill({ json: { imdb_id: 'tt42' } }));
   await page.route(`${ORIGIN}/skipdb/**`, (route) => route.fulfill({ status: 404, json: {} }));
   await page.route(`${ORIGIN}/config`, (route) => route.fulfill({ json: {} }));
+  // The next episode's streams, warmed before the advance (`?nextEpisode`).
+  await page.route(`${ORIGIN}/scout/**`, (route) => route.fulfill({ json: { streams: [] } }));
   await page.route(`${ORIGIN}/playback/**`, (route) => route.fulfill({ status: 204 }));
   await page.route(`${ORIGIN}/direct/releases`, (route) =>
     route.fulfill({ json: { releases: [release] } }),

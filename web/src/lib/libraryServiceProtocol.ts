@@ -12,8 +12,9 @@
  * early source list was returned. Version 14 asks the authority Worker for den-core's source wait decision, keeping
  * the deferred policy module out of the page realm. Version 15 binds an Owner PIN mutation to the exact current
  * PIN observed by the authority and exposes whether that PIN may be removed from the current profile topology.
+ * Version 16 adds the `refused-start` session status: den-edge holds no log for this library and won't start one.
  */
-export const LIBRARY_SERVICE_PROTOCOL = 15 as const;
+export const LIBRARY_SERVICE_PROTOCOL = 16 as const;
 
 /** Memory-safety limits for one decoded wire message, not limits on what a library may contain. */
 export const LIBRARY_SERVICE_WIRE_LIMITS = {
@@ -1349,6 +1350,11 @@ export type LibrarySessionStatus =
   | { kind: 'ready'; version: LibraryVersion }
   | { kind: 'reconnecting'; version: LibraryVersion | null }
   | { kind: 'read-only'; version: LibraryVersion; reason: string }
+  /**
+   * den-edge holds no log for this library and won't let this device start one (`403 new_libraries_closed`). Edits
+   * are kept on this device; it lasts until a read finds the log, which another device in the household can write.
+   */
+  | { kind: 'refused-start'; version: LibraryVersion }
   | { kind: 'moved'; successor?: string }
   | { kind: 'failed'; error: LibraryServiceFailure };
 

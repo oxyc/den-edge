@@ -219,7 +219,7 @@ jobs:
           DEN_EDGE_REAL_RECOVERY: "1"
       - run: node scripts/test-tv-core.mjs
       - run: npm run build
-      # Keep the isolation/bundle-budget result blocking, but do not let its failure hide the TV behavior results.
+      # Keep the isolation/bundle-budget result blocking, but do not let its failure hide the suites after it.
       # The final gate reads the step's outcome after the existing suites have run, reusing this job's one browser
       # build and dependency install instead of paying for a second runner or duplicate production build.
       - name: TV isolation and bundle budgets
@@ -227,16 +227,6 @@ jobs:
         continue-on-error: true
         run: npm run check:tv-isolation
       - run: npm run test:e2e:keyboard
-      - name: LG/webOS TV behavior
-        if: ${{ !cancelled() && steps.tv_isolation.outcome != 'skipped' }}
-        run: npm run test:e2e:tv
-      # The full TV journey already ran against the platform-neutral/webOS build above and will run again in
-      # WebKit below. Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
-      # separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync additionally
-      # exercises replacement of the exact same-language sidecar through the AVPlay adapter.
-      - name: Supported Samsung/Tizen TV behavior
-        if: ${{ !cancelled() && steps.tv_isolation.outcome != 'skipped' }}
-        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-services-row.spec.mjs tv-subtitle-resync.spec.mjs
       - run: npm run test:e2e:tv-package
       # Every ordinary source change must compile and verify the exact legacy package too; the release workflow is
       # too late to discover that a shared import or unsupported syntax no longer reaches Chromium 47.
@@ -262,6 +252,49 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The TV journeys in Chromium, on a runner of their own: each suite builds and serves its own TV bundle, so they need
+  # none of web-checks' builds, and inside web-checks they were its longest stretch, on the run's critical path. The
+  # same runner and its Chrome as web-checks, so the browser under test is unchanged.
+  e2e_tv_chromium:
+    name: TV Chromium behavior
+    needs: scope
+    if: always() && needs.scope.outputs.source_changed == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Verify the runner browser
+        run: test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+      - name: LG/webOS TV behavior
+        run: npm run test:e2e:tv
+      # The full TV journey already ran against the platform-neutral/webOS build above and runs again in WebKit
+      # (e2e_tv_webkit). Tizen's distinct branches are its AVPlay adapter and platform bootstrap; the packaged suite
+      # (web-checks) separately covers the real Tizen bundle, file origin, CSP, API routing and playback. Re-sync
+      # additionally exercises replacement of the exact same-language sidecar through the AVPlay adapter.
+      - name: Supported Samsung/Tizen TV behavior
+        if: ${{ !cancelled() }}
+        run: DEN_TV_PLATFORM=tizen npm run test:e2e:tv -- tv-avplay.spec.mjs tv-kid-title-handoff.spec.mjs tv-platform.spec.mjs tv-services-row.spec.mjs tv-subtitle-resync.spec.mjs
+      - name: Retain TV failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tv-chromium-failures
+          path: web/test-results-tv
+          if-no-files-found: ignore
+          retention-days: 7
+
   android-tv:
     needs: scope
     if: always() && needs.scope.outputs.android_changed == 'true'
@@ -271,7 +304,7 @@ jobs:
         working-directory: android-tv
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: 17
@@ -293,7 +326,7 @@ jobs:
         shard: [1, 2, 3, 4]
     name: e2e (${{ matrix.shard }}/4)
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -311,8 +344,8 @@ jobs:
       - name: Verify Playwright image matches the lockfile
         run: |
           version=$(node -p "require('./node_modules/@playwright/test/package.json').version")
-          test "$version" = 1.64.1 || {
-            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.64.1-noble"
+          test "$version" = 1.65.0 || {
+            echo "::error::Playwright $version does not match mcr.microsoft.com/playwright:v1.65.0-noble"
             exit 1
           }
           node --input-type=module -e "import { chromium, firefox, webkit } from '@playwright/test'; import { existsSync } from 'node:fs'; for (const browser of [chromium, firefox, webkit]) if (!existsSync(browser.executablePath())) throw new Error('browser missing: ' + browser.executablePath())"
@@ -342,7 +375,7 @@ jobs:
     runs-on: ubuntu-latest
     name: e2e (production build)
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -367,7 +400,7 @@ jobs:
           path: web/test-results
           if-no-files-found: ignore
           retention-days: 7
-  # Chromium already exercises every platform-neutral TV journey in web-checks. WebKit gets the engine-sensitive
+  # Chromium already exercises every platform-neutral TV journey in e2e_tv_chromium. WebKit gets the engine-sensitive
   # playback, input, navigation and presentation surfaces on its own runner, so it neither repeats all 71 cases nor
   # extends shard 1's critical path.
   e2e_tv_webkit:
@@ -376,7 +409,7 @@ jobs:
     if: always() && needs.scope.outputs.source_changed == 'true'
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -415,7 +448,7 @@ jobs:
     runs-on: ubuntu-latest
     name: e2e budgets
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.0-noble
       options: --ipc=host
     defaults:
       run:
@@ -508,7 +541,7 @@ jobs:
   # Timing budgets still run and retain evidence, but an over-budget measurement is advisory.
   web:
     if: always()
-    needs: [scope, web-checks, e2e, e2e_production, e2e_tv_webkit, android-tv, stack_e2e]
+    needs: [scope, web-checks, e2e, e2e_production, e2e_tv_chromium, e2e_tv_webkit, android-tv, stack_e2e]
     runs-on: ubuntu-latest
     steps:
       # Apart from source reuse: wherever it was due, it must have run and passed in this run.
@@ -524,14 +557,21 @@ jobs:
           CHECKS: ${{ needs.web-checks.result }}
           E2E: ${{ needs.e2e.result }}
           E2E_PRODUCTION: ${{ needs.e2e_production.result }}
+          TV_CHROMIUM: ${{ needs.e2e_tv_chromium.result }}
           TV_WEBKIT: ${{ needs.e2e_tv_webkit.result }}
           ANDROID_TV: ${{ needs.android-tv.result }}
           ANDROID_CHANGED: ${{ needs.scope.outputs.android_changed }}
+        # One `test` per line: `bash -e` ignores a failure inside an `&&` list that is not the script's last command,
+        # so a chain of them followed by the Android check let a failed web-checks or e2e pass this gate.
         run: |
           if [ "$SOURCE_CHANGED" = false ]; then
-            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
+            test "$CHECKS" = skipped && test "$E2E" = skipped && test "$E2E_PRODUCTION" = skipped && test "$TV_CHROMIUM" = skipped && test "$TV_WEBKIT" = skipped && test "$ANDROID_TV" = skipped
           else
-            test "$CHECKS" = success && test "$E2E" = success && test "$E2E_PRODUCTION" = success && test "$TV_WEBKIT" = success
+            test "$CHECKS" = success
+            test "$E2E" = success
+            test "$E2E_PRODUCTION" = success
+            test "$TV_CHROMIUM" = success
+            test "$TV_WEBKIT" = success
             if [ "$ANDROID_CHANGED" = true ]; then
               test "$ANDROID_TV" = success
             else
@@ -618,7 +658,7 @@ jobs:
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::VERSION is not X.Y.Z: $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Log in to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -709,7 +749,7 @@ jobs:
         continue-on-error: true
         run: trivy convert --format sarif --output trivy.sarif trivy.json
       - name: Upload edge scan
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         continue-on-error: true
         with:
           sarif_file: trivy.sarif

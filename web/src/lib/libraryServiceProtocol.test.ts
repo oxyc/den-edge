@@ -1733,6 +1733,7 @@ describe('library service server protocol', () => {
       { kind: 'ready', version },
       { kind: 'reconnecting', version },
       { kind: 'read-only', version, reason: 'library format is newer' },
+      { kind: 'refused-start', version },
       { kind: 'moved', successor: 'successor-library' },
       {
         kind: 'failed',
@@ -1747,6 +1748,19 @@ describe('library service server protocol', () => {
         }),
       ).toMatchObject({ ok: true, value: { type: 'status' } });
     }
+    // A refused start carries no library id, reason text or anything else.
+    for (const status of [
+      { kind: 'refused-start' },
+      { kind: 'refused-start', version, reason: 'library missing' },
+      { kind: 'refused-start', version, libraryId: 'abc' },
+    ])
+      expect(
+        decodeLibraryServiceServerMessage({
+          type: 'status',
+          protocol: LIBRARY_SERVICE_PROTOCOL,
+          status,
+        }),
+      ).toMatchObject({ ok: false });
   });
 
   it('strictly bounds library metadata questions and validates the title/shape batch', () => {

@@ -24,21 +24,28 @@ docker pull --quiet "$image" >/dev/null
 container="$(docker create "$image")"
 trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
 docker cp "$container:/usr/local/bin/ffmpeg-remux" "$work/ffmpeg-remux"
-# The libraries it links that the runner lacks (the image installs the same; OpenSSL and zlib are already there).
-if ! dpkg -s libva2 libva-drm2 >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq --no-install-recommends libva2 libva-drm2 >/dev/null
-fi
-"$work/ffmpeg-remux" -hide_banner -version | sed -n 1p
 
 cd "$edge/web"
 npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install --with-deps chromium webkit
 npm run build
 
-DEN_EDGE_BIN="$edge/target/debug/den-edge" \
-DEN_HEARTH_BIN="$hearth/target/debug/den-hearth" \
-DEN_EDGE_DIST="$edge/web/dist" \
-DEN_STACK_MEDIA="$hearth/crates/remux/testdata/h264.mkv" \
-DEN_REMUX_FFMPEG="$work/ffmpeg-remux" \
-  npm run test:e2e:stack
+# The suite runs in Playwright's image for the lockfile's Playwright and this runner's Ubuntu release, which carries
+# Chromium, WebKit and their system libraries (and the libva that ffmpeg-remux links). `playwright install --with-deps`
+# fetched ~150 packages from the Ubuntu archive on every run instead, and a slow mirror ran the job out of time before a
+# test started. The same release as the host, so the binaries built above run in it unchanged; the host's network,
+# because the stack listens on fixed ports; the checkouts and $work at their own paths, so every path above holds.
+playwright="$(node -p "require('./node_modules/@playwright/test/package.json').version")"
+release="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+browsers="mcr.microsoft.com/playwright:v$playwright-$release"
+echo "==> Playwright from $browsers"
+docker pull --quiet "$browsers" >/dev/null
+docker run --rm --network host --ipc=host \
+  -v "$edge:$edge" -v "$hearth:$hearth" -v "$work:$work" -w "$edge/web" \
+  -e CI \
+  -e DEN_EDGE_BIN="$edge/target/debug/den-edge" \
+  -e DEN_HEARTH_BIN="$hearth/target/debug/den-hearth" \
+  -e DEN_EDGE_DIST="$edge/web/dist" \
+  -e DEN_STACK_MEDIA="$hearth/crates/remux/testdata/h264.mkv" \
+  -e DEN_REMUX_FFMPEG="$work/ffmpeg-remux" \
+  "$browsers" \
+  bash -c 'set -euo pipefail; "$DEN_REMUX_FFMPEG" -hide_banner -version | sed -n 1p; npm run test:e2e:stack'

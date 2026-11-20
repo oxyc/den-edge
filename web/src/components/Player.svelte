@@ -35,7 +35,12 @@
   import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
   import { languageName } from '../lib/languageName';
   import type { Episode as EpisodeDetail } from '../lib/detail';
-  import { PLAYBACK_PROGRESS_SAVE_MS, PlaybackProgressReporter } from '../lib/playbackProgress';
+  import {
+    PLAYBACK_PROGRESS_SAVE_MS,
+    PlaybackProgressReporter,
+    progressDuration,
+    resumeSeekSeconds,
+  } from '../lib/playbackProgress';
   import { playable, withoutRefused, type Playable } from '../lib/playable';
   import {
     autoSubtitleLanguage,
@@ -81,8 +86,6 @@
     nothingFits,
     optionLabel,
     pickLabel,
-    releaseAfterMeasure,
-    restartAfterMeasure,
     swapNotice,
     unchangedNotice,
   } from '../lib/releaseVerdicts';
@@ -135,9 +138,14 @@
   import { airDate, cleanedOverview } from '../lib/detailPresentation';
   import {
     activeAt,
-    canAutoSkip,
+    AUTO_SKIP_GRACE_MS,
+    autoSkipCountdown,
+    cancelsAutoSkip,
     fetchSkipSegments,
+    nextAutoSkip,
+    recheckDue,
     SKIP_LABEL,
+    type PendingAutoSkip,
     type SkipKind,
     type SkipSegment,
   } from '../lib/skipdb';
@@ -616,8 +624,6 @@
   /** Whether this page reaches den-remux's home-network address (`lanBase`): asked once per address (`homeHere`). */
   let lanProbe: { base: string; reachable: Promise<boolean>; answer?: boolean } | undefined;
   let publicMaxBitrate: number | undefined;
-  /** The `maxBitrate` the playing session was asked with. */
-  let askedMaxBitrate: number | undefined;
   /** What this page's own video reports to den-remux (`watchPlayback`); stopped before hls.js is destroyed. */
   let watcher: Watcher | undefined;
   const releaseTitle = untrack(() => `${title.type}:${title.id}`);
@@ -672,6 +678,11 @@
   const castStage = $derived(
     (!!session?.castOrigin || !!heldFrame) && !failure && !castView && !castActive,
   );
+  /**
+   * The picture plays in the cast page, its own away from home (`castStage`) or the receiver's it casts to (`castView`):
+   * Den's transport drives it by message, and its progress is what the transport shows.
+   */
+  const framePlays = $derived(castView || castStage);
   /** Den's Cast button, drawn where the player's other output buttons are; it shows once a receiver is found. */
   const castSlotShown = $derived(
     !castStage &&
@@ -1536,20 +1547,6 @@
       title.originalLanguage,
       [interfaceLanguage],
     );
-    // Whether a subtitle will show: the one chosen, or the one `autoSubtitleLanguage` picks below on the title's first
-    // session, for audio — in the title's original language, the most that can be told before a session says — that
-    // this browser doesn't name. A title whose language is unknown is not taken for foreign.
-    const subtitleWanted =
-      compatibleSubtitles &&
-      (subtitleChoice !== null ||
-        (!replacing &&
-          subtitleLanguage === undefined &&
-          title.originalLanguage !== undefined &&
-          autoSubtitleLanguage(
-            title.originalLanguage,
-            [interfaceLanguage],
-            subtitleLanguages.map((language) => ({ language })),
-          ) !== null));
     const claimed = (decodes ??= await playable());
     if (attempt.signal.aborted || ended) return false;
     // What this browser hasn't disproved. After a refusal it asks as something that takes no HEVC, no HDR and no
@@ -1564,7 +1561,7 @@
     // Away from home every byte crosses the home upload: den-remux is told what the link carries, measured once.
     // A direct remote origin can be measured before creation. Through the public control relay the link is what this
     // browser remembers (timed on the title's page, or at an earlier play); with nothing remembered, the first session
-    // is measured inside and replaced only when what it chose needs more than the link carries (`castMessage`).
+    // is measured inside for the next to ask with, and plays on as it is (`castMessage`).
     const maxBitrate =
       extra.maxBitrate ??
       (/^https?:/.test(route)
@@ -1627,11 +1624,10 @@
     const asked: PlaybackWant = {
       ...fields,
       ...(!compatibleSubtitles ? { subtitleLanguages: [] } : {}),
-      // WebKit's system player needs captions in the HLS playlist itself. Cast does not: a selected external VTT
-      // is staged as a short-lived receiver capability, so choosing captions must never disqualify TorBox.
+      // A subtitle never rules TorBox out on its own, even where WebKit's system player shows only a playlist's
+      // captions: the viewer moves to Den Remux for one explicitly, from the subtitle menu (`subtitleNeedsRemux`).
       ...(delivery === 'fallback' ||
-      (replacing !== undefined && !replacing.external && delivery !== 'direct') ||
-      (delivery !== 'direct' && delivery !== 'refresh' && subtitleWanted && subtitlesNeedPlaylist())
+      (replacing !== undefined && !replacing.external && delivery !== 'direct')
         ? { directFailed: true }
         : {}),
       ...(delivery === 'direct' || delivery === 'refresh' ? { directOnly: true } : {}),
@@ -1646,11 +1642,7 @@
       requestedSource,
       reason: delivery,
       replacement: replacing !== undefined,
-      subtitleConstraint: asked.directFailed
-        ? 'playlist_required'
-        : compatibleSubtitles
-          ? 'allowed'
-          : 'den_subtitles_disabled',
+      subtitleConstraint: compatibleSubtitles ? 'allowed' : 'den_subtitles_disabled',
     });
     // This used to wait until the playback session had completely opened, so the stream menu could show one
     // apparently-final choice for several seconds. Source discovery does not depend on that answer and belongs in
@@ -1721,7 +1713,8 @@
         ...here
       } = result;
       result = { ...here, playlist: result.lanPlaylist! };
-      // No home upload sits between this page and den-remux here: a limit remembered from away doesn't apply.
+      // No home upload sits between this page and den-remux here: a limit remembered from away doesn't apply. A
+      // session already asked under one plays as it is (it is never replaced while it plays); the next asks without.
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
     }
@@ -1886,7 +1879,6 @@
       failure = null;
     }
     started = at;
-    askedMaxBitrate = maxBitrate;
     played = false;
     awaitingPress = false;
     // A switch keeps the early window it was made in: the time already played counts, or every switch would open
@@ -1959,18 +1951,11 @@
     // Hearth would have tried TorBox first, and answered Remux without a word of one that failed: it has none.
     else if (torboxTried && torbox !== 'offered') torbox = { unavailable: NO_TORBOX };
     sessionRoute = on;
-    // Played from the home network but asked under a limit remembered from away: asked again without it, as the cast
-    // page's `den-lan` has it.
-    if (lanHere && maxBitrate !== undefined && extra.maxBitrate === undefined) {
-      castSubtitlePreparing = false;
-      restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
-      return true;
-    }
     // A viewer who never set Settings' subtitle language still gets one where it earns its place: their own
     // first, or English, never overriding a choice already made. Only on the title's first session — a later
     // switch (`replacing`) keeps whatever is already showing, auto-picked or turned off by hand. Not on a TorBox
     // stream whose subtitles the system player could not show (`subtitlesNeedPlaylist`): the menu says Off rather
-    // than name one that never appears, and choosing one there moves to Den Remux.
+    // than name one that never appears, and choosing one there offers Den Remux (`subtitleNeedsRemux`).
     if (
       !replacing &&
       compatibleSubtitles &&
@@ -1988,40 +1973,17 @@
     }
     // Settings and auto-pick name a language; the picker names a concrete candidate. Prefer the first offered
     // full candidate (TorBox embeds precede OpenSubtitles), never a forced-only track merely because it came first,
-    // and keep an exact manual identity across same-language alternatives.
+    // and keep an exact manual identity across same-language alternatives. Only among those this stream shows as it
+    // is: a TorBox embed it was not created with, or a page-side track the system player can't show, would take
+    // another stream, and a subtitle is never a reason to replace one the viewer didn't ask to replace.
     if (subtitleChoice) {
+      const shown = (result.subtitles ?? []).filter((track) => showsOnStream(result, track));
       const picked =
-        preferredSubtitleTrack(result.subtitles ?? [], subtitleChoice) ??
+        preferredSubtitleTrack(shown, subtitleChoice) ??
         (replacingSubtitleLanguage
-          ? preferredSubtitleTrack(result.subtitles ?? [], replacingSubtitleLanguage)
+          ? preferredSubtitleTrack(shown, replacingSubtitleLanguage)
           : undefined);
       subtitleChoice = picked ? subtitleValue(picked) : null;
-    }
-    const selectedTorBoxTrack = selectedSubtitle(result)?.torboxTrack;
-    if (
-      result.external &&
-      selectedTorBoxTrack !== undefined &&
-      result.torboxSubtitle !== selectedTorBoxTrack
-    ) {
-      // The first managed request discovers TorBox's embedded tracks; a language preference can only be resolved
-      // after that answer. TorBox burns one chosen track into a newly created stream, so create that stream now
-      // instead of merely naming a track the first, subtitle-free URL does not carry.
-      // Read the assigned state back: Svelte proxies objects stored in `$state`, and replacement identity checks
-      // must compare that proxy with itself rather than with the raw response object assigned above.
-      const discovered = session;
-      const preparing = showTransition('Preparing subtitles…');
-      const moved = await begin(
-        { filename: result.release.filename, subtitleTrack: selectedTorBoxTrack },
-        extra,
-        discovered,
-        'direct',
-      );
-      if (moved !== true && session === discovered) {
-        clearTransition(preparing);
-        subtitleChoice = null;
-        castSubtitlePreparing = false;
-      }
-      return moved;
     }
     // `session`, the player's own reactive copy of `result`: what `loadExternalSubtitle` checks it is still playing,
     // and whose `<track>` list renders. Handed `result` itself, it never matched, and the auto-picked subtitle the menu
@@ -2041,18 +2003,8 @@
           subtitleChoice === loadingValue &&
           selectionGeneration === subtitleSelectionGeneration;
         const loaded = await loadExternalSubtitle(loadingSession, loadingValue, ownsLoad);
-        const fallback = loadingTrack.fallbackTorboxTrack;
-        if (!loaded && ownsLoad() && fallback !== undefined) {
-          const preparing = showTransition('Subtitles failed—trying built-in…');
-          const moved = await begin(
-            { filename: loadingSession.release.filename, subtitleTrack: fallback },
-            extra,
-            loadingSession,
-            'direct',
-          );
-          if (moved !== true) clearTransition(preparing);
-          return moved;
-        }
+        // A failed load is said, with a retry, and never answered with a replacement stream: picked again by the
+        // viewer, a sidecar's built-in fallback is theirs to ask for (`chooseSubtitle`).
         if (!loaded && ownsLoad()) {
           subtitleChoice = null;
           subtitleLoadFailedFlag = true;
@@ -2071,6 +2023,7 @@
       segments = [];
       active = null;
       askedFor = 0;
+      retireAutoSkip();
     }
     // Moved to cast, but the relay's session has no public address or cast page: nothing can be cast from it, and
     // it would not play here either. Back to the player that was playing.
@@ -2963,7 +2916,11 @@
     untrack(sendToCastFrame);
   });
 
-  /** What the frame's Cast button needs from this page: its layout, and the player's own glyph colour and size. */
+  /**
+   * What the frame's Cast button needs from this page: its layout, and the player's own glyph colour and size.
+   * `transport` says this player draws its own transport over the frame's picture, so the frame's video carries no
+   * native controls under it (a frame told nothing keeps them, for a player from before).
+   */
   function sendCastLayout(): void {
     const origin = frameOrigin;
     const frame = origin ? readyCastFrame(origin) : null;
@@ -2973,6 +2930,7 @@
       {
         type: 'den-layout',
         layout: castStage ? 'stage' : 'button',
+        transport: true,
         color: style?.color,
         iconSize: Number.parseFloat(style?.getPropertyValue('--button-icon-size') ?? '') || 22,
       },
@@ -3000,6 +2958,9 @@
     visible?: unknown;
     hover?: unknown;
     back?: unknown;
+    cast?: unknown;
+    airplay?: unknown;
+    fullscreen?: unknown;
   }): boolean {
     switch (message.type) {
       case 'den-cast-state':
@@ -3060,6 +3021,13 @@
         return true;
       case 'den-tab':
         castTab(message.back === true);
+        return true;
+      case 'den-outputs':
+        // The frame's own output buttons, drawn in the hole left for them in the top bar (`frameOutputsSlot`). On an
+        // iPhone the frame also draws fullscreen, which only a press in the frame can ask of its video, in the hole
+        // left at the dock's own fullscreen button (`frameFullscreenSlot`).
+        frameFullscreen = message.fullscreen === true;
+        frameOutputs = (message.cast === true ? 1 : 0) + (message.airplay === true ? 1 : 0);
         return true;
       case 'den-activity':
         // The pointer is over the frame, where this page's own pointer events do not reach.
@@ -3126,10 +3094,10 @@
     } else if (message.type === 'den-progress') {
       if (Number.isFinite(message.currentTime)) remoteTime = Math.max(0, message.currentTime ?? 0);
       if (Number.isFinite(message.duration)) remoteDuration = Math.max(0, message.duration ?? 0);
-      // The receiver's own volume, which Den's volume control now sets.
-      if (castView && Number.isFinite(message.volume))
+      // The frame's own volume, or the receiver's, which Den's volume control now sets.
+      if (framePlays && Number.isFinite(message.volume))
         playerVolume = Math.min(1, Math.max(0, message.volume ?? 1));
-      if (castView && typeof message.muted === 'boolean') playerMuted = message.muted;
+      if (framePlays && typeof message.muted === 'boolean') playerMuted = message.muted;
       // A length is known only once the playlist came through the media listener.
       if (remoteDuration > 0) {
         played = true;
@@ -3155,20 +3123,19 @@
         measured <= 1_000_000_000
       ) {
         publicMaxBitrate = Math.round(measured);
+        // One startup sample reads below what the link sustains, and a session replaced for it opens while this one
+        // already plays, then cuts it off (on an iPhone, losing the press that let it play). The measure is kept for
+        // the next session to ask with; this one plays on, and a link that really can't carry it stalls, which the
+        // delivery switch answers.
         rememberLink(route, publicMaxBitrate);
-        // The cast page holds playback until told: started again only when what den-remux chose needs more than
-        // the link carries, so a release it can't open is not probed a second time for nothing.
-        if (restartAfterMeasure(current, publicMaxBitrate)) {
-          restartForRecovery('Preparing Chromecast…', releaseAfterMeasure(chosenRelease));
-        } else
-          readyCastFrame(current.castOrigin)?.postMessage(
-            {
-              type: 'den-continue',
-              id: current.playlist,
-              generation: castLoadGeneration,
-            },
-            current.castOrigin,
-          );
+        readyCastFrame(current.castOrigin)?.postMessage(
+          {
+            type: 'den-continue',
+            id: current.playlist,
+            generation: castLoadGeneration,
+          },
+          current.castOrigin,
+        );
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -3177,12 +3144,10 @@
       lose(Number.isFinite(message.currentTime) ? (message.currentTime ?? 0) : remoteTime);
     } else if (message.type === 'den-lan') {
       // den-remux answered on the home network, where there is no upload link to fit: a limit remembered from away
-      // does not apply here, and a session asked under one is asked again without it.
+      // does not apply here. A session asked under one plays as it is, never replaced while it plays; the next asks
+      // without it.
       rememberLink(route, undefined);
       publicMaxBitrate = undefined;
-      if (askedMaxBitrate !== undefined) {
-        restartForRecovery('Home network found—reopening…', releaseAfterMeasure(chosenRelease));
-      }
     } else if (message.type === 'den-cast-request') {
       const report =
         message.profile === 'receiver' ? (playableOf(message.playable) ?? undefined) : undefined;
@@ -3346,6 +3311,7 @@
         airPlayStartedAt = performance.now();
         clearTimeout(webControlsTimer);
         watchAirPlayDirectProgress();
+        void airPlayHevcAtOnce();
       } else {
         clearAirPlayProgressWatch();
         airPlayFallbackSession = undefined;
@@ -3391,6 +3357,79 @@
     airPlayProgressTimer = undefined;
   }
 
+  /**
+   * This TorBox session asked for again as an AirPlay receiver. TorBox managed HLS carries HEVC in MPEG-TS: Apple TV
+   * accepts that, but Apple's AirPlay 2 TV contract requires HEVC in fMP4, and an LG receiver never advances it. The
+   * named release is kept when receiver-safe; where it is HEVC, Hearth answers `torbox_receiver_unsupported` and the
+   * unpinned retry selects an H.264 release. True when it moved.
+   */
+  async function receiverSafeDirect(current: Session): Promise<boolean> {
+    playbackRouteLog({
+      event: 'recovery',
+      from: 'torbox',
+      to: 'torbox',
+      stage: played ? 'mid_playback' : 'startup',
+      attempt: directAttempt ?? 'initial',
+    });
+    const receiverDirect = (pick: { filename: string } | undefined) => {
+      replacementRefusal = undefined;
+      return begin(
+        pick,
+        { transcode: 'never', player: 'airplay' },
+        current,
+        'refresh',
+        null,
+        true,
+      ).catch((error: unknown): Failure => {
+        console.warn('den:play/airplay-torbox-recovery', error);
+        return 'unreachable';
+      });
+    };
+    let moved = await receiverDirect({ filename: current.release.filename });
+    if (
+      moved !== true &&
+      session === current &&
+      replacementRefusal?.cause === 'torbox_receiver_unsupported'
+    )
+      moved = await receiverDirect(undefined);
+    if (moved !== true) return false;
+    airPlayReceiverSafeSession = session ?? undefined;
+    airPlayFallbackSession = undefined;
+    airPlayFailed = false;
+    airPlayFailReason = undefined;
+    return true;
+  }
+
+  /**
+   * AirPlay just began on a TorBox HEVC release, which a stricter receiver than Apple TV never plays from TorBox's
+   * MPEG-TS: the receiver-safe stream is asked for now rather than after the stall that proves it. The codec is
+   * Scout's own (`attributes.codec`, what Hearth refuses a receiver by). This replaces the stream because the viewer
+   * chose AirPlay — unlike a subtitle, which never replaces one by itself. An H.264 release, an unknown codec, or no
+   * receiver-safe answer keeps the stream playing under the stall watch (`watchAirPlayDirectProgress`).
+   */
+  async function airPlayHevcAtOnce() {
+    const current = session;
+    const unchanged = () =>
+      airPlayActive &&
+      session === current &&
+      airPlayFallbackSession !== current &&
+      airPlayReceiverSafeSession !== current;
+    if (!webTransport || !imdb || !current?.external || !unchanged()) return;
+    const listed = await sourceListFor({ ...playingEpisode });
+    const playing = listed.sources?.find((source) => source.filename === current.release.filename);
+    if (playing?.attributes.codec !== 'hevc' || !unchanged()) return;
+    clearAirPlayProgressWatch();
+    // Held as `recoverAirPlayDirect` holds it, so a stall or media error meanwhile doesn't ask a second time.
+    airPlayFallbackSession = current;
+    report();
+    carryPosition();
+    if ((await receiverSafeDirect(current)) || session !== current) return;
+    // Already asked as a receiver: a real stall now goes straight on to what follows that.
+    airPlayFallbackSession = undefined;
+    airPlayReceiverSafeSession = current;
+    watchAirPlayDirectProgress();
+  }
+
   async function recoverAirPlayDirect(current: Session): Promise<boolean> {
     if (session !== current || !current.external || airPlayFallbackSession === current)
       return false;
@@ -3399,47 +3438,9 @@
     report();
     carryPosition();
 
-    // TorBox managed HLS carries HEVC in MPEG-TS. Apple TV accepts that observed stream, but Apple's AirPlay 2 TV
-    // contract requires HEVC in fMP4 and the LG receiver consequently never advances it. Preserve the fast Apple TV
-    // path: only after a real stall ask Hearth again as a receiver. The named release is retained when receiver-safe;
-    // where it is HEVC, Hearth answers `torbox_receiver_unsupported` and the unpinned retry selects an H.264 release.
-    if (airPlayReceiverSafeSession !== current) {
-      playbackRouteLog({
-        event: 'recovery',
-        from: 'torbox',
-        to: 'torbox',
-        stage: played ? 'mid_playback' : 'startup',
-        attempt: directAttempt ?? 'initial',
-      });
-      const receiverDirect = (pick: { filename: string } | undefined) => {
-        replacementRefusal = undefined;
-        return begin(
-          pick,
-          { transcode: 'never', player: 'airplay' },
-          current,
-          'refresh',
-          null,
-          true,
-        ).catch((error: unknown): Failure => {
-          console.warn('den:play/airplay-torbox-recovery', error);
-          return 'unreachable';
-        });
-      };
-      let moved = await receiverDirect({ filename: current.release.filename });
-      if (
-        moved !== true &&
-        session === current &&
-        replacementRefusal?.cause === 'torbox_receiver_unsupported'
-      )
-        moved = await receiverDirect(undefined);
-      if (moved === true) {
-        airPlayReceiverSafeSession = session ?? undefined;
-        airPlayFallbackSession = undefined;
-        airPlayFailed = false;
-        airPlayFailReason = undefined;
-        return true;
-      }
-    }
+    // An HEVC release was asked for as a receiver the moment AirPlay began (`airPlayHevcAtOnce`); anything else that
+    // stalls is asked for as one now, and only then goes on to Den Remux.
+    if (airPlayReceiverSafeSession !== current && (await receiverSafeDirect(current))) return true;
 
     if (
       playbackSourcePolicy === 'remember' &&
@@ -3701,6 +3702,87 @@
     observer.observe(root);
     return () => observer.disconnect();
   });
+
+  /** How many output buttons (Cast, AirPlay) the frame draws in the top bar away from home (`den-outputs`). */
+  let frameOutputs = $state(0);
+  /** Whether the frame draws fullscreen, so the player's own (which cannot reach its video) leaves a hole instead. */
+  let frameFullscreen = $state(false);
+  /** The hole left for them in the top bar: Den's surface, under the frame's buttons, as `castSlot` is for Cast. */
+  let frameOutputsSlot = $state<HTMLElement>();
+  /** The hole left in the dock where Den's fullscreen button is, for the frame's own. */
+  let frameFullscreenSlot = $state<HTMLElement>();
+  type FrameHole = { left: number; top: number; width: number; height: number };
+  /** Those holes in the stage's pixels, which are the frame's own, while the controls show; null hides the button. */
+  let frameOutputsBox = $state.raw<FrameHole | null>(null);
+  let frameFullscreenBox = $state.raw<FrameHole | null>(null);
+  /** Presses on the frame's picture, which Den's video takes at home (`pictureClick`). */
+  let stagePicture = $state<HTMLElement>();
+  $effect(() => {
+    const shown = castStage && webControlsVisible;
+    const outputsSlot = shown ? frameOutputsSlot : undefined;
+    const fullscreenSlot = shown ? frameFullscreenSlot : undefined;
+    const stage = stageElement;
+    if (!stage || (!outputsSlot && !fullscreenSlot)) {
+      frameOutputsBox = frameFullscreenBox = null;
+      return;
+    }
+    const holeOf = (slot: HTMLElement | undefined, last: FrameHole | null): FrameHole | null => {
+      if (!slot) return null;
+      const box = slot.getBoundingClientRect();
+      const origin = stage.getBoundingClientRect();
+      const next = {
+        left: box.left - origin.left,
+        top: box.top - origin.top,
+        width: box.width,
+        height: box.height,
+      };
+      return last &&
+        (Object.keys(next) as (keyof FrameHole)[]).every((key) => last[key] === next[key])
+        ? last
+        : next;
+    };
+    const place = () => {
+      frameOutputsBox = holeOf(outputsSlot, frameOutputsBox);
+      frameFullscreenBox = holeOf(fullscreenSlot, frameFullscreenBox);
+    };
+    place();
+    // Placed on the next frame, not inside the observer's callback: placing moves the frame's buttons, and a resize
+    // caused within the callback is the "ResizeObserver loop" the browser reports as an error.
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(place);
+    });
+    for (const slot of [outputsSlot, fullscreenSlot]) {
+      if (!slot) continue;
+      observer.observe(slot);
+      if (slot.parentElement) observer.observe(slot.parentElement);
+    }
+    observer.observe(stage);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  });
+  $effect(() => {
+    // Again whenever a hole moves or the frame's document is a new one.
+    const box = frameOutputsBox;
+    const fullscreen = frameFullscreenBox;
+    const origin = castStage && castFrameReady ? frameOrigin : undefined;
+    if (!origin) return;
+    untrack(() =>
+      readyCastFrame(origin)?.postMessage({ type: 'den-outputs-slot', box, fullscreen }, origin),
+    );
+  });
+
+  /** The frame's picture, less the holes over its own buttons, which take their own press. */
+  function pictureClip(holes: (FrameHole | null)[]): string | undefined {
+    const cut = holes.filter((hole) => hole !== null);
+    if (!cut.length) return undefined;
+    const ring = ({ left, top, width, height }: FrameHole) =>
+      `${left}px ${top}px, ${left + width}px ${top}px, ${left + width}px ${top + height}px, ${left}px ${top + height}px, ${left}px ${top}px`;
+    return `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${cut.map(ring).join(', 0 0, ')})`;
+  }
 
   // Back to playing in this page, the frame stays for its button: what it had loaded is let go there.
   let castFrameLoad: { id: string; generation: number } | undefined;
@@ -4018,20 +4100,20 @@
 
   /** Exact transport length when known; otherwise only the active title/episode's trusted metadata estimate. */
   function progressLength(): number {
-    const total = length();
-    return total > 0 && total < Infinity ? total : expectedRuntime;
+    return progressDuration(length(), expectedRuntime);
   }
 
   /** Pick up where it was left — or where the last session was — unless that was the very start or the credits. */
   function seekToStart() {
     const total = length();
-    if (!video || !total) return;
     const from = startAt ?? resume;
+    // An unresolved length can still seek to an exact stored second; a fraction alone waits for a later load.
+    if (!video || (!total && from.seconds === undefined && started === undefined)) return;
     // Opening mid-title says where, once a visit, with the way back to the start (`resumedAt`).
     if (webTransport && startAt === null && !resumeOffered) {
       resumeOffered = true;
-      const at = started ?? resume.seconds ?? resume.fraction * total;
-      if (at > 5 && at / total < WATCHED) resumedAt = clockTime(at);
+      const at = resumeSeekSeconds({ ...resume, seconds: started ?? resume.seconds }, total);
+      if (at !== null) resumedAt = clockTime(at);
     }
     startAt = null;
     if (started !== undefined) {
@@ -4042,8 +4124,8 @@
         video.currentTime = started;
       return;
     }
-    const at = from.seconds ?? from.fraction * total;
-    if (at > 5 && at / total < WATCHED) video.currentTime = at;
+    const at = resumeSeekSeconds(from, total);
+    if (at !== null) video.currentTime = at;
   }
 
   /** Write where playback got to, unless it is within `slack` seconds of what was last written. */
@@ -4472,6 +4554,42 @@
     return !castMode && nativeHls(document.createElement('video'));
   }
 
+  /**
+   * Whether `track` shows on `current` as it plays: any of Den Remux's renditions; on TorBox the embed its stream was
+   * created with, or a page-side track (a sidecar, OpenSubtitles) where the player renders the page's own `<track>`.
+   */
+  function showsOnStream(current: Session, track: NonNullable<Session['subtitles']>[number]) {
+    if (!current.external) return true;
+    if (track.torboxTrack !== undefined) return current.torboxSubtitle === track.torboxTrack;
+    return !subtitlesNeedPlaylist();
+  }
+
+  /**
+   * A subtitle the viewer picked that this TorBox stream can't show, kept to offer Den Remux for it rather than
+   * replacing the stream unasked: a switch takes seconds, and on iOS loses the tap that started playback.
+   */
+  let subtitleNeedsRemux = $state.raw<{ session: Session; value: string } | null>(null);
+
+  function offeredRemuxSubtitle() {
+    const offer = subtitleNeedsRemux;
+    const current = session;
+    if (!offer || !current?.external || offer.session !== current) return undefined;
+    return selectedSubtitle(current, offer.value);
+  }
+
+  /** The viewer's own switch to Den Remux for the subtitle `subtitleNeedsRemux` holds, which applies there. */
+  function switchForSubtitle() {
+    const track = offeredRemuxSubtitle();
+    subtitleNeedsRemux = null;
+    if (!track) return;
+    const previous = subtitleChoice;
+    // Candidate identities are local to the direct sidecar list. Remux names its rendition by language, so carry
+    // that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot expose
+    // in its own playlist.
+    subtitleChoice = track.language;
+    switchDelivery(() => (subtitleChoice = previous), 'Switching subtitles…');
+  }
+
   async function loadExternalSubtitle(
     current: Session,
     value: string,
@@ -4584,19 +4702,16 @@
       if (next === null) subtitleTurnedOffMidPlay = true;
       else subtitleSwitchedMidPlay = true;
     }
+    subtitleNeedsRemux = null;
     if (
       next &&
       session?.external &&
       selectedSubtitle(session, next)?.torboxTrack === undefined &&
       subtitlesNeedPlaylist()
     ) {
-      // The same second on Den Remux, whose renditions the system player shows; put back if it refuses.
-      const previous = subtitleChoice;
-      // Candidate identities are local to the direct sidecar list. Remux names its rendition by language, so
-      // carry that portable identity across the delivery switch instead of an OpenSubtitles provider id it cannot
-      // expose in its own playlist.
-      subtitleChoice = selectedSubtitle(session, next)?.language ?? next;
-      switchDelivery(() => (subtitleChoice = previous), 'Switching subtitles…');
+      // Only Den Remux's playlist would show it here. The stream playing is kept: the viewer is told, in a notice
+      // and the subtitle menu, and moves there only by pressing that switch (`switchForSubtitle`).
+      if (selectedSubtitle(session, next)) subtitleNeedsRemux = { session, value: next };
       return;
     }
     const current = session;
@@ -4675,16 +4790,46 @@
   // SvelteSet, and reactivity is the one thing this must not have — nothing renders it, and a write must not
   // re-run the tick that made it. Four kinds do not need a Set anyway.
   const skipped: Partial<Record<SkipKind, true>> = {};
+  /**
+   * Kinds whose countdown the viewer cancelled, or which reached their deadline, in this session: they keep the Skip
+   * button and are not counted down again (`nextAutoSkip`'s `settled`). A deadline whose seek failed is settled too,
+   * so it cannot loop. Plain, like `skipped`.
+   */
+  const autoSkipSettled: Partial<Record<SkipKind, true>> = {};
+  /** The announced automatic skip, if one is counting down. Plain: `autoSkipIn` is what renders. */
+  let autoSkipPending: PendingAutoSkip | null = null;
+  /** The countdown's whole seconds, changing once a second rather than at every tick. */
+  let autoSkipIn = $state<number | null>(null);
+
+  function retireAutoSkip() {
+    autoSkipPending = null;
+    autoSkipIn = null;
+  }
+
+  /** A viewer's play/pause (`at` omitted) or seek: inside the counting-down segment, it cancels that countdown. */
+  function engageAutoSkip(at?: number) {
+    if (!cancelsAutoSkip(autoSkipPending, at)) return;
+    autoSkipSettled[autoSkipPending!.segment.kind] = true;
+    retireAutoSkip();
+  }
+
   /** The length SkipDB was last asked about; 0 before it was asked. */
   let askedFor = 0;
   /** The release SkipDB was last asked about, by filename. */
   let segmentsOf: string | undefined;
   /** Monotonic request identity: an older release's late answer cannot reset a newer request's dedupe. */
   let segmentRequest = 0;
+  /**
+   * This episode's re-asks (`recheckDue`): how many were made, and when its first answer came (0: not yet, or never
+   * for this episode). Plain, like `skipped`: the tick reads them and nothing renders them.
+   */
+  let rechecks = 0;
+  let recheckFrom = 0;
 
   /**
    * Asked once the video knows its own length, because SkipDB aligns its times to the encode it is told about
-   * — see `fetchSkipSegments`. `imdb` is resolved by then: `begin` resolves it before starting a session.
+   * — see `fetchSkipSegments`. `imdb` is resolved by then: `begin` resolves it before starting a session. The tick
+   * asks a miss again (`recheckDue`), for a scan den-edge started meanwhile.
    */
   async function loadSegments() {
     if (!imdb || segments.length || ended) return;
@@ -4702,7 +4847,12 @@
       durationSeconds: length(),
     });
     if (ended || request !== segmentRequest) return;
-    if (session?.release.filename === release) segments = found;
+    if (session?.release.filename === release) {
+      segments = found.segments;
+      recheckFrom ||= performance.now();
+      // Only an episode is scanned, and neither segments nor a settled miss will change.
+      if (found.settled || segments.length || season === undefined) rechecks = 3;
+    }
     // Another release started meanwhile: these are the old encode's times. Its own are asked for once it has a length.
     else askedFor = 0;
   }
@@ -4729,10 +4879,28 @@
       progress.reportStart(at, progressLength(), { creditsReached: reachedCredits(at) });
     weighDelivery();
     warmNext(at);
+    const now = performance.now();
+    if (recheckFrom && recheckDue(rechecks, (now - recheckFrom) / 1000, at, length())) {
+      rechecks += 1;
+      askedFor = 0;
+      void loadSegments();
+    }
     if (!segments.length) return;
     active = activeAt(segments, at);
-    if (!autoSkip || !active || !canAutoSkip(active) || skipped[active.kind]) return;
-    skipActive();
+    const next = nextAutoSkip(
+      autoSkip,
+      active,
+      !!active && !!(skipped[active.kind] || autoSkipSettled[active.kind]),
+      autoSkipPending,
+      now,
+    );
+    if (next === 'skip') {
+      autoSkipSettled[active!.kind] = true;
+      skipActive();
+      return;
+    }
+    autoSkipPending = next;
+    autoSkipIn = next && autoSkipCountdown(next, now);
   }
 
   /** Whether the next episode has already been warmed. Not `$state`: nothing renders it. */
@@ -4836,6 +5004,7 @@
   function skipActive() {
     const segment = active;
     if (!segment) return;
+    retireAutoSkip();
     const total = length();
     const to = total > 0 ? Math.min(total, segment.end) : segment.end;
     if (video) video.currentTime = to;
@@ -4847,7 +5016,7 @@
   /** The native Den Apple TV exposes this beside its track/stream actions. TV browsers can seek the active decoder
    * directly: the Samsung facade turns this assignment into a serialized AVPlay seek. */
   function playFromBeginning() {
-    if (castView) {
+    if (framePlays) {
       seekTo(0);
       tellReceiver({ type: 'den-play' });
       return;
@@ -4864,9 +5033,10 @@
     seekTo(Math.max(0, total ? Math.min(from + seconds, total) : from + seconds));
   }
 
-  /** Den's transport moves the picture here, or the receiver's while casting. */
+  /** Den's transport moves the picture here, or the cast page's (`framePlays`). */
   function seekTo(time: number) {
-    if (castView) {
+    engageAutoSkip(time);
+    if (framePlays) {
       if (!seekCastFrame(time)) return;
       remoteTime = time;
       tvPosition = time;
@@ -4877,10 +5047,13 @@
     tvPosition = video.currentTime;
   }
 
-  /** While casting, Den's transport is the receiver's remote: what it asks goes to the cast page's Cast session. */
+  /**
+   * Where the cast page plays (`framePlays`), Den's transport is its remote: what it asks goes to the cast page, for
+   * its own video or the receiver its Cast session plays on.
+   */
   function tellReceiver(message: { type: string; [field: string]: unknown }): boolean {
     const current = session;
-    if (!castView || !current?.castOrigin) return false;
+    if (!framePlays || !current?.castOrigin) return false;
     const frame = readyCastFrame(current.castOrigin);
     if (!frame) return false;
     frame.postMessage(
@@ -4891,7 +5064,8 @@
   }
 
   function togglePlaying() {
-    if (castView) {
+    engageAutoSkip();
+    if (framePlays) {
       // Shown at once; the receiver's next progress says whether it did.
       if (tellReceiver({ type: tvPaused ? 'den-play' : 'den-pause' })) tvPaused = !tvPaused;
       return;
@@ -4916,7 +5090,7 @@
   }
 
   function toggleMuted() {
-    if (castView) {
+    if (framePlays) {
       if (tellReceiver({ type: 'den-volume', muted: !playerMuted })) playerMuted = !playerMuted;
       return;
     }
@@ -5010,7 +5184,8 @@
     if (webTransport && airPlayActive) return;
     lastPointer = event.pointerType;
     shownAtPress = webControlsVisible;
-    if (event.pointerType !== 'mouse' && event.target !== video) revealWebControls();
+    if (event.pointerType !== 'mouse' && event.target !== video && event.target !== stagePicture)
+      revealWebControls();
   }
 
   /**
@@ -5030,13 +5205,15 @@
     else scheduleWebControls();
   }
 
-  // Becoming the receiver's remote, the transport starts from where the receiver said it was, and stays shown.
+  // Becoming the cast page's remote, the transport starts from where it said it was. Casting, it stays shown.
   $effect(() => {
-    if (!castView) return;
+    const casting = castView;
+    if (!casting && !castStage) return;
     untrack(() => {
       tvPaused = remotePaused;
       tvPosition = remoteTime;
       tvDuration = length();
+      if (!casting) return;
       clearTimeout(webControlsTimer);
       webControlsVisible = true;
     });
@@ -5531,7 +5708,10 @@
     askedFor = 0;
     segmentsOf = undefined;
     segmentRequest += 1;
+    rechecks = recheckFrom = 0;
     for (const kind of Object.keys(skipped) as SkipKind[]) delete skipped[kind];
+    for (const kind of Object.keys(autoSkipSettled) as SkipKind[]) delete autoSkipSettled[kind];
+    retireAutoSkip();
     warmedNext = false;
     nextDetailRequest?.abort();
     nextDetailRequest = undefined;
@@ -5638,6 +5818,14 @@
           label: i18n.phrase('Try again'),
           run: () => void chooseSubtitle(subtitleValue(failed)),
         },
+        urgent: true,
+      });
+    const needsRemux = offeredRemuxSubtitle();
+    if (needsRemux)
+      list.push({
+        text: subtitleNeedsRemuxText(needsRemux),
+        dismiss: () => (subtitleNeedsRemux = null),
+        action: { label: switchToRemuxLabel(), run: switchForSubtitle },
         urgent: true,
       });
     if (session) {
@@ -5847,10 +6035,23 @@
     ];
   }
 
+  function switchToRemuxLabel(): string {
+    return i18n.format('player.switchTo', 'Switch to {source}', { source: 'Den Remux' });
+  }
+
+  function subtitleNeedsRemuxText(track: NonNullable<Session['subtitles']>[number]): string {
+    return i18n.format(
+      'player.subtitleNeedsRemux',
+      '{subtitle} subtitles need Den Remux on this player. TorBox keeps playing until you switch.',
+      { subtitle: subtitleLabel(track) },
+    );
+  }
+
   /** Den owns the subtitle choice so it can tell built-in tracks from OpenSubtitles candidates, with their match. */
   function subtitleTrackItems(section?: string): OptionItem[] {
     const current = session;
     if (!current) return [];
+    const needsRemux = offeredRemuxSubtitle();
     return [
       {
         kind: 'radio',
@@ -5869,6 +6070,19 @@
         onselect: () => void chooseSubtitle(subtitleValue(track)),
         section,
       })),
+      // The picked subtitle this stream can't show, and the viewer's switch to the path that shows it.
+      ...(needsRemux
+        ? [
+            {
+              kind: 'item' as const,
+              label: switchToRemuxLabel(),
+              description: subtitleNeedsRemuxText(needsRemux),
+              disabled: deliverySwitching || switching,
+              onselect: switchForSubtitle,
+              section,
+            },
+          ]
+        : []),
       ...subtitleResyncItems().map((item) => ({ ...item, section })),
     ];
   }
@@ -6112,9 +6326,9 @@
     if (track) void chooseSubtitle(subtitleValue(track));
   }
 
-  /** The volume set here, or the receiver's while casting. */
+  /** The volume set here, or the cast page's (`framePlays`). */
   function applyVolume(volume: number) {
-    if (castView) {
+    if (framePlays) {
       if (tellReceiver({ type: 'den-volume', level: volume, muted: volume === 0 })) {
         playerVolume = volume;
         playerMuted = volume === 0;
@@ -6158,7 +6372,8 @@
   /** Whether the controls may hide now: never while there is something to read, hold or press in them. */
   function webControlsMayHide(): boolean {
     // A failure's message and the options to recover from it stay up, as does a paused or casting player.
-    if (!webTransport || castView || failure || video?.paused) return false;
+    if (!webTransport || castView || failure || (castStage ? tvPaused : video?.paused))
+      return false;
     if (playerMenuOpen() || tvSubtitleTimingOpen || castFocus || timelineHeld || upNext !== null)
       return false;
     // A mouse over the top bar or the dock, or keyboard focus among the controls, holds them up. A touch screen leaves
@@ -6439,7 +6654,9 @@
         </div>
         <span
           class="web-output"
-          class:web-output-empty={!(session && airPlayCapable) && !castSlotShown}
+          class:web-output-empty={!(session && airPlayCapable) &&
+            !castSlotShown &&
+            !(castStage && frameOutputs)}
         >
           {#if session && airPlayCapable}
             <button
@@ -6461,6 +6678,13 @@
           {/if}
           {#if castSlotShown}
             {@render castButtonSlot('web-glyph output-action')}
+          {/if}
+          {#if castStage && frameOutputs}
+            <span
+              class="frame-outputs"
+              bind:this={frameOutputsSlot}
+              style:width={`${frameOutputs * 44}px`}
+            ></span>
           {/if}
         </span>
       </header>
@@ -6667,8 +6891,15 @@
             }, AUTOPLAY_GRACE_MS);
           }}
           onplay={playing}
-          onpause={paused}
-          onseeking={stay}
+          onpause={() => {
+            // Every pause: Den's controls, the browser's own in fullscreen, a TV remote, a headset.
+            engageAutoSkip();
+            paused();
+          }}
+          onseeking={() => {
+            stay();
+            engageAutoSkip(video?.currentTime);
+          }}
           ontimeupdate={tick}
           onended={finished}
           onerror={() => {
@@ -6801,14 +7032,7 @@
             <button type="button" onclick={close}>Close</button>
           </nav>
         {/if}
-        {#if fullTvTransport && active}
-          <Button
-            variant="primary"
-            class="tv-skip-overlay"
-            label={SKIP_LABEL[active.kind]}
-            onclick={skipActive}
-          />
-        {/if}
+        {#if fullTvTransport}{@render skipAction('tv-skip-overlay')}{/if}
         {#if customTransport && tvSubtitleTimingOpen}
           <section
             bind:this={subtitleTimingPanel}
@@ -6993,9 +7217,7 @@
              costs a press to refuse, while acting on uncertain times costs the end of the episode. In
              fullscreen the browser's own controls cover this footer, so the button is a windowed affordance —
              auto-skip, being a seek, still works there. -->
-        {#if !customTransport && active}
-          <Button variant="primary" label={SKIP_LABEL[active.kind]} onclick={skipActive} />
-        {/if}
+        {#if !customTransport}{@render skipAction('')}{/if}
         {#if onnext && next}
           {#if upNext !== null}
             <!-- The seconds are kept out of the name: one that changes every second is announced every second. -->
@@ -7045,6 +7267,22 @@
       sandbox="allow-scripts allow-same-origin allow-presentation"
       onload={castFrameLoaded}
     ></iframe>
+    {#if castStage && castFrameBox}
+      <!-- The frame's picture takes no presses of its own: a click plays or pauses, a tap shows the controls, as on Den's
+           video at home. All but the holes over the frame's own buttons, which take their own press. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div
+        class="stage-picture"
+        bind:this={stagePicture}
+        style:left={`${castFrameBox.left}px`}
+        style:top={`${castFrameBox.top}px`}
+        style:width={`${castFrameBox.width}px`}
+        style:height={`${castFrameBox.height}px`}
+        style:clip-path={pictureClip([frameOutputsBox, frameFullscreenBox])}
+        onclick={pictureClick}
+        ondblclick={pictureDoubleClick}
+      ></div>
+    {/if}
     <!-- Pressing the Cast button while a receiver is connected opens this, beside it: the frame is a button, with no
          room for a menu of its own. -->
     <ActionMenu
@@ -7093,18 +7331,11 @@
      under the timeline instead, off the picture. Every transport is drawn and CSS shows the one for the window's size
      (`.web-centre`, `.web-remote`, `.web-dock-transport`); which pointer it is decides behaviour alone. -->
 {#snippet webControls()}
-  {@const transport = !!session && (!session.castOrigin || castView)}
+  {@const transport = !!session && (!session.castOrigin || framePlays)}
   <nav class="web-transport" aria-label="Playback controls">
     {#if session && (active || (onnext && next && upNext !== null))}
       <div class="web-floating">
-        {#if active}
-          <Button
-            variant="primary"
-            class="web-skip"
-            label={SKIP_LABEL[active.kind]}
-            onclick={skipActive}
-          />
-        {/if}
+        {@render skipAction('web-skip')}
         {#if onnext && next && upNext !== null}
           <div
             class="web-up-next"
@@ -7206,13 +7437,13 @@
             oninput={(event) => {
               const to = Number(event.currentTarget.value);
               tvPosition = to;
-              // A finger drag follows the finger to the second, and a receiver is asked once the thumb is let go:
+              // A finger drag follows the finger to the second, and the cast page is asked once the thumb is let go:
               // both are sought at `change`, not at every step.
-              if (!scrubbing && !castView) seekTo(to);
+              if (!scrubbing && !framePlays) seekTo(to);
             }}
             onchange={(event) => {
               timelineHeld = false;
-              if (!scrubbing && !castView) return;
+              if (!scrubbing && !framePlays) return;
               scrubbing = false;
               seekTo(Number(event.currentTarget.value));
             }}
@@ -7324,16 +7555,22 @@
                 onclick={() => void togglePictureInPicture()}>{@render pipIcon()}</button
               >
             {/if}
-            <button
-              class="web-glyph"
-              type="button"
-              aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-              data-tip={i18n.phrase('Fullscreen')}
-              data-key="F"
-              onclick={() => void toggleFullscreen()}
-            >
-              <ButtonIcon name="fullscreen" />
-            </button>
+            {#if castStage && frameFullscreen}
+              <!-- The frame's fullscreen button sits here, in its place and of its size: only a press in the frame
+                   can make its video fill an iPhone's screen. -->
+              <span class="frame-fullscreen" bind:this={frameFullscreenSlot}></span>
+            {:else}
+              <button
+                class="web-glyph"
+                type="button"
+                aria-label={playerFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                data-tip={i18n.phrase('Fullscreen')}
+                data-key="F"
+                onclick={() => void toggleFullscreen()}
+              >
+                <ButtonIcon name="fullscreen" />
+              </button>
+            {/if}
           {/if}
           <span class="web-tip" data-tip={i18n.phrase('More')}>
             <ActionMenu
@@ -7596,6 +7833,36 @@
   </svg>
 {/snippet}
 
+<!-- Skip Intro/Credits, and while an automatic skip counts down, its seconds. The button stays pressable throughout and
+     its name never changes: the seconds are hidden from assistive technology, and the countdown is said once, as it
+     starts. Playback interaction (pause, play, a seek within the segment) is "keep watching", as on the Apple TV. -->
+{#snippet skipAction(className: string)}
+  {#if active}
+    {@const counting = autoSkip && autoSkipIn !== null}
+    <Button
+      variant="primary"
+      class={className}
+      label={SKIP_LABEL[active.kind]}
+      aria-describedby={counting ? 'auto-skip-notice' : undefined}
+      onclick={skipActive}
+      >{#if counting}<span class="auto-skip-in" aria-hidden="true"
+          >{i18n.format('player.autoSkipIn', 'Auto-skip in {seconds}s', {
+            seconds: autoSkipIn!,
+          })}</span
+        >{/if}</Button
+    >
+    {#if counting}
+      <p id="auto-skip-notice" class="web-sr" role="status">
+        {i18n.format(
+          'player.autoSkipNotice',
+          'Skips automatically in {seconds} seconds. Pause or seek to keep watching.',
+          { seconds: AUTO_SKIP_GRACE_MS / 1000 },
+        )}
+      </p>
+    {/if}
+  {/if}
+{/snippet}
+
 {#snippet skipIcon(direction: 'back' | 'forward')}
   <svg class="skip-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
     <path
@@ -7844,6 +8111,25 @@
     z-index: auto;
     border-radius: 0;
     background: #000;
+  }
+
+  /* Over the frame's picture and under Den's bars (`stagePicture`). */
+  .stage-picture {
+    position: absolute;
+    z-index: 1;
+    cursor: pointer;
+  }
+
+  .web-custom-player.web-controls-hidden:not(.web-touch-player) .stage-picture {
+    cursor: none;
+  }
+
+  /* The hole for the frame's output buttons: a press there reaches the frame under it. */
+  .frame-outputs {
+    display: inline-block;
+    flex: none;
+    height: 44px;
+    pointer-events: none;
   }
 
   /* A blocked cross-origin player must receive its own trusted Play click, above Den's overlapping chrome. */
@@ -8298,6 +8584,14 @@
     min-height: 44px;
   }
 
+  .web-custom-player .web-top > .web-output {
+    pointer-events: none;
+  }
+
+  .web-custom-player:not(.web-controls-hidden) .web-output > :not(.frame-outputs) {
+    pointer-events: auto;
+  }
+
   /* Every control is a bare glyph on a 44px target; only Play is filled. Pressed, a faint circle behind it. */
   .web-custom-player :global(.web-glyph) {
     --button-icon-size: 24px;
@@ -8426,6 +8720,13 @@
 
   .web-source {
     display: none;
+  }
+
+  .auto-skip-in {
+    margin-inline-start: 0.6em;
+    font-weight: 400;
+    opacity: 0.8;
+    font-variant-numeric: tabular-nums;
   }
 
   .web-sr {
@@ -8674,6 +8975,9 @@
     font-weight: 600;
     backdrop-filter: var(--web-glass-blur);
     -webkit-backdrop-filter: var(--web-glass-blur);
+
+    /* `.web-floating > *` cannot reach Button's own element (scoped `*`), and `.web-transport` turns presses off. */
+    pointer-events: auto;
   }
 
   .web-up-next {
@@ -8951,6 +9255,28 @@
     display: flex;
     align-items: center;
     min-width: 0;
+  }
+
+  /* The hole for the frame's fullscreen button, the size of the dock's own. The dock and its group under it let a press
+     there through too; their other controls take theirs. */
+  .frame-fullscreen {
+    display: inline-block;
+    flex: none;
+    width: 44px;
+    height: 44px;
+  }
+
+  .web-custom-player .web-bar > .web-dock:has(.frame-fullscreen),
+  .web-dock:has(.frame-fullscreen) > .web-dock-group,
+  .web-dock-group > .frame-fullscreen {
+    pointer-events: none;
+  }
+
+  .web-custom-player:not(.web-controls-hidden)
+    .web-dock:has(.frame-fullscreen)
+    > .web-dock-group
+    > :not(.frame-fullscreen) {
+    pointer-events: auto;
   }
 
   .web-touch-player .web-dock-transport {

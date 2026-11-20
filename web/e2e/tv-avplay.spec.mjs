@@ -98,7 +98,10 @@ test('Samsung AVPlay saves exact progress with metadata when the engine duration
   await routePlayback(page, undefined, undefined, { duration: 0, runtime: 2 });
   await page.goto(`${ORIGIN}/test/player.html`);
   await expect.poll(() => callsNamed(page, 'play')).toHaveLength(1);
-  await page.evaluate(() => window.__avplayFixture.latest().oncurrentplaytime(31_000));
+  // The fixture's own clock ticks every 40 ms and, with an unknown duration, clamps the position back to 0. Left
+  // running it moves the play head off 31 s before the pause; a pause at 0 writes no progress, so the last write
+  // (`playing: true`) stays. Freeze the clock at the reported position.
+  await page.evaluate(() => window.__avplayFixture.reportPosition(31_000));
   expect(await remoteKey(page, 'Unidentified', 19)).toBe(true);
   await expect
     .poll(() => page.locator('.player video').evaluate((element) => element.paused))

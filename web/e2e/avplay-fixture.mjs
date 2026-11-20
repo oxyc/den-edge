@@ -6,6 +6,7 @@ export function installAvplayFixture(initialDuration = 60_000) {
   let listener;
   let timer;
   let delaySeeks = false;
+  let clockHeld = false;
   let nextPrepareError;
   let seekPending = false;
   const pendingSeeks = [];
@@ -25,7 +26,7 @@ export function installAvplayFixture(initialDuration = 60_000) {
   const startClock = () => {
     stopClock();
     timer = setInterval(() => {
-      if (state !== 'PLAYING' || !listener) return;
+      if (state !== 'PLAYING' || !listener || clockHeld) return;
       currentTime = Math.min(duration, currentTime + 1000);
       listener.oncurrentplaytime(currentTime);
     }, 40);
@@ -43,6 +44,7 @@ export function installAvplayFixture(initialDuration = 60_000) {
       requireIdle('open');
       requireState('open', ['NONE', 'IDLE']);
       record('open', url);
+      clockHeld = false;
       currentTime = 0;
       duration = initialDuration;
       state = 'IDLE';
@@ -166,6 +168,12 @@ export function installAvplayFixture(initialDuration = 60_000) {
     state: () => state,
     current: () => currentTime,
     latest: () => listener,
+    /** Report one play position and stop the fixture's own clock there, so no tick can move it before the test acts. */
+    reportPosition: (milliseconds) => {
+      clockHeld = true;
+      currentTime = milliseconds;
+      listener?.oncurrentplaytime(milliseconds);
+    },
     end: () => listener?.onstreamcompleted(),
     error: (message = 'PLAYER_ERROR_CONNECTION_FAILED') => listener?.onerror(message),
     failNextPrepare: (message = 'PLAYER_ERROR_CONNECTION_FAILED') => {

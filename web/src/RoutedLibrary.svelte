@@ -44,7 +44,12 @@
     ProfileDirectoryView,
   } from './lib/libraryServiceProtocol';
   import type { Explore, PeopleView, Route, TitleSeason } from './lib/route';
-  import { LinkScreen, ProfileSettingsScreen, SettingsScreen } from './lib/screens.svelte';
+  import {
+    LinkScreen,
+    MissingLibraryNoticeScreen,
+    ProfileSettingsScreen,
+    SettingsScreen,
+  } from './lib/screens.svelte';
   import type { ApplyResult } from './lib/assistant';
   import { assistantLibrary } from './lib/assistantLibrary.svelte';
   import { householdAssistantFetch } from './lib/relayFetch';
@@ -75,6 +80,7 @@
     startupFailure,
     startupHandedOver,
     startupMark,
+    startupRenderPhase,
     watchStartupHandover,
   } from './lib/startupTiming';
   import type { CompoundResetPage, CompoundResetStartResult } from './lib/profileKeyResetPage';
@@ -441,6 +447,9 @@
       ({ default: component }) => (LegacyBackupRecovery = component),
     );
   });
+  $effect(() => {
+    if (shown.missingLibrary) void MissingLibraryNoticeScreen.load();
+  });
   $effect.pre(() => onprofilehint(optimistic ? profileHint : null));
   // The optimistic Owner frame is the startup this page is timed on: say when it is replaced, and if it is not.
   let optimisticShown = false;
@@ -681,6 +690,7 @@
     const active = coordinator.session;
     if (!active) return;
     if (session !== active) {
+      startupRenderPhase('profile_handover');
       // The first authenticated session replaces a hidden bootstrap model, not another viewer. Preserve a direct
       // launch URL for that initial Owner/Kid/Visitor; only later changes retire an already-visible route scope.
       const next = profileSessionKey(active.identity, active.policyKey);
@@ -1622,6 +1632,9 @@
     if (!__DEN_MANAGED_PLAYBACK_RECEIPTS__) return;
     const current = session;
     const retry = playbackReceiptRetry;
+    // Receipts need the library's relay membership, withheld while den-edge refuses to start it: set them up again
+    // once a read finds the log, instead of leaving the failure from that wait standing.
+    void session.missingLibrary;
     const heldStatus = untrack(() => playbackReceiptStatus);
     if (heldStatus && heldStatus.owner !== current) playbackReceiptStatus = null;
     if (!session.foregrounded || !memberModel) {
@@ -1913,7 +1926,17 @@
           alert={shown.alert}
           undo={shown.undo}
         />
-        {#if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
+        {#if MissingLibraryNoticeScreen.current}
+          <MissingLibraryNoticeScreen.current
+            missing={shown.missingLibrary}
+            route={settingsRoute}
+          />
+        {/if}
+        <!-- While den-edge refuses to start the library the notice above is the one truthful message: a receipt
+             failure here would offer a Try again that cannot succeed. -->
+        {#if shown.missingLibrary}
+          <!-- no receipt status -->
+        {:else if PlaybackReceiptStatus && playbackReceiptStatus?.owner === session}
           <PlaybackReceiptStatus
             state={playbackReceiptStatus.state}
             retry={() => playbackReceiptRetry++}

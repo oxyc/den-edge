@@ -1,7 +1,8 @@
 // An OpenSubtitles subtitle on a TorBox stream is a page-side `<track>`. Where WebKit plays HLS itself (an iPhone), it
 // hands the stream to the system player, whose fullscreen view and captions menu show only the renditions a playlist
 // names, so that sidecar never appeared there. There an OpenSubtitles track the viewer wants is Den Remux's, whose
-// master names it; hls.js, which renders the page's own `<track>`, keeps TorBox. TorBox embedded tracks take a separate
+// master names it — but only once the viewer switches there: a subtitle never moves or replaces the stream by itself.
+// hls.js, which renders the page's own `<track>`, keeps TorBox. TorBox embedded tracks the viewer picks take a separate
 // path: Hearth asks TorBox to put the selected stream in its direct playlist.
 import { test, expect, chromium, webkit } from '@playwright/test';
 import { existsSync } from 'node:fs';
@@ -181,7 +182,7 @@ const playing = (page) =>
 test.describe('on an iPhone, which plays HLS in the system player', () => {
   test.skip(!existsSync(webkit.executablePath()), 'WebKit is not installed here');
 
-  test('a subtitle picked on a TorBox stream moves it to Den Remux, whose playlist names it', async () => {
+  test('a subtitle picked on a TorBox stream keeps that stream, offering Den Remux, which only the viewer’s switch opens', async () => {
     const browser = await webkit.launch();
     try {
       const context = await iphone(browser, 'en-US');
@@ -200,6 +201,22 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       const english = subtitleChoice(page, 'English');
       await expect(english).toHaveAccessibleDescription(/OpenSubtitles/);
       await english.click();
+      // The playing stream is kept and the viewer told; nothing is asked of Hearth.
+      const needsRemux =
+        'English subtitles need Den Remux on this player. TorBox keeps playing until you switch.';
+      await expect(page.getByText(needsRemux)).toBeVisible();
+      await page.waitForTimeout(1_000);
+      expect(operations).toHaveLength(1);
+      await showsSubtitles(page, 'Off');
+      expect(await page.evaluate(shown)).toBeNull();
+      // The subtitle menu offers the switch; pressing it is the viewer's own move to Den Remux.
+      await subtitlesButton(page).click();
+      const toRemux = page
+        .getByRole('group', { name: 'Subtitles' })
+        .getByRole('menuitem', { name: 'Switch to Den Remux' });
+      await expect(toRemux).toHaveAccessibleDescription(needsRemux);
+      expect(operations).toHaveLength(1);
+      await toRemux.click();
       await expect.poll(() => operations.length, { timeout: 10_000 }).toBe(2);
       expect(operations[1].directFailed).toBe(true);
       expect(operations[1].filename).toBe('fixture.mkv');
@@ -215,7 +232,9 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
     }
   });
 
-  test('a title in a language the browser doesn’t name starts on Den Remux, its subtitle shown', async () => {
+  // A subtitle the system player can't show from TorBox never moves the start to Den Remux, nor replaces the stream
+  // once it plays: the menu says Off, and the viewer may switch from there.
+  test('a title in a language the browser doesn’t name starts on TorBox, and stays there', async () => {
     const browser = await webkit.launch();
     try {
       const context = await iphone(browser, 'sv-SE');
@@ -227,16 +246,17 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       await playing(page);
       expect(operations).toHaveLength(1);
       expect(operations[0].player).toBe('native');
-      expect(operations[0].directFailed).toBe(true);
-      await expect
-        .poll(() => page.evaluate(shown), { timeout: 15_000 })
-        .toMatchObject({ language: 'en', label: 'English (in file)' });
+      expect(operations[0]).not.toHaveProperty('directFailed');
+      await page.waitForTimeout(1_000);
+      expect(operations).toHaveLength(1);
+      expect(await page.evaluate(shown)).toBeNull();
+      await expect(subtitlesButton(page)).toHaveAccessibleName(/undertexter Av$/);
     } finally {
       await browser.close();
     }
   });
 
-  test('a subtitle language set in Settings starts on Den Remux', async () => {
+  test('a subtitle language set in Settings starts on TorBox, and stays there', async () => {
     const browser = await webkit.launch();
     try {
       const context = await iphone(browser, 'en-US');
@@ -246,10 +266,11 @@ test.describe('on an iPhone, which plays HLS in the system player', () => {
       await playing(page);
       expect(operations).toHaveLength(1);
       expect(operations[0].player).toBe('native');
-      expect(operations[0].directFailed).toBe(true);
-      await expect
-        .poll(() => page.evaluate(shown), { timeout: 15_000 })
-        .toMatchObject({ language: 'en', label: 'English (in file)' });
+      expect(operations[0]).not.toHaveProperty('directFailed');
+      await page.waitForTimeout(1_000);
+      expect(operations).toHaveLength(1);
+      expect(await page.evaluate(shown)).toBeNull();
+      await showsSubtitles(page, 'Off');
     } finally {
       await browser.close();
     }
@@ -585,7 +606,8 @@ test('hls.js activates a TorBox built-in track even while OpenSubtitles sidecars
   }
 });
 
-test('a preferred TorBox built-in is created into the initial managed stream', async () => {
+// A TorBox built-in the stream was not created with would take another stream; a preference never replaces one.
+test('a preferred language shows a track the initial TorBox stream carries, never creating another', async () => {
   const browser = await launchChromium();
   try {
     const context = await browser.newContext({ locale: 'en-US' });
@@ -594,17 +616,12 @@ test('a preferred TorBox built-in is created into the initial managed stream', a
     await page.goto(`${ORIGIN}/test/player.html?playback=managed&subtitleLanguage=en`);
     await playing(page);
 
-    expect(operations).toHaveLength(2);
-    expect(operations[0]).not.toHaveProperty('subtitleTrack');
-    expect(operations[1]).toMatchObject({
-      directOnly: true,
-      filename: 'fixture.mkv',
-      subtitleTrack: 0,
-    });
     await expect
       .poll(() => page.evaluate(shown), { timeout: 10_000 })
-      .toMatchObject({ language: 'en', label: 'English (in file)' });
+      .toMatchObject({ language: 'en', label: 'opensubtitles:0' });
     await expect.poll(async () => (await page.evaluate(shown))?.cues ?? 0).toBeGreaterThan(0);
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).not.toHaveProperty('subtitleTrack');
   } finally {
     await browser.close();
   }

@@ -494,6 +494,106 @@ test('a direct trailer player URL opens Den’s trailer dialog', async () => {
   }
 });
 
+/** reel.ts's PREPARE_MS, PLAN_MS and TRANSPORT_MS, which these hold the page to. */
+const PREPARE_MS = 10_000;
+const PLAN_MS = 10_000;
+const TRANSPORT_MS = 5_000;
+/** Room for a loaded runner past each bound: these assert that the request is given up, not a stopwatch. */
+const SLACK_MS = 5_000;
+
+test('a discovery that never answers leaves the detail page usable and is given up at its bound', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage();
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    // Never fulfilled: an unanswered connection, until the page lets go of it.
+    await mock(page, () => {});
+    const asked = page.waitForRequest('**/reel/fixture/prepare/**');
+    const abandoned = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().includes('/reel/fixture/prepare/'),
+      timeout: 60_000,
+    });
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
+    await asked;
+    const began = Date.now();
+    // The page is whole while the trailer is still being asked for.
+    await expect(page.locator('h1')).toHaveText('The Movie');
+    await expect(page.getByText(movie.overview).first()).toBeVisible();
+    await expect(page.locator('.backdrop')).toBeVisible();
+    await abandoned;
+    const took = Date.now() - began;
+    expect(took).toBeGreaterThan(PREPARE_MS - 1_000);
+    expect(took).toBeLessThan(PREPARE_MS + SLACK_MS);
+    await expect(page.locator('video')).not.toHaveAttribute('src');
+    await expect(page.locator('.backdrop')).toBeVisible();
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a plan that never answers gives way to the next candidate at its bound', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage();
+    await mock(page, (r) => r.fulfill({ json: prepareAnswer(null, null, ['slow', 'trailer']) }));
+    await page.route('**/sources/slow.json**', () => {});
+    await page.route('**/sources/trailer.json**', (r) =>
+      r.fulfill({ json: sourcePlan(carried('http://internal/play/trailer.webm')) }),
+    );
+    const asked = page.waitForRequest('**/sources/slow.json**');
+    const abandoned = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().includes('/sources/slow.json'),
+      timeout: 60_000,
+    });
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
+    await asked;
+    const began = Date.now();
+    await expect(page.locator('h1')).toHaveText('The Movie');
+    const video = page.locator('video');
+    await expect(video).not.toHaveAttribute('src');
+    await abandoned;
+    await expect(video).toHaveAttribute('src', relayUrl('http://internal/play/trailer.webm'));
+    await expect(video).toHaveClass(/\bplaying\b/);
+    expect(Date.now() - began).toBeLessThan(PLAN_MS + SLACK_MS);
+  } finally {
+    await browser.close();
+  }
+});
+
+// The fixture page is on a local name, where Edge's relay carries trailers: an unanswered transport still plays
+// through it. A public page assumes no relay (reel.test.ts), since Edge refuses carried bytes there.
+test('a transport that never answers falls back to the relay on a local page at its bound', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage();
+    await mock(page, (r) => r.fulfill({ json: trailerAnswer() }));
+    await page.route('**/reel/transport', () => {});
+    const asked = page.waitForRequest('**/reel/transport');
+    const abandoned = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().endsWith('/reel/transport'),
+      timeout: 60_000,
+    });
+    await page.goto(`${E2E_ORIGIN}/test/detail-trailer.html`);
+    await asked;
+    const began = Date.now();
+    await abandoned;
+    const video = page.locator('video');
+    await expect(video).toHaveAttribute('src', relayUrl('http://internal/play/trailer.webm'));
+    await expect(video).toHaveClass(/\bplaying\b/);
+    expect(Date.now() - began).toBeLessThan(TRANSPORT_MS + SLACK_MS);
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const failed of ['missing', 'portrait'])
   test(`mobile trailer tries the next candidate after a ${failed} first trailer`, async () => {
     const browser = await chromium.launch({

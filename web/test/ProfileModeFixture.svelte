@@ -30,9 +30,11 @@
     VisitorActivityLock,
     VisitorProfileSession,
   } from '../src/lib/visitorProfileSession.svelte';
+  import { setInterfaceLanguage } from '../src/lib/i18n.svelte';
 
   const params = new URLSearchParams(location.search);
-  const configured = params.get('pin') !== 'none';
+  let ownerPin = params.get('pin') === 'none' ? null : '1234';
+  const configured = ownerPin !== null;
   const connectionsMode = params.get('connections');
   const connectionFailures = Number(
     params.get('connectionFailures') ?? (connectionsMode === 'repeat' ? 1 : 0),
@@ -53,6 +55,24 @@
     { profile: string; name: string; maximumAge: number; receipt: string }
   >();
   let releaseHeldPin: ((matches: boolean) => void) | null = null;
+  let failNextPreferenceSave = false;
+  const preferenceFailureStorage: Storage = {
+    get length() {
+      return localStorage.length;
+    },
+    clear: () => localStorage.clear(),
+    getItem: (key) => localStorage.getItem(key),
+    key: (index) => localStorage.key(index),
+    removeItem: (key) => localStorage.removeItem(key),
+    setItem(key, value) {
+      if (failNextPreferenceSave && key.startsWith('den.profile.preferences.preview.v1:')) {
+        failNextPreferenceSave = false;
+        throw new Error('fixture profile preference write refused');
+      }
+      localStorage.setItem(key, value);
+    },
+  };
+  const profileStorage = params.has('preferenceRetry') ? preferenceFailureStorage : localStorage;
   if (params.has('orphan'))
     localStorage.setItem(
       'den.profile.visitor.v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:activity',
@@ -171,7 +191,19 @@
         throw new Error('fixture household PIN query unavailable');
       if (params.has('holdPin') && pinChecks === 1)
         return new Promise<boolean>((resolve) => (releaseHeldPin = resolve));
-      return pin === '1234';
+      return pin === ownerPin;
+    },
+    setParentalPin: async (_current: string | null, pin: string) => {
+      ownerPin = pin;
+      connectionsSnapshot = {
+        connection: 'ready',
+        value: {
+          kind: 'connections',
+          parentalPinConfigured: true,
+          parentalPinDelivery: 'synced',
+        } as ConnectionsView,
+      };
+      return { delivery: 'synced' };
     },
     createKidProfile: async (name: string, maximumAge: number, pin: string, operationId: string) =>
       fixtureCreateKid(name, maximumAge, pin, operationId),
@@ -442,6 +474,12 @@
       releaseHeldPin = null;
       resolve?.(matches);
     },
+    failNextPreferenceSave() {
+      failNextPreferenceSave = true;
+    },
+    setLanguage(language: 'en' | 'es' | 'sv') {
+      return setInterfaceLanguage(language);
+    },
     resolveHeldCreate() {
       const resolve = releaseHeldCreate;
       releaseHeldCreate = null;
@@ -488,7 +526,7 @@
       if (answer === 'enabled' || answer === 'preview')
         profiles = new ProfileModeCoordinator(
           owner,
-          localStorage,
+          profileStorage,
           window,
           visitorLock,
           params.has('realProfiles')

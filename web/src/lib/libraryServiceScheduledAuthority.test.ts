@@ -6,6 +6,7 @@ import {
   HELD_AFTER_MS,
   HELD_SPACING_MS,
   HELD_WAIT_SECONDS,
+  logStatus,
   ScheduledLibraryServiceAuthority,
   VISIBLE_REFRESH_MS,
   type LibraryMaintenance,
@@ -252,6 +253,29 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(work.pending[3]!.options?.stopWaiting?.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS * 3);
     expect(work.run).toHaveBeenCalledTimes(4);
+    await scheduled.close();
+  });
+
+  it('lets a read held before the first paint go, so the work foreground readiness releases runs at once', async () => {
+    vi.useFakeTimers();
+    const work = heldMaintenance();
+    const background = { run: vi.fn(async () => false) };
+    const scheduled = new ScheduledLibraryServiceAuthority(authority().port, work.port, {
+      background,
+    });
+
+    await scheduled.observe(lifecycle());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.run).toHaveBeenCalledOnce();
+
+    await scheduled.observe({ kind: 'foreground-ready' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(work.pending[0]!.options?.stopWaiting?.aborted).toBe(true);
+    expect(background.run).toHaveBeenCalledOnce();
+    // The page is not parked in a fresh hold: the next read comes on the plain cadence.
+    expect(work.run).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS);
+    expect(work.run).toHaveBeenCalledTimes(2);
     await scheduled.close();
   });
 
@@ -520,5 +544,33 @@ describe('ScheduledLibraryServiceAuthority', () => {
     expect(current()).toBe(false);
     finish();
     await closing;
+  });
+});
+
+describe('logStatus', () => {
+  const log = (state: Partial<Parameters<typeof logStatus>[0]> = {}) => ({
+    moved: false,
+    upgradeRequired: null,
+    refused: false,
+    readOnlyReason: null,
+    ...state,
+  });
+
+  it('names a refused start apart from outage, read-only, move and update fences', () => {
+    expect(logStatus(log())).toEqual({ kind: 'ready' });
+    expect(logStatus(log({ refused: true }))).toEqual({ kind: 'refused-start' });
+    expect(logStatus(log({ refused: true, readOnlyReason: 'pre-v4 backup' }))).toEqual({
+      kind: 'refused-start',
+    });
+    expect(logStatus(log({ readOnlyReason: 'pre-v4 backup' }))).toEqual({
+      kind: 'read-only',
+      reason: 'pre-v4 backup',
+    });
+    // A move or a newer wire decides what the library is, so either outranks a refused start.
+    expect(logStatus(log({ refused: true, moved: true }))).toEqual({ kind: 'moved' });
+    expect(logStatus(log({ refused: true, upgradeRequired: 5 }))).toMatchObject({
+      kind: 'failed',
+      error: { code: 'update-required' },
+    });
   });
 });

@@ -98,10 +98,11 @@ window.addEventListener('unhandledrejection', (event) => {
 
 // A page whose first route never rendered — the billboard stall this is written for found nothing in any log,
 // because nothing here ever said so. One check, a while after load: by then every route has either drawn
-// `RoutePage`'s own marker or it never will on this load.
+// `RoutePage`'s own marker, or the pairing / failed-load screen its own (`data-startup-outcome`), or it never will on
+// this load. A bare loading spinner is neither.
 const RENDER_STALL_MS = 12_000;
 setTimeout(() => {
-  if (!document.querySelector('[data-route-page][data-active="true"]'))
+  if (!document.querySelector('[data-route-page][data-active="true"],[data-startup-outcome]'))
     sendPageError(pageError('render_stall', 'app'));
 }, RENDER_STALL_MS);
 
