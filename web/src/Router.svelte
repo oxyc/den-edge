@@ -505,6 +505,8 @@
     document.addEventListener('den:back-out', outRequested);
     window.addEventListener('popstate', traversed);
     window.addEventListener('pagehide', writeAddress);
+    // The shell's bar can ask for a page before this listens (`App.svelte` holds it until now).
+    document.dispatchEvent(new Event('den:routing'));
     return () => {
       mounted = false;
       writeAddress();

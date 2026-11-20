@@ -1,7 +1,6 @@
 <script lang="ts">
   import { currentAppPath } from './lib/runtimeUrl';
   import NavigationBar from './components/NavigationBar.svelte';
-  import RoutedLibrary from './RoutedLibrary.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
   import { installKeyboardNavigation } from './lib/keyboardNavigation';
@@ -13,6 +12,7 @@
   import { links } from './lib/links.svelte';
   import { libraryRetirements } from './lib/libraryRetirement.svelte';
   import { phoneLanding } from './lib/phoneLanding.svelte';
+  import { navigate } from './lib/navigation';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
   import { meterScreens, screenOf } from './lib/screenPerformance';
@@ -23,6 +23,7 @@
     LibraryRetirementNoticeScreen,
     LinkScreen,
     PhoneDialogScreen,
+    RoutedLibraryScreen,
   } from './lib/screens.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   import type { ProfileHint } from './lib/profileHint';
@@ -87,6 +88,31 @@
 
   $effect(() => syncIdentities());
 
+  // The bar is the shell's and is up before the library loads, so a page it asks for in the meantime has no Router to
+  // hear it. The last such request is held, out of every other listener's sight (the window's capture runs first),
+  // and sent whole once a Router announces itself.
+  let routing = false;
+  let held: { path: string; replace?: boolean } | undefined;
+  onMount(() => {
+    const hold = (event: Event) => {
+      if (routing || !(links.current || links.browsing)) return;
+      held = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+      event.stopImmediatePropagation();
+    };
+    const release = () => {
+      routing = true;
+      const request = held;
+      held = undefined;
+      if (request) navigate(request.path, request.replace);
+    };
+    window.addEventListener('den:navigate', hold, { capture: true });
+    document.addEventListener('den:routing', release);
+    return () => {
+      window.removeEventListener('den:navigate', hold, { capture: true });
+      document.removeEventListener('den:routing', release);
+    };
+  });
+
   onMount(() => {
     const stopKeyboard = !__DEN_TV__ ? installKeyboardNavigation() : undefined;
     const visible = () => {
@@ -107,6 +133,8 @@
     // Pairing, and the curve it runs on, load only for a browser that isn't paired yet and hasn't already chosen to
     // look around without it.
     if (!links.current && !links.browsing) void LinkScreen.load();
+    // The library's graph (Home, the catalogue, the library service) is the other side of that same decision.
+    else void RoutedLibraryScreen.load();
   });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
@@ -191,37 +219,44 @@
 {#if LibraryRetirementNoticeScreen.current}<LibraryRetirementNoticeScreen.current />{/if}
 
 <main>
-  {#if links.current}
-    {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
-      <RoutedLibrary
-        link={links.current}
-        {query}
-        {explore}
-        {people}
-        {watchedYear}
-        {titleSeason}
-        onchange={(next) => (route = next)}
-        onprofilechange={resetProfilePresentation}
-        onprofilecontrol={(control) => (profiles = control)}
-        onprofilehint={(hint) => (profileHint = hint)}
-        onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
-      />
-    {/key}
-  {:else if links.browsing}
-    <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
-         absent case the components already model. -->
-    <RoutedLibrary
-      link={null}
-      {query}
-      {explore}
-      {people}
-      {watchedYear}
-      {titleSeason}
-      onchange={(next) => (route = next)}
-      onprofilechange={resetProfilePresentation}
-      onprofilecontrol={(control) => (profiles = control)}
-      onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
-    />
+  {#if links.current || links.browsing}
+    {#if RoutedLibraryScreen.current}
+      {@const RoutedLibrary = RoutedLibraryScreen.current}
+      {#if links.current}
+        {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
+          <RoutedLibrary
+            link={links.current}
+            {query}
+            {explore}
+            {people}
+            {watchedYear}
+            {titleSeason}
+            onchange={(next) => (route = next)}
+            onprofilechange={resetProfilePresentation}
+            onprofilecontrol={(control) => (profiles = control)}
+            onprofilehint={(hint) => (profileHint = hint)}
+            onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
+          />
+        {/key}
+      {:else}
+        <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
+             absent case the components already model. -->
+        <RoutedLibrary
+          link={null}
+          {query}
+          {explore}
+          {people}
+          {watchedYear}
+          {titleSeason}
+          onchange={(next) => (route = next)}
+          onprofilechange={resetProfilePresentation}
+          onprofilecontrol={(control) => (profiles = control)}
+          onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
+        />
+      {/if}
+    {:else if RoutedLibraryScreen.failed}
+      <ScreenLoading screen={RoutedLibraryScreen} />
+    {/if}
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {:else if LinkScreen.failed}

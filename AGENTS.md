@@ -99,6 +99,19 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The library's graph out of an unpaired start (#1381) was measured locally on matched builds of main `03bd6ff9` and
+  this head. Browser: core delta 128,691 -> 126,067 (-2,624), translations 51,833 (unchanged), startup 207,408 ->
+  107,985 (-99,423), 120 -> 107 files. webOS: startup 242,438 -> 132,917, total 1,005,342 -> 994,916, 140 -> 112
+  files. Tizen: startup 243,064 -> 133,495, total 1,369,442 -> 1,359,133, 150 -> 122 files (gzip, all JS and CSS).
+  `RoutedLibrary` loads as a lazy screen by the decision that loads `LinkScreen`; `main.ts` asks for the same import
+  beside the app module when storage says the load shows the library. What only the library reaches is one
+  `routed-library` chunk, and what it shares with first paint one `startup-shared` chunk (`scripts/libraryModules.ts`;
+  without them the automatic split made 18 more shared chunks and +8,965 bytes). The TV's first paint is
+  `tv/main.ts`, which imports the library service itself, so its entry is a root there. Two ordering hazards of group
+  chunks showed up and are closed: a module some `import()` loads by itself is never grouped (the TV build lost
+  `RoutedLibrary`'s namespace object), and the groups apply to the client build only (the shell's server build ran a
+  module before the one it extends). The complete ceiling does not move.
+
 - AirPlay's way back (#1202) was measured on matched local production builds at main `71f28b69` and the PR head: the
   complete non-translation delta moves 128,173 → 128,691 (+518), translations 51,786 → 51,833 (+47: "Playing on
   AirPlay" and "Stop AirPlay", leaving 7 under the translation ceiling), and startup 11,025 → 11,012 over the fixed

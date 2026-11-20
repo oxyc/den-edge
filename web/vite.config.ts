@@ -5,11 +5,18 @@ import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 import { stripEdgeAuthority, upstream } from './scripts/upstream.ts';
 import { localizeMarkup } from './scripts/localize-markup.ts';
+import { libraryModules } from './scripts/libraryModules.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { sourcePhrases as spanishPhrases } from './src/lib/messages/phrases/es.ts';
 import { sourcePhrases as swedishPhrases } from './src/lib/messages/phrases/sv.ts';
+
+// The TV builds merge this config; their first paint is `tv/main.ts`, so they group from that entry instead.
+const grouped = libraryModules(
+  fileURLToPath(new URL('./src', import.meta.url)),
+  Boolean(process.env.DEN_TV_PLATFORM),
+);
 
 const phraseKey = (value: string): string => {
   let hash = 0x811c9dc5;
@@ -235,6 +242,35 @@ const preloadApplication = () => ({
   },
 });
 
+/**
+ * What only the library reaches loads as one chunk, and what it shares with the first paint as another
+ * (`scripts/libraryModules.ts`). The client build only: grouped in the server-rendered shell's build, a module of the
+ * group ran before the one it extends (`SvelteMap is not a constructor`), so group chunks are not free of ordering
+ * hazards and stay where the end-to-end runs see them.
+ */
+const libraryChunks = (): Plugin => ({
+  name: 'den-library-chunks',
+  config(_config, { isSsrBuild }) {
+    if (isSsrBuild) return;
+    return {
+      build: {
+        rolldownOptions: {
+          output: {
+            codeSplitting: {
+              groups: (['library', 'startup'] as const).map((which) => ({
+                name: which === 'library' ? 'routed-library' : 'startup-shared',
+                // Their dependencies are in the other graph or the same one, and stay where they are.
+                includeDependenciesRecursively: false,
+                test: (id: string) => grouped[which].has(id.split('?')[0]!.replaceAll('\\', '/')),
+              })),
+            },
+          },
+        },
+      },
+    };
+  },
+});
+
 export default defineConfig({
   define: {
     __DEN_TV__: 'false',
@@ -283,6 +319,7 @@ export default defineConfig({
     compiledPhrases(),
     svelte({ preprocess: localizeMarkup() }),
     preloadApplication(),
+    libraryChunks(),
   ],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
@@ -318,27 +355,31 @@ export default defineConfig({
     cssCodeSplit: true,
     // The production build the time budgets run against (`playwright.budgets.config.ts`) also carries the page that
     // seeds their household with the app's own code (`test/seed-library.html`). Never in a release build.
-    ...(process.env.DEN_E2E_SEED === '1'
-      ? {
-          // Rolldown may retain the nested library Worker's generated URL while dropping its asset from a
-          // multi-entry build. An explicit, stable test-only entry keeps the production-path Worker executable.
-          rolldownOptions: {
+    rolldownOptions: {
+      ...(process.env.DEN_E2E_SEED === '1'
+        ? {
+            // Rolldown may retain the nested library Worker's generated URL while dropping its asset from a
+            // multi-entry build. An explicit, stable test-only entry keeps the production-path Worker executable.
             input: {
               index: 'index.html',
               seed: 'test/seed-library.html',
               assistantProjectionWorker: 'src/lib/assistantProjectionWorker.ts',
             },
+          }
+        : {}),
+      ...(process.env.DEN_E2E_SEED === '1'
+        ? {
             output: {
-              entryFileNames: (chunk) =>
+              entryFileNames: (chunk: { name: string }) =>
                 chunk.name === 'assistantProjectionWorker'
                   ? 'assets/assistantProjectionWorker.js'
                   : chunk.name === 'shell'
                     ? 'shell.js'
                     : 'assets/[name]-[hash].js',
             },
-          },
-        }
-      : {}),
+          }
+        : {}),
+    },
   },
   test: {
     include: ['src/**/*.test.ts', 'cast/src/**/*.test.ts', 'scripts/**/*.test.ts'],

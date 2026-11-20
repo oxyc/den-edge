@@ -49,7 +49,7 @@ async function remoteTo(page, locator, keys, rounds = 16) {
   );
 }
 
-async function setup(page) {
+async function setup(page, { libraryDelayMs = 0, delayed = [] } = {}) {
   await page.addInitScript(() => {
     for (const method of ['showPopover', 'hidePopover', 'togglePopover'])
       delete HTMLElement.prototype[method];
@@ -62,6 +62,13 @@ async function setup(page) {
   });
   await recordFocusTrail(page);
   await routeGuestEdge(page, newEdge());
+  // Registered after the edge's routes, which take every request that comes to them first otherwise.
+  if (libraryDelayMs)
+    await page.route(/\/(?:RoutedLibrary|routed-library)[-.]/, async (route) => {
+      delayed.push(route.request().url());
+      await new Promise((resolve) => setTimeout(resolve, libraryDelayMs));
+      await route.continue();
+    });
   await page.route('**/tmdb/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path.includes('/search/'))
@@ -111,6 +118,41 @@ async function setup(page) {
   await page.keyboard.press('Enter');
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
 }
+
+test('an unpaired TV start shows the pairing screen without the library’s chunks', async ({
+  page,
+}) => {
+  await routeGuestEdge(page, newEdge());
+  const library = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    if (/\/(?:RoutedLibrary|routed-library|Library|Billboard|PosterCard)[-.]/.test(pathname))
+      library.push(pathname);
+  });
+  await page.goto(E2E_ORIGIN);
+  await expect(page.getByText('Open with a recovery code', { exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(2_000);
+  expect(library).toEqual([]);
+});
+
+test('Search pressed before the library has loaded opens once it has, with its field focused', async ({
+  page,
+}) => {
+  const delayed = [];
+  await setup(page, { libraryDelayMs: 3_000, delayed });
+  const search = page.getByRole('button', { name: 'Search', exact: true });
+  await remoteTo(page, search, ['ArrowUp', 'ArrowRight', 'ArrowLeft']);
+  await page.keyboard.press('Enter');
+  // The press landed while the library's chunk was still on its way.
+  expect(delayed).not.toEqual([]);
+  await expect(page).toHaveURL(/\/search/, { timeout: 30_000 });
+  const editor = page.locator('section.search').getByRole('searchbox');
+  await withPageState(page, '[data-route-page][data-active="true"] section.search', () =>
+    expect(editor).toBeFocused(),
+  );
+});
 
 test('TV search opens a poster without action menus and Back restores it', async ({ page }) => {
   const errors = [];
