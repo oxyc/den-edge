@@ -1,7 +1,7 @@
 // Keep the entry tiny enough for a retained parser-time hero to paint before Svelte evaluates and mounts. The
 // application module is preloaded from index.html, so this changes CPU admission rather than adding a network chain.
 import './app.css';
-import { openingLibraryIdentity } from './lib/openingLibraryIdentity';
+import { openingLibraryIdentity, opensLibrary } from './lib/openingLibraryIdentity';
 import { beginStartupRenderPhase, startupMark } from './lib/startupTiming';
 
 // A synced preference is authoritative once its profile opens. Until then, keep a warm non-English return visit
@@ -48,6 +48,9 @@ const start = () => {
     importFinished();
     bootstrapFinished();
   };
+  // A load that shows the library needs its chunk as well as the app module. Asking for both together keeps the
+  // library off the app module's critical path; `App.svelte` still decides what is shown and asks for the same import.
+  if (opensLibrary()) void import('./RoutedLibrary.svelte').catch(() => undefined);
   void import('./appMain').then(finished, finished);
 };
 const retainedHero = document.querySelector(

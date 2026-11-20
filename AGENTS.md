@@ -99,6 +99,14 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The library's graph out of an unpaired start (#1381) was measured locally on matched builds of main `1184de9d` and
+  this head: core delta 128,142 -> 125,720 (-2,422), translations 51,722 (unchanged), startup 207,415 -> 110,181
+  (-97,234), 120 -> 111 files. `RoutedLibrary` loads as a lazy screen by the decision that loads `LinkScreen`; `main.ts`
+  asks for the same import beside the app module when storage says the load shows the library. What only the library
+  reaches is one `routed-library` chunk (`scripts/libraryModules.ts`; without it the automatic split made 18 more
+  shared chunks and +8,965 bytes). The browser build only: the TV builds keep the automatic split. The complete
+  ceiling does not move.
+
 - Scoping retained availability to the exact household, profile and Scout (#1156) was measured locally on the PR head
   merged with main `e3940b7e` against that main built the same way: core delta 128,142 (main 128,000, +142),
   translations 51,722 (unchanged), startup delta 11,019 (main 10,744, +275). The growth is the authority admission

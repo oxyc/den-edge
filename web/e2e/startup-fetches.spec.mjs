@@ -44,16 +44,46 @@ async function countedLoad(page, path) {
 const countsOf = (seen) =>
   Object.fromEntries(Object.entries(seen).map(([kind, list]) => [kind, list.length]));
 
+// RoutedLibrary, Library and the Home screen's own components, which pull in the library service: by file name in the
+// dev server's modules and by chunk name in the build.
+const LIBRARY = /\/(?:RoutedLibrary|routed-library|Library|Billboard|PosterCard)[-.]/;
+
+test('a paired start asks for the library beside the app module, not after it runs', async ({
+  page,
+}) => {
+  await routeGuestEdge(page, newEdge());
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'den.links',
+      JSON.stringify([
+        { inboxKey: '0123456789abcdef', libraryKey: 'fixture-library', linkKey: 'fixture-link' },
+      ]),
+    ),
+  );
+  // One timeline: the library's request against the moment the app module starts to run (`startupMark`).
+  const timeline = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    if (LIBRARY.test(pathname)) timeline.push('library requested');
+  });
+  page.on('console', (message) => {
+    if (message.text().includes('app module evaluated')) timeline.push('app module evaluated');
+  });
+  await page.goto(E2E_ORIGIN);
+  await expect
+    .poll(() => timeline.includes('app module evaluated'), { timeout: 30_000 })
+    .toBe(true);
+  expect(timeline[0]).toBe('library requested');
+});
+
 test('an unpaired start loads the pairing screen without the paired library’s graph', async ({
   page,
 }) => {
   await routeGuestEdge(page, newEdge());
-  // RoutedLibrary and Library, which pull in the library service and Home: by file name in the dev server's modules
-  // and by chunk name in the build.
   const library = [];
   page.on('request', (request) => {
     const { pathname } = new URL(request.url());
-    if (/\/(?:RoutedLibrary|Library)[-.]/.test(pathname)) library.push(pathname);
+    if (LIBRARY.test(pathname)) library.push(pathname);
   });
   await page.goto(E2E_ORIGIN);
   await expect(page.getByLabel('Link code, twelve characters')).toBeVisible({ timeout: 30_000 });

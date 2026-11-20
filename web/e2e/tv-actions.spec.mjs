@@ -110,8 +110,6 @@ async function setup(page) {
   await remoteTo(page, browse, ['ArrowDown']);
   await page.keyboard.press('Enter');
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
-  // The bar is the shell's and is up before the library loads; the pages it opens come from the library.
-  await expect(page.locator('[data-route-page][data-active="true"]')).toBeVisible();
 }
 
 test('TV search opens a poster without action menus and Back restores it', async ({ page }) => {

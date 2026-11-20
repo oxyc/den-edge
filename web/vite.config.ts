@@ -5,11 +5,17 @@ import { previewBuild } from './scripts/previewBuild.ts';
 import { probe } from './scripts/probe.ts';
 import { stripEdgeAuthority, upstream } from './scripts/upstream.ts';
 import { localizeMarkup } from './scripts/localize-markup.ts';
+import { libraryModules } from './scripts/libraryModules.ts';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { sourcePhrases as spanishPhrases } from './src/lib/messages/phrases/es.ts';
 import { sourcePhrases as swedishPhrases } from './src/lib/messages/phrases/sv.ts';
+
+// The TV builds merge this config and keep the automatic split: grouped, their app never got past "Starting Den…".
+const libraryOnly = process.env.DEN_TV_PLATFORM
+  ? new Set<string>()
+  : libraryModules(fileURLToPath(new URL('./src', import.meta.url)));
 
 const phraseKey = (value: string): string => {
   let hash = 0x811c9dc5;
@@ -318,27 +324,42 @@ export default defineConfig({
     cssCodeSplit: true,
     // The production build the time budgets run against (`playwright.budgets.config.ts`) also carries the page that
     // seeds their household with the app's own code (`test/seed-library.html`). Never in a release build.
-    ...(process.env.DEN_E2E_SEED === '1'
-      ? {
-          // Rolldown may retain the nested library Worker's generated URL while dropping its asset from a
-          // multi-entry build. An explicit, stable test-only entry keeps the production-path Worker executable.
-          rolldownOptions: {
+    rolldownOptions: {
+      ...(process.env.DEN_E2E_SEED === '1'
+        ? {
+            // Rolldown may retain the nested library Worker's generated URL while dropping its asset from a
+            // multi-entry build. An explicit, stable test-only entry keeps the production-path Worker executable.
             input: {
               index: 'index.html',
               seed: 'test/seed-library.html',
               assistantProjectionWorker: 'src/lib/assistantProjectionWorker.ts',
             },
-            output: {
-              entryFileNames: (chunk) =>
+          }
+        : {}),
+      output: {
+        // What only the library reaches loads as one chunk (`scripts/libraryModules.ts`).
+        codeSplitting: {
+          groups: [
+            {
+              name: 'routed-library',
+              // Its dependencies are the startup graph's too, and stay where they are.
+              includeDependenciesRecursively: false,
+              test: (id: string) => libraryOnly.has(id.split('?')[0]!.replaceAll('\\', '/')),
+            },
+          ],
+        },
+        ...(process.env.DEN_E2E_SEED === '1'
+          ? {
+              entryFileNames: (chunk: { name: string }) =>
                 chunk.name === 'assistantProjectionWorker'
                   ? 'assets/assistantProjectionWorker.js'
                   : chunk.name === 'shell'
                     ? 'shell.js'
                     : 'assets/[name]-[hash].js',
-            },
-          },
-        }
-      : {}),
+            }
+          : {}),
+      },
+    },
   },
   test: {
     include: ['src/**/*.test.ts', 'cast/src/**/*.test.ts', 'scripts/**/*.test.ts'],

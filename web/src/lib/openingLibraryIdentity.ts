@@ -112,3 +112,16 @@ export function openingLibraryIdentity(
     return null;
   }
 }
+
+/**
+ * Whether storage says this load shows the library rather than the pairing screen: a library to open, or the choice
+ * to look around without one. Only a head start for the library's chunk (`main.ts`); `App.svelte` decides what shows.
+ */
+export function opensLibrary(storage: Storage = localStorage): boolean {
+  try {
+    const links: unknown = JSON.parse(storage.getItem('den.links') ?? '[]');
+    return (Array.isArray(links) && links.length > 0) || storage.getItem('den.browsing') === '1';
+  } catch {
+    return false;
+  }
+}

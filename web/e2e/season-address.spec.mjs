@@ -133,8 +133,7 @@ async function backThroughSeasons(browser) {
     const { errors } = await guest(page);
     await page.goto(`${E2E_ORIGIN}/`);
     // The first wait on the app booting: on a busy runner the unbundled dev server took 5.3 s to bring the page up.
-    // The navigation event is the library's to answer, and the library loads after the page's first paint.
-    await expect(active(page)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('main')).toBeVisible({ timeout: 30_000 });
     await page.evaluate(
       (path) => document.dispatchEvent(new CustomEvent('den:navigate', { detail: { path } })),
       PAGE,

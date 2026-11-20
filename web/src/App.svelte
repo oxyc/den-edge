@@ -12,6 +12,7 @@
   import { links } from './lib/links.svelte';
   import { libraryRetirements } from './lib/libraryRetirement.svelte';
   import { phoneLanding } from './lib/phoneLanding.svelte';
+  import { navigate } from './lib/navigation';
   import { pageTitle } from './lib/pageTitle';
   import { tabName } from './lib/tabName.svelte';
   import { meterScreens, screenOf } from './lib/screenPerformance';
@@ -86,6 +87,29 @@
   }
 
   $effect(() => syncIdentities());
+
+  // The bar is the shell's and is up before the library loads, so a page it asks for in the meantime has no Router to
+  // hear it. The last such request is held and sent again once a Router announces itself.
+  let routing = false;
+  let held: { path: string; replace?: boolean } | undefined;
+  onMount(() => {
+    const hold = (event: Event) => {
+      if (!routing && (links.current || links.browsing))
+        held = (event as CustomEvent<{ path: string; replace?: boolean }>).detail;
+    };
+    const release = () => {
+      routing = true;
+      const request = held;
+      held = undefined;
+      if (request) navigate(request.path, request.replace);
+    };
+    document.addEventListener('den:navigate', hold);
+    document.addEventListener('den:routing', release);
+    return () => {
+      document.removeEventListener('den:navigate', hold);
+      document.removeEventListener('den:routing', release);
+    };
+  });
 
   onMount(() => {
     const stopKeyboard = !__DEN_TV__ ? installKeyboardNavigation() : undefined;
