@@ -409,9 +409,14 @@ type AirPlayVideo = HTMLVideoElement & {
   webkitCurrentPlaybackTargetIsWireless?: boolean;
 };
 const airPlayVideo = video as AirPlayVideo;
-/** Whether Safari has said an AirPlay device is on the network. Only Safari answers; elsewhere it stays false. */
-let airPlayAvailable = false;
-if (typeof airPlayVideo.webkitShowPlaybackTargetPicker === 'function') {
+/**
+ * Whether AirPlay may be offered: wherever Safari has the picker, until it says no device is on the network — the
+ * player's own button's rule. On an iPhone (2026-11-20) the button was gone once Den Remux moved into this frame;
+ * waiting here for an `available` answer that never came is the inferred cause, not a measured one. Elsewhere it
+ * stays false.
+ */
+let airPlayAvailable = typeof airPlayVideo.webkitShowPlaybackTargetPicker === 'function';
+if (airPlayAvailable) {
   video.addEventListener('webkitplaybacktargetavailabilitychanged', (event) => {
     airPlayAvailable = (event as Event & { availability?: string }).availability === 'available';
     renderOutputs();

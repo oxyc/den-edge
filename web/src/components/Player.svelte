@@ -534,6 +534,8 @@
   let airPlayReceiverSafeSession: Session | undefined;
   const AIRPLAY_DIRECT_PROGRESS_MS = 12_000;
   const AIRPLAY_DIRECT_PROGRESS_SECS = 0.5;
+  /** How long a lost wireless target must stay lost before playback is treated as back on this device. */
+  const AIRPLAY_LOCAL_SETTLE_MS = 1_000;
   let webControlsVisible = $state(true);
   let webControlsTimer: ReturnType<typeof setTimeout> | undefined;
   /** The top bar, and the timeline with its dock: the pointer over either holds the controls up. */
@@ -3046,6 +3048,7 @@
         // left at the dock's own fullscreen button (`frameFullscreenSlot`).
         frameFullscreen = message.fullscreen === true;
         frameOutputs = (message.cast === true ? 1 : 0) + (message.airplay === true ? 1 : 0);
+        frameAirPlay = message.airplay === true;
         return true;
       case 'den-activity':
         // The pointer is over the frame, where this page's own pointer events do not reach.
@@ -3287,6 +3290,11 @@
     webkitShowPlaybackTargetPicker?: () => void;
   };
   type AirPlayAvailabilityEvent = Event & { availability?: string };
+  /** Whether this browser's own video elements have Safari's AirPlay picker. */
+  const pageAirPlay =
+    webTransport &&
+    typeof (globalThis.HTMLVideoElement?.prototype as AirPlayVideo | undefined)
+      ?.webkitShowPlaybackTargetPicker === 'function';
 
   /**
    * WebKit's non-standard opt-in keeps native HLS available to AirPlay. Desktop Safari loses the native media
@@ -3316,32 +3324,46 @@
         airPlayFailReason = 'receiver_unavailable';
       }
     };
+    let wireless = airPlayActive;
+    let leaving: ReturnType<typeof setTimeout> | undefined;
     const targetChanged = () => {
       const active = !!airplay.webkitCurrentPlaybackTargetIsWireless;
-      if (active === airPlayActive) return;
+      if (active === wireless) return;
+      wireless = active;
       airPlayTargetChanges = Math.min(1_000, airPlayTargetChanges + 1);
-      airPlayActive = active;
-      if (active) {
-        reachAirPlay('started');
-        airPlayFailed = false;
-        airPlayFailReason = undefined;
-        airPlayDelivery ??= session?.external ? 'direct' : 'remux';
-        airPlayStartedAt = performance.now();
-        clearTimeout(webControlsTimer);
-        watchAirPlayDirectProgress();
-        void airPlayHevcAtOnce();
-      } else {
-        clearAirPlayProgressWatch();
-        airPlayFallbackSession = undefined;
-        airPlayReceiverSafeSession = undefined;
-        endAirPlaySession();
-        revealWebControls();
+      clearTimeout(leaving);
+      // A wireless loss is acted on only once it has lasted (`AIRPLAY_LOCAL_SETTLE_MS`): one that comes straight
+      // back leaves the AirPlay session, its stall watch and its receiver-safe fences as they were.
+      if (!active) {
+        leaving = setTimeout(() => {
+          leaving = undefined;
+          if (airplay.webkitCurrentPlaybackTargetIsWireless) return;
+          airPlayActive = false;
+          clearAirPlayProgressWatch();
+          airPlayFallbackSession = undefined;
+          airPlayReceiverSafeSession = undefined;
+          endAirPlaySession();
+          revealWebControls();
+          playHereAgain(element);
+        }, AIRPLAY_LOCAL_SETTLE_MS);
+        return;
       }
+      if (airPlayActive) return;
+      airPlayActive = true;
+      reachAirPlay('started');
+      airPlayFailed = false;
+      airPlayFailReason = undefined;
+      airPlayDelivery ??= session?.external ? 'direct' : 'remux';
+      airPlayStartedAt = performance.now();
+      clearTimeout(webControlsTimer);
+      watchAirPlayDirectProgress();
+      void airPlayHevcAtOnce();
     };
     element.addEventListener('webkitplaybacktargetavailabilitychanged', availability);
     element.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', targetChanged);
     return {
       destroy() {
+        clearTimeout(leaving);
         clearAirPlayProgressWatch();
         endAirPlaySession();
         element.removeEventListener('webkitplaybacktargetavailabilitychanged', availability);
@@ -3357,6 +3379,43 @@
     reachAirPlay('attempted');
     airPlayDelivery = session?.external ? 'direct' : 'remux';
     (video as AirPlayVideo | undefined)?.webkitShowPlaybackTargetPicker?.();
+  }
+
+  /**
+   * WebKit has no call that ends an AirPlay route from a page: its picker is the one way back, where the viewer chooses
+   * this device. Opened from the AirPlay bar's own button so its user gesture carries.
+   */
+  function stopAirPlay() {
+    (video as AirPlayVideo | undefined)?.webkitShowPlaybackTargetPicker?.();
+  }
+
+  /**
+   * The route came back to this device: the same source is loaded again in place and sought to where the receiver was.
+   * Reported 2026-11-20 on an iPhone after an LG receiver, TorBox direct (native HLS): the picture stayed black once
+   * playback returned. Why WebKit shows no frame there was not measured; reloading the element is the inferred repair,
+   * and the only one a page has. Native HLS only — hls.js owns its own attachment.
+   */
+  function playHereAgain(element: HTMLVideoElement) {
+    const current = session;
+    if (!current || hls || video !== element || !element.currentSrc) return;
+    const at = element.currentTime;
+    const resume = !element.paused;
+    element.addEventListener(
+      'loadedmetadata',
+      () => {
+        // After the player's own `loadedmetadata` (`seekToStart`), which would put it at its session's start.
+        if (video !== element || session !== current) return;
+        if (at > 0) element.currentTime = at;
+        if (resume)
+          void element
+            .play()
+            .catch((error: unknown) =>
+              console.warn('Playback back from AirPlay did not resume; its controls can.', error),
+            );
+      },
+      { once: true },
+    );
+    element.load();
   }
 
   const CAST_RANK: Record<CastStage, number> = { offered: 0, attempted: 1, started: 2 };
@@ -3723,6 +3782,8 @@
 
   /** How many output buttons (Cast, AirPlay) the frame draws in the top bar away from home (`den-outputs`). */
   let frameOutputs = $state(0);
+  /** Whether one of those is AirPlay. */
+  let frameAirPlay = $state(false);
   /** Whether the frame draws fullscreen, so the player's own (which cannot reach its video) leaves a hole instead. */
   let frameFullscreen = $state(false);
   /** The hole left for them in the top bar: Den's surface, under the frame's buttons, as `castSlot` is for Cast. */
@@ -5925,6 +5986,21 @@
           (typeof torbox === 'object' ? torbox.unavailable : undefined)),
   );
 
+  /**
+   * Safari, with Den Remux playing in the cast page and that page offering no AirPlay: Den's own AirPlay button moves the
+   * stream to TorBox, which plays in this page and can be AirPlayed — never a button that just vanishes. Choosing
+   * AirPlay is a viewer action that may replace the stream; Safari's list itself can only open from the next press.
+   */
+  const airPlayThroughTorBox = $derived(
+    pageAirPlay &&
+      castStage &&
+      !frameAirPlay &&
+      !!playback &&
+      !!session &&
+      !session.external &&
+      !sourceRuledOut,
+  );
+
   function sourceLabel(): string {
     return session
       ? i18n.format('player.playingFrom', 'Playing from {source}', { source: playbackSource })
@@ -6660,6 +6736,7 @@
   class:web-touch-player={webTransport && !desktopTransport}
   class:web-controls-hidden={webTransport && !webControlsVisible}
   class:web-casting={webTransport && castView}
+  class:web-airplaying={webTransport && airPlayActive}
   class:web-counting={webTransport && !!next && upNext !== null}
   role="dialog"
   tabindex="-1"
@@ -6675,7 +6752,29 @@
   onfocusout={scheduleWebControls}
 >
   {#if webTransport}
-    {#if !airPlayActive}
+    {#if airPlayActive}
+      <!-- AirPlay owns playback: Apple's controls are on the picture, which starts below this bar so none is covered.
+           Den keeps only the way out — Close, and Stop AirPlay, which can only open Safari's list of devices. -->
+      <header class="web-airplay">
+        <button
+          class="web-glyph"
+          type="button"
+          aria-label="Close player"
+          data-tip={i18n.phrase('Close')}
+          onclick={close}
+        >
+          <ButtonIcon name="close" />
+        </button>
+        <div class="web-heading" role="status"><b>{i18n.phrase('Playing on AirPlay')}</b></div>
+        <Button
+          variant="player"
+          size="compact"
+          icon="airplay"
+          label="Stop AirPlay"
+          onclick={stopAirPlay}
+        />
+      </header>
+    {:else}
       <!-- Close and what is playing at the top, and the one output slot at its right end: Cast or AirPlay, the same place
            on every size. The slot's box depends only on this bar, so the cast page's frame drawn over it moves only as
            the window does, never as the dock below gains or loses a button. -->
@@ -6697,9 +6796,25 @@
         <span
           class="web-output"
           class:web-output-empty={!(session && airPlayCapable) &&
+            !airPlayThroughTorBox &&
             !castSlotShown &&
             !(castStage && frameOutputs)}
         >
+          {#if airPlayThroughTorBox}
+            <!-- Den Remux plays in the cast page here, which offers no AirPlay: TorBox plays in this page, which does. -->
+            <button
+              class="web-glyph output-action"
+              type="button"
+              aria-label={i18n.format('player.switchTo', 'Switch to {source}', {
+                source: 'TorBox',
+              })}
+              data-tip={i18n.phrase('AirPlay')}
+              disabled={deliverySwitching || switching}
+              onclick={() => switchDelivery()}
+            >
+              <ButtonIcon name="airplay" />
+            </button>
+          {/if}
           {#if session && airPlayCapable}
             <button
               class="web-glyph output-action"
@@ -8553,6 +8668,7 @@
     --web-glass: var(--glass-bg, rgb(28 28 34 / 0.62));
     --web-glass-edge: var(--glass-edge, rgb(255 255 255 / 0.13));
     --web-glass-blur: var(--glass-blur, blur(24px) saturate(160%));
+    --web-airplay-bar: calc(var(--player-top) + 56px);
 
     grid-template-rows: minmax(0, 1fr);
     padding: 0;
@@ -8592,6 +8708,19 @@
     padding: var(--player-top) calc(var(--player-side) - 10px) 64px;
     background: linear-gradient(rgb(0 0 0 / 0.62), transparent);
     pointer-events: none;
+  }
+
+  /* AirPlay's bar: always shown, and above the picture rather than over it, so Apple's controls on it stay reachable. */
+  .web-custom-player.web-airplaying > header.web-airplay {
+    position: absolute;
+    inset: 0 0 auto;
+    height: var(--web-airplay-bar);
+    padding: var(--player-top) var(--player-side) 0 calc(var(--player-side) - 10px);
+    opacity: 1;
+  }
+
+  .web-custom-player.web-airplaying > .stage {
+    top: var(--web-airplay-bar);
   }
 
   .web-heading {

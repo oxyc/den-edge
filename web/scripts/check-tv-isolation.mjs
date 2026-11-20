@@ -493,5 +493,11 @@ if (process.argv.includes('--capture')) {
   // An audio choice on a TorBox stream that names no tracks (#1419) measured 128,173 against matched main's 128,142
   // (+31, main at 1184de9d), all in the lazy Player chunk: the Audio section's switch to Den Remux and the dock button
   // shown for it. It reuses the existing switch and its labels; one phrase is new. It fits, retaining 83.
-  if (coreTotalDelta > 128256) throw new Error('Browser total JS/CSS budget exceeded');
+  // AirPlay's way back (#1202) measured MEASURED against matched main's BASE (+DELTA, main at 71f28b69), all in the
+  // lazy Player chunk: the AirPlay bar (Close, Stop AirPlay through the shared Button), the settled wireless loss and the
+  // reload at the receiver's position back on this device, and the TorBox switch where the cast page offers no AirPlay.
+  // Drafts measured +658 (five phrases) and +530 (a custom Stop button); reusing `Button` removed its CSS. It must sit
+  // with the element's WebKit events it answers; another split would add a request mid-playback. The TorBox switch's
+  // label reuses `player.switchTo`. Allow the smallest 128-byte boundary containing it, retaining MARGIN.
+  if (coreTotalDelta > CEILING) throw new Error('Browser total JS/CSS budget exceeded');
 }
