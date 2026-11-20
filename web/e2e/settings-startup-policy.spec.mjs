@@ -67,6 +67,33 @@ test('a saved language and Automatic subtitles read correctly before deferred po
   // deferred policy to replay the last write, which defeats the startup-only state this test means to exercise.
   await expect(language).toBeEnabled({ timeout: 30_000 });
 
+  // What the reloaded page draws first is the saved Settings view this browser keeps, and that view is written behind
+  // the edits (a debounced writer): under load the reload overtook the last two, and Settings drew the Swedish
+  // subtitle the first edit had saved. Reading the view back is the only way to know it holds the edits, since nothing
+  // else may reconcile it here.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () => {
+          const { indexedVault } = await import('/src/lib/localVault.ts');
+          const { readFinishedLibraryViews } = await import('/src/lib/finishedLibraryViews.ts');
+          const [{ libraryKey }] = JSON.parse(localStorage.getItem('den.links'));
+          const views = await readFinishedLibraryViews(libraryKey, indexedVault(indexedDB), [
+            'settings',
+          ]);
+          const saved = views?.pieces.settings?.preferences;
+          return (
+            saved && {
+              interfaceLanguage: saved.interfaceLanguage,
+              subtitleLanguage: saved.subtitleLanguage,
+              explicitSubtitle: !!saved.hasExplicitSubtitlePreference,
+            }
+          );
+        }),
+      { timeout: 30_000 },
+    )
+    .toEqual({ interfaceLanguage: 'sv', subtitleLanguage: undefined, explicitSubtitle: false });
+
   // Deferred policy never arrives from here on, in the page or its library Worker: its request is left unanswered.
   await page.route('**/den_core_deferred_bg.wasm', () => {});
   // What the page draws now comes from this browser's own copy; a pull may wait on deferred policy, so none is awaited.
