@@ -251,6 +251,21 @@ export function readPendingReset(
   return null;
 }
 
+/**
+ * Whether a marker is kept that `readPendingReset` can't read (malformed, wrong shape, or storage refusing the read).
+ * That is not "no reset is pending": the marker may be the only copy of the successor key, so nothing that would
+ * discard the old link or the kept key may act on the strength of `readPendingReset` returning null.
+ */
+export function pendingResetUnreadable(
+  storage: Storage | undefined = globalThis.localStorage,
+): boolean {
+  try {
+    return storage?.getItem(PENDING_RESET_KEY) != null && readPendingReset(storage) === null;
+  } catch {
+    return true;
+  }
+}
+
 /** Keep `pending`, or clear it with null. False when it couldn't be kept, and a reset must then not start. */
 export function writePendingReset(
   pending: PendingReset | null,
@@ -565,6 +580,11 @@ export class Links {
     const kept = this.list.find((l) => l.inboxKey === link.inboxKey);
     if (kept && kept.libraryKey !== link.libraryKey) return;
     if (readPendingReset()?.from === link.libraryKey) return;
+    if (pendingResetUnreadable()) {
+      // The old library's `410` may be this browser's own reset, whose marker holds the only copy of the new key.
+      console.error('den: reset marker unreadable, link kept');
+      return;
+    }
     await this.remove(link.inboxKey);
     this.moved = link.name ?? 'Your Apple TV';
   }

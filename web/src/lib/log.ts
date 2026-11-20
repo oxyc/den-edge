@@ -499,6 +499,11 @@ export class LibraryLog {
   private readonly newerDocuments = new Set<string>();
   /** A restored pre-v4 backup is left untouched and read-only. */
   private preV4Backup = false;
+  /**
+   * The pre-v4 refusal of a generation since replaced: it holds until the replacement is read to its head, which
+   * sets `preV4Backup` afresh if that store is pre-v4 too.
+   */
+  private preV4Replaced = false;
   /** When `compact` last tried, so a refused one is not tried on every refresh. */
   private compactedAt = 0;
   /** Why den-core's compaction guard last refused to remove the unreadable rows (§4); delivery stays paused. */
@@ -616,11 +621,15 @@ export class LibraryLog {
 
   /** Nothing is written when the library needs a newer build or a pre-v4 backup was restored. */
   get readOnly(): boolean {
-    return this.upgradeRequired !== null || this.preV4Backup;
+    return this.upgradeRequired !== null || this.refusesPreV4;
+  }
+
+  private get refusesPreV4(): boolean {
+    return this.preV4Backup || this.preV4Replaced;
   }
 
   get readOnlyReason(): string | null {
-    if (this.preV4Backup) return PRE_V4_BACKUP_ERROR;
+    if (this.refusesPreV4) return PRE_V4_BACKUP_ERROR;
     if (this.upgradeRequired !== null)
       return 'A newer version of Den is required to open this library.';
     return null;
@@ -1992,7 +2001,7 @@ export class LibraryLog {
     options: { replaceProfileDirectory?: boolean } = {},
   ): Promise<Moving | { refused: MoveRefusal }> {
     if (this.offline || this.moved || this.wireMin < WIRE) return { refused: 'unavailable' };
-    if (this.wireMin > Math.max(WIRE, this.instanceWire) || this.preV4Backup)
+    if (this.wireMin > Math.max(WIRE, this.instanceWire) || this.refusesPreV4)
       return { refused: 'update_required' };
     // Minimum wire 5 commits this household to profile topology even when the directory row is missing, unreadable
     // or temporarily unattributable. Only the compound executor may move it; legacy move must fail closed before it
@@ -3082,6 +3091,9 @@ export class LibraryLog {
             this.resetProfileDirectory();
             this.kidApprovalEntries.clear();
             this.acknowledged.clear();
+            // The refusal was proved by the store just replaced; the replacement proves its own once read through.
+            if (this.preV4Backup) this.preV4Replaced = true;
+            this.preV4Backup = false;
             this.dirty = true;
             this.unreported = true;
             this.generationChanges++;
@@ -3153,7 +3165,10 @@ export class LibraryLog {
           // row, and without this the marker stayed behind them.
           if (head !== this.head) this.dirty = true;
           this.head = head;
-          if (!page.more || page.entries.length === 0) return 'head';
+          if (!page.more || page.entries.length === 0) {
+            this.preV4Replaced = false;
+            return 'head';
+          }
         }
       } catch {
         return null;
