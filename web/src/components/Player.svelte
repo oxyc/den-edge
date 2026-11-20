@@ -6130,6 +6130,15 @@
     ];
   }
 
+  /**
+   * A TorBox stream whose audio tracks Hearth could not name: Scout had no probe of the release, so TorBox played its
+   * first track whatever the language (2026-11-20: an English and Italian release started in Italian, with no audio
+   * choice). Den Remux reads the file and lists every track, so the switch to it is the audio choice offered here.
+   */
+  const directAudioUnknown = $derived(
+    !!session?.external && session.audioTracks.length === 0 && !!playback,
+  );
+
   /** What plays now, audio then subtitles, for the dock's button and the options' first row. */
   function audioSubtitleSummary(): { audio: string; subtitles: string } {
     const current = session;
@@ -6145,8 +6154,23 @@
   function audioSubtitleItems(): OptionItem[] {
     const current = session;
     if (!current) return [];
+    const audio = i18n.phrase('Audio');
     return [
-      ...(current.audioTracks.length ? audioTrackItems(i18n.phrase('Audio')) : []),
+      ...(current.audioTracks.length ? audioTrackItems(audio) : []),
+      ...(directAudioUnknown
+        ? [
+            {
+              kind: 'item' as const,
+              label: switchToRemuxLabel(),
+              description: i18n.phrase(
+                'TorBox plays its first audio track. Den Remux lists them all.',
+              ),
+              disabled: deliverySwitching || switching,
+              onselect: () => switchDelivery(),
+              section: audio,
+            },
+          ]
+        : []),
       ...(current.subtitles?.length ? subtitleTrackItems(i18n.phrase('Subtitles')) : []),
     ];
   }
@@ -7503,7 +7527,7 @@
               <span class="web-time">{clockTime(tvPosition)} / {clockTime(tvDuration)}</span>
             </div>
           {/if}
-          {#if session && (session.audioTracks.length || session.subtitles?.length)}
+          {#if session && (session.audioTracks.length || directAudioUnknown || session.subtitles?.length)}
             {@const now = audioSubtitleSummary()}
             <span class="web-tip" data-tip={i18n.phrase('Audio & subtitles')}>
               <ActionMenu

@@ -134,6 +134,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Audio track': 'Ljudspår',
   'Audio Track': 'Ljudspår',
   Audio: 'Ljud',
+  'TorBox plays its first audio track. Den Remux lists them all.':
+    'TorBox spelar sitt första ljudspår. Den Remux listar alla.',
   'Audio & subtitles': 'Ljud och undertexter',
   AirPlay: 'AirPlay',
   'Audio:': 'Ljud:',

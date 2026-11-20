@@ -6,6 +6,7 @@ import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { guardNetwork, routeTmdb } from './network.mjs';
 import {
+  clickPlayerControl,
   openOptionsPage,
   optionsButton,
   showsSubtitles,
@@ -487,7 +488,9 @@ test('a forced TorBox media refresh keeps Den subtitles disabled', async () => {
   }
 });
 
-test('a normal direct session with no tracks does not expose an empty subtitle menu', async () => {
+// A TorBox stream that names no tracks still has an audio choice — the switch to Den Remux, which lists them — but
+// never an empty Subtitles section with only Off in it.
+test('a normal direct session with no tracks offers the audio switch, not an empty subtitle menu', async () => {
   const { browser, page } = await playerPage((route) =>
     route.fulfill({
       json: {
@@ -508,7 +511,17 @@ test('a normal direct session with no tracks does not expose an empty subtitle m
     });
     await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
     await expect(page.getByTestId('playback-source')).toHaveText('TorBox');
-    await expect(subtitlesButton(page)).toHaveCount(0);
+    await clickPlayerControl(page, subtitlesButton(page));
+    const menu = page.getByRole('menu', { name: /^Audio and subtitles/ });
+    await expect(
+      menu
+        .getByRole('group', { name: 'Audio' })
+        .getByRole('menuitem', { name: /^Switch to Den Remux/ }),
+    ).toContainText('TorBox plays its first audio track');
+    await expect(menu.getByRole('group', { name: 'Subtitles' })).toHaveCount(0);
+    await expect(menu.getByRole('menuitemradio')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
     await openOptionsPage(page, 'Source');
     await expect(page.getByRole('menu')).toContainText('Playing directly from TorBox');
     await expect(page.getByRole('menu')).not.toContainText('Den subtitles were not requested');
