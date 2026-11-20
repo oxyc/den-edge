@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { sourcePhrases as spanishPhrases } from './src/lib/messages/phrases/es.ts';
 import { sourcePhrases as swedishPhrases } from './src/lib/messages/phrases/sv.ts';
 
-// The TV builds merge this config and keep the automatic split: grouped, their app never got past "Starting Den…".
+// The TV builds merge this config; their first paint is `tv/main.ts`, so they group from that entry instead.
 const grouped = libraryModules(
   fileURLToPath(new URL('./src', import.meta.url)),
   Boolean(process.env.DEN_TV_PLATFORM),
