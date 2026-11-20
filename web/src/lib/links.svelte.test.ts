@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   linkedTv,
   Links,
+  pendingResetUnreadable,
   readLinks,
   readPendingReset,
   readShared,
@@ -249,6 +250,38 @@ it('does not acknowledge a compound install or release that storage refused to k
   vi.stubGlobal('localStorage', working);
   await expect(tab.releaseRekeyed(KEYS.libraryKey, marker)).resolves.toBe(true);
   expect(readPendingReset()).toBeNull();
+});
+
+it.each([
+  ['malformed JSON', '{"from":'],
+  ['a missing field', JSON.stringify({ from: KEYS.libraryKey, to: 'bmV3' })],
+  ['a wrong field type', JSON.stringify({ from: KEYS.libraryKey, to: 7, device: 'x' })],
+])(
+  'keeps the old link and an unreadable legacy marker (%s) when the old library answers 410',
+  async (_, raw) => {
+    const tab = new Links();
+    tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+    kept.set('den.keyReset', raw);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await tab.forgetMoved(tab.list[0]!);
+
+    expect(tab.list.map((link) => link.libraryKey)).toEqual([KEYS.libraryKey]);
+    expect(tab.moved).toBeNull();
+    expect(kept.get('den.keyReset')).toBe(raw);
+    expect(pendingResetUnreadable()).toBe(true);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0])).not.toContain(KEYS.libraryKey);
+    error.mockRestore();
+  },
+);
+
+it('a missing marker is absence, not an unreadable one', async () => {
+  const tab = new Links();
+  tab.add('a'.repeat(16), { ...KEYS, name: 'Living room' });
+  expect(pendingResetUnreadable()).toBe(false);
+  await tab.forgetMoved(tab.list[0]!);
+  expect(tab.list).toEqual([]);
 });
 
 it('a legacy marker has no compound flag, and an ordinary rekey still clears it', async () => {
