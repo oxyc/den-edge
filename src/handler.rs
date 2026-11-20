@@ -709,6 +709,9 @@ async fn dispatch(
     if path == "/performance/event" {
         return Box::pin(crate::diagnostics::handle_performance(state, req)).await;
     }
+    if path == crate::device_log::PATH {
+        return Box::pin(crate::device_log::handle(state, req)).await;
+    }
     if path == "/playback/outcome" {
         return Box::pin(crate::diagnostics::handle_playback_outcome(state, req)).await;
     }
@@ -847,6 +850,7 @@ impl Face {
         let device =
             ["/link", "/inbox", "/pair/", "/sync/", "/lib/", "/grant/"].iter().any(|p| path.starts_with(p))
                 || path == "/metrics"
+                || path == crate::device_log::PATH
                 || crate::recovery::is_path(path)
                 || crate::assistant::is_path(path)
                 || crate::playback_receipts::is_path(path)
@@ -1087,6 +1091,7 @@ pub fn route_label(path: &str) -> &'static str {
         "/diagnostics/failure" => "/diagnostics/failure",
         "/playback/load" => "/playback/load",
         "/performance/event" => "/performance/event",
+        "/device-log" => "/device-log",
         "/playback/outcome" => "/playback/outcome",
         "/playback/route" => "/playback/route",
         "/playback/cast" => "/playback/cast",
@@ -1180,7 +1185,8 @@ fn allowed_methods(route: &str) -> Option<&'static [Method]> {
         | "/performance/event"
         | "/playback/outcome"
         | "/playback/route"
-        | "/playback/cast" => Some(POST),
+        | "/playback/cast"
+        | "/device-log" => Some(POST),
         // Bare OPTIONS is Web's authenticated live Hearth capability probe. CORS preflights are answered before
         // dispatch and never enter the relay.
         "/den/:config/playback" => Some(POST_OPTIONS),
@@ -1218,6 +1224,7 @@ fn body_cap(route: &str) -> usize {
             crate::playback_receipts::BODY_BYTES
         }
         "/wake/controllers" | "/wake/poll" => crate::controller::BODY_BYTES,
+        "/device-log" => crate::device_log::MAX_BODY_BYTES,
         _ => MAX_BODY_BYTES,
     }
 }

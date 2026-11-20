@@ -9,6 +9,7 @@ mod billboard;
 mod cache;
 mod cast;
 mod controller;
+mod device_log;
 mod diagnostics;
 mod grants;
 mod handler;
@@ -334,6 +335,8 @@ pub struct AppState {
     /// as a session's owner and end its sessions. Unset, a guest is offered no remux at all — without it remux
     /// would count the guest's sessions as the host's.
     pub remux_edge_secret: Option<String>,
+    /// Where a personal build's diagnosis log goes from away (`device_log.rs`); None is the route switched off.
+    pub device_log: Option<device_log::DeviceLog>,
     /// The unified Den playback surface and guest-owned Den installs (env `DEN_PLAYBACK_ENABLED`). The feature is
     /// built dormant: an operator must explicitly enable Edge as well as Hearth before any new route is exposed.
     pub den_playback_enabled: bool,
@@ -484,6 +487,7 @@ impl AppState {
             member_hints: Mutex::new(HashMap::new()),
             reel_hints: Mutex::new(HashMap::new()),
             remux_edge_secret: None,
+            device_log: None,
             den_playback_enabled: false,
             oauth: None,
         }
@@ -646,6 +650,8 @@ async fn main() {
     state.tmdb_daily_max = env_number("TMDB_DAILY_MAX");
     state.media_daily_max = env_number("MEDIA_DAILY_MAX_BYTES");
     state.remux_edge_secret = env_opt("REMUX_EDGE_SECRET");
+    state.device_log =
+        device_log::DeviceLog::from_env(env_opt("DEVICE_LOG_UPSTREAM"), env_opt("DEVICE_LOG_TOKEN"));
     state.den_playback_enabled = env_flag("DEN_PLAYBACK_ENABLED", false);
     state.segments_key = env_opt("SEGMENTS_KEY");
     // The box's https client, no longer TMDB's alone: `/warnings/` forwards the content warnings with it, for
