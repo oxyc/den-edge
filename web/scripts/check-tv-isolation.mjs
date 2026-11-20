@@ -490,8 +490,8 @@ if (process.argv.includes('--capture')) {
   // main's 128,000 (+142, main at e3940b7e): the same authority admission, reset and restore as the startup note
   // above, plus the shared local authority digest that release memory now takes from the same module. Startup carries
   // it, so a lazy split cannot reduce the complete graph. Allow the next 128-byte boundary, retaining 114.
-  // An audio choice on a TorBox stream that names no tracks (#1419) measured MEASURED against matched main's BASE
-  // (+DELTA, main at 1184de9d), all in the lazy Player chunk: the Audio section's switch to Den Remux and the dock button
-  // shown for it. It reuses the existing switch and its labels; one phrase is new. CEILING_NOTE
+  // An audio choice on a TorBox stream that names no tracks (#1419) measured 128,173 against matched main's 128,142
+  // (+31, main at 1184de9d), all in the lazy Player chunk: the Audio section's switch to Den Remux and the dock button
+  // shown for it. It reuses the existing switch and its labels; one phrase is new. It fits, retaining 83.
   if (coreTotalDelta > 128256) throw new Error('Browser total JS/CSS budget exceeded');
 }
