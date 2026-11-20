@@ -26,6 +26,23 @@ test('leaving typed-code pairing ends its relay and cannot install a late link',
     .toBe(0);
 });
 
+test('a rendered pairing screen is not reported as a render stall', async ({ page }) => {
+  const edge = newEdge();
+  await routeGuestEdge(page, edge);
+  const reports = [];
+  page.on('request', (request) => {
+    if (request.url().endsWith('/playback/page-error')) reports.push(request.postData());
+  });
+  await page.clock.install();
+  await page.goto(E2E_ORIGIN);
+  await expect(page.getByLabel('Link code, twelve characters')).toBeVisible();
+
+  // Past the watchdog's one check: it must find the pairing screen, which has no route page.
+  await page.clock.fastForward(15_000);
+  await page.waitForTimeout(500);
+  expect(reports).toEqual([]);
+});
+
 test('TV joins another device through encrypted pairing and retains its saved library', async ({
   browser,
   page: host,

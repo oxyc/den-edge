@@ -21,7 +21,9 @@
 </script>
 
 {#if screen.failed}
-  <p class="note">Couldn’t load this page. Check that this device is online.</p>
+  <p class="note" data-startup-outcome={page ? 'load-failed' : undefined}>
+    Couldn’t load this page. Check that this device is online.
+  </p>
   <button class="more" onclick={() => void screen.load()}>Try again</button>
 {:else}
   <Loading label="Loading" {page} />
