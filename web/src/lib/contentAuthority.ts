@@ -823,7 +823,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
     // A Kid's audience veto cannot be inferred from age fallback. Age-only policies retain their established
     // unknown-maturity behavior when Atlas itself is unavailable.
     if (!atlas) {
-      console.warn('den:atlas/policy-none');
+      console.warn('den: no atlas to establish a title policy');
       return this.#unknownAdmission(policy);
     }
     const url = `${atlas}/index/title/${ref.type === 'tv' ? 'series' : 'movie'}/${ref.id}.json`;
@@ -853,7 +853,7 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
       return (answer.eligible ?? (await ageAllowed(policy, answer.minimumAge))) ? true : false;
     } catch (error) {
       if (signal.aborted || (error as Error)?.name === 'AbortError') throw error;
-      console.warn('den:atlas/policy', error);
+      console.warn('den: atlas could not establish a title policy', error);
       return this.#unknownAdmission(policy);
     }
   }

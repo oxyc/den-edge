@@ -871,7 +871,9 @@ describe('LibraryLog', () => {
     failCleanup = true;
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(false);
-    expect(warn).toHaveBeenCalledWith('den:log/cleanup-retry');
+    expect(warn).toHaveBeenCalledWith(
+      'den: retired browser migration storage cleanup will be retried',
+    );
     expect(data.has(state)).toBe(true);
     await expect(log.cleanupRetiredOwnerSplitRecords()).resolves.toBe(true);
 
@@ -1027,7 +1029,12 @@ describe('LibraryLog', () => {
 
       await log.write(addToWatchlist(blankTitle({ type: 'movie', id: 2 }, 0), at(1000)));
       await vi.waitFor(() => expect(posts()).toBe(1));
-      await vi.waitFor(() => expect(warn).toHaveBeenCalledWith('den:log/store', expect.anything()));
+      await vi.waitFor(() =>
+        expect(warn).toHaveBeenCalledWith(
+          'den: the library could not be kept for the next visit',
+          expect.anything(),
+        ),
+      );
       log.close();
       warn.mockRestore();
 
@@ -2109,7 +2116,7 @@ describe('LibraryLog', () => {
       const log = (await LibraryLog.open(LIBRARY_KEY, household, undefined, null, 5))!;
       await log.write(row(550));
       const diagnostic = error.mock.calls.flat().join(' ');
-      expect(diagnostic).toContain('den:log/profile-rows-refused:1');
+      expect(diagnostic).toContain('household refused 1 profile rows');
       expect(diagnostic).not.toContain('550');
       expect(diagnostic).not.toContain('title:movie');
     } finally {
@@ -2172,9 +2179,13 @@ describe('LibraryLog', () => {
       await expect(returned.refresh()).resolves.toBe(true);
       await vi.waitFor(() => expect(returned.pendingActions).toBe(0));
       const diagnostics = error.mock.calls.map((call) => call.join(' '));
-      const dropped = diagnostics.filter((message) => message.includes('den:log/pre-split-drop'));
-      expect(dropped).toEqual(['den:log/pre-split-drop:3:1']);
-      await vi.waitFor(() => expect(error).toHaveBeenCalledWith('den:log/pre-split-cache'));
+      const dropped = diagnostics.filter((message) => message.includes('pre-split edits dropped'));
+      expect(dropped).toEqual([expect.stringContaining('unknown=1')]);
+      await vi.waitFor(() =>
+        expect(error).toHaveBeenCalledWith(
+          'den: the pre-split household cache could not be removed',
+        ),
+      );
       for (const secret of [
         '550',
         OWNER_ID,
@@ -2236,7 +2247,9 @@ describe('LibraryLog', () => {
       expect(
         JSON.parse(new TextDecoder().decode(data.get(`${keys.id}:runtime:meta:compacted`))),
       ).toContain(pendingKey);
-      expect(error.mock.calls.flat().join(' ')).toContain('den:log/pre-split-quarantine:1');
+      expect(error.mock.calls.flat().join(' ')).toContain(
+        'pre-split edits remain quarantined for deletion retry',
+      );
       expect(error.mock.calls.flat().join(' ')).not.toContain(privateCause);
 
       log.close();

@@ -1665,7 +1665,8 @@
         // boundary from holding playback indefinitely.
         receiptPreparation = await beforeAbort(onmanagedplayback(receiptSignal), receiptSignal);
       } catch (error) {
-        if (!attempt.signal.aborted) console.warn('den:play/receipt-authority', error);
+        if (!attempt.signal.aborted)
+          console.warn('den: managed playback receipt authority could not be prepared', error);
       }
       if (attempt.signal.aborted) return false;
       if (receiptPreparation === 'unsupported') receiptUnsupported = true;
@@ -1763,7 +1764,7 @@
         ...(cause ? { cause } : {}),
       });
       if (playback) {
-        console.warn('den:play/managed-start', {
+        console.warn('Managed playback could not start.', {
           failure: result.failure,
           code: 'code' in result ? result.code : undefined,
           cause,
@@ -1779,7 +1780,7 @@
         // A failed external session is kept only long enough for `broke` to judge recovery; unlike an ordinary
         // Remux track/release change, it does not carry on. Keep the two log messages truthful and URL-free.
         if (delivery === 'direct') {
-          console.warn(`den:play/torbox-start:${result.failure}/remux`);
+          console.warn(`TorBox could not start (${result.failure}); Den Remux carries on.`);
           // Refused with no TorBox failure behind it: Hearth had no TorBox to try (den-hearth answers
           // `direct_unavailable` bare then). A cause that won't pass rules it out as well; any other may.
           const why =
@@ -1790,7 +1791,10 @@
           if (why) torbox = { unavailable: why };
         } else if (replacing.external)
           console.warn(`Managed direct media recovery failed (${result.failure}).`);
-        else console.warn(`den:play/remux-change:${result.failure}/kept`);
+        else
+          console.warn(
+            `den-remux refused a mid-film change (${result.failure}); the playing session carries on.`,
+          );
         if (
           result.failure === 'busy' ||
           result.failure === 'starting' ||
@@ -2087,7 +2091,7 @@
       } catch (error) {
         // A request a suspended page never got the answer to (an iPhone's tab put in the background): the session
         // playing carries on, as for any refusal.
-        console.warn('den:play/release-switch', error);
+        console.warn('den: release switch failed; keeping current', error);
         moved = false;
       }
       if (moved === true) {
@@ -2268,7 +2272,12 @@
       if (hold || !element.paused) return;
       void element
         .play()
-        .catch((error: unknown) => console.warn('den:play/replacement-resume', error));
+        .catch((error: unknown) =>
+          console.warn(
+            'The replacement stream could not resume on its own; its controls can.',
+            error,
+          ),
+        );
     };
     // LG's webOS media pipeline accepts HLS even when its WebKit canPlayType answer is incomplete.
     // Keeping it on this element path preserves Den's existing progress, recovery and session ownership.
@@ -2794,7 +2803,12 @@
         startsIn = null;
         void element
           .play()
-          .catch((error: unknown) => console.warn('den:play/samsung-held-start', error));
+          .catch((error: unknown) =>
+            console.warn(
+              'The held Samsung start could not play on its own; its controls can.',
+              error,
+            ),
+          );
       };
       element.addEventListener('canplay', ready, { once: true });
       return () => element.removeEventListener('canplay', ready);
@@ -2810,7 +2824,11 @@
         clearInterval(tick);
         hold = null;
         startsIn = null;
-        element.play().catch((error: unknown) => console.warn('den:play/held-start', error));
+        element
+          .play()
+          .catch((error: unknown) =>
+            console.warn('The held start could not play on its own; its controls can.', error),
+          );
         return;
       }
       startsIn = seconds === null ? null : countdownLabel(seconds);
@@ -3205,7 +3223,7 @@
       // The cast page refused the load this page handed it before fetching anything: a fault in that hand-off, not
       // in the release, so no release is left out for it and no other is tried.
       if (message.message === 'Invalid media URL') {
-        console.warn('den:play/cast-url-refused');
+        console.warn('The cast page refused the media URLs it was handed.');
         reportFailure(current, 0, message.message);
         lastFailSource = 'cast_page_error';
         failure = 'protocol';
@@ -3381,7 +3399,7 @@
         null,
         true,
       ).catch((error: unknown): Failure => {
-        console.warn('den:play/airplay-torbox-recovery', error);
+        console.warn('AirPlay receiver-safe TorBox recovery got no answer.', error);
         return 'unreachable';
       });
     };
@@ -3467,7 +3485,7 @@
       null,
       true,
     ).catch((error: unknown): Failure => {
-      console.warn('den:play/airplay-remux-recovery', error);
+      console.warn('AirPlay direct recovery got no answer; the direct session remains.', error);
       return 'unreachable';
     });
     if (moved === true) {
@@ -5317,7 +5335,7 @@
       ) =>
         void begin(asking, { transcode: 'never' }, current, delivery, null, compatibleSubtitles)
           .catch((error: unknown): Failure => {
-            console.warn('den:play/change-kept', error);
+            console.warn('den: player change failed; keeping current', error);
             return 'unreachable';
           })
           .then((moved) => {
@@ -5336,7 +5354,7 @@
     }
     void begin(pick, {}, undefined, delivery, null, compatibleSubtitles)
       .catch((error: unknown): Failure => {
-        console.warn('den:play/change', error);
+        console.warn('den: player change failed', error);
         return 'unreachable';
       })
       .then((moved) => {
@@ -5379,7 +5397,7 @@
       current.external ? 'fallback' : 'direct',
     )
       .catch((error: unknown): Failure => {
-        console.warn(`den:play/${to}-switch-kept`, error);
+        console.warn(`den: ${to} switch failed; keeping current`, error);
         return 'unreachable';
       })
       .then((moved) => {
@@ -5429,7 +5447,7 @@
       compatibleSubtitles,
     )
       .catch((error: unknown) => {
-        console.warn(`den:play/${source}-source`, error);
+        console.warn(`den: ${source} source failed`, error);
         return false;
       })
       .then((moved) => {
@@ -6501,7 +6519,7 @@
         () =>
           void element
             .play()
-            .catch((error: unknown) => console.warn('den:play/system-play', error)),
+            .catch((error: unknown) => console.warn('den: system play refused', error)),
       ],
       ['pause', () => element.pause()],
       ['seekbackward', (d) => seek(element.currentTime - (d.seekOffset ?? SKIP_SECS))],
@@ -6909,7 +6927,7 @@
               if (__DEN_TV_PLATFORM__ === 'tizen')
                 void broke(video.error.code, video.error.message, avplay?.failureKind());
               else void broke();
-            } else console.warn('den:play/missing-media-error');
+            } else console.warn('den: video error missing MediaError; continuing');
           }}
         >
           <!-- WebKit does not reliably reload cues when only an existing track element's src changes. Re-key on

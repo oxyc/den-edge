@@ -116,13 +116,13 @@ export class WorkerLibraryServiceTransport {
       try {
         listener(message);
       } catch (listenerError) {
-        console.error('den:l/worker-listener', listenerError);
+        console.error('den: a library transport listener failed', listenerError);
       }
     for (const listener of contentListeners)
       try {
         listener(contentMessage);
       } catch (listenerError) {
-        console.error('den:c/worker-listener', listenerError);
+        console.error('den: a content transport listener failed', listenerError);
       }
   }
 
@@ -141,6 +141,6 @@ function deliver<T>(listeners: ReadonlySet<(message: T) => void>, message: T): v
     try {
       listener(message);
     } catch (error) {
-      console.error('den:l/worker-listener', error);
+      console.error('den: a library transport listener failed', error);
     }
 }

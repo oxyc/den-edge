@@ -988,7 +988,7 @@ export class LibraryLogAuthority {
           return admission === undefined || admission === true;
         } catch (error) {
           // A refused or unreachable source read keeps the reset closed; it is not an answer to guess past.
-          console.warn('den:p/gate', error);
+          console.warn('den: the profile reset gate could not be read', error);
           return false;
         }
       },
@@ -1236,7 +1236,7 @@ export class LibraryLogAuthority {
         error instanceof LibraryStartRefused &&
         (error.status === 429 || error.status === 503 || error.status === 413);
       const refused = error instanceof LibraryStartRefused && error.status === 403;
-      console.warn('den:p/home-start', error);
+      console.warn('den: this browser’s household could not be started yet', error);
       return {
         result: {
           kind: 'household.create',
@@ -1880,7 +1880,7 @@ export class LibraryLogAuthority {
     try {
       shown = heldSimklRemovals(this.#log);
     } catch (error) {
-      console.warn('den:simkl/project', error);
+      console.warn('den: held SIMKL removals could not be projected', error);
     }
     const signature = JSON.stringify([account, shown.titles, shown.approval]);
     if (!shown.approval || shown.titles.length === 0) this.#simklApproval = undefined;
@@ -2233,7 +2233,7 @@ export class LibraryLogAuthority {
     try {
       await this.#log.keep(RETAINED_PREFERENCE_SEED, acceptedHousehold);
     } catch (error) {
-      console.warn('den:p/seed-store', error);
+      console.warn('den: the completed preference seed could not be retained', error);
     }
     return result;
   }

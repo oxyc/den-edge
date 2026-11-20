@@ -27,7 +27,7 @@ export async function saveHistoryImport(
           retry: { writes, operationId },
         } as const);
   } catch (error) {
-    console.warn('den:import/history-store', error);
+    console.warn('den: history import could not confirm its save', error);
     return {
       step: 'failed',
       message: importRetryNotice,

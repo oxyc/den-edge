@@ -75,6 +75,7 @@ const verdictOf = (answer: Record<string, unknown>, id: string): Verdict => {
 type EpisodeProbe = Episode & { id: number };
 type BatchTarget =
   { kind: 'movie'; id: number } | { kind: 'episode'; key: string; probe: EpisodeProbe };
+
 /** Exact active viewer and household. Credential-bearing keys are admitted here but only the digest is persisted. */
 export type AvailabilityAuthority = readonly [
   householdKind: string,
@@ -82,76 +83,80 @@ export type AvailabilityAuthority = readonly [
   profile: string,
 ];
 
-type Kept = Record<string, [Verdict, number]>;
-type Stored = [authority: string, verdicts: Kept];
+type KeptVerdicts = Record<string, [Verdict, number]>;
+/** The opaque namespace of the authority that gave the verdicts, then the verdicts. */
+type StoredVerdicts = [namespace: string, verdicts: KeptVerdicts];
 
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
-  private readonly v = new SvelteMap<number, Verdict>();
+  private readonly verdicts = new SvelteMap<number, Verdict>();
   /** The movies scout answered for this visit; the rest of `verdicts` came from an earlier one and is asked again. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
-  private readonly s = new Set<number>();
+  private readonly settled = new Set<number>();
   /** When each verdict was given, so a kept one expires. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Persistence bookkeeping; only verdicts are UI state.
-  private readonly at = new Map<number, number>();
+  private readonly givenAt = new Map<number, number>();
   /** A title's IMDb id by `type:id`, or null when its content record has none. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Lookup cache; only verdicts are UI state.
-  private readonly imdb = new Map<string, string | null>();
+  private readonly imdbIds = new Map<string, string | null>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request scheduling must not subscribe the components that enqueue titles.
-  private readonly w = new Set<number>();
+  private readonly wanted = new Set<number>();
   /** IDs in a content/scout ask, or deliberately waiting for their retry time. A virtualized card may remount many
    * times during either interval; it must not turn those mounts into duplicate requests or bypass the backoff. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
-  private readonly p = new Set<number>();
+  private readonly pending = new Set<number>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Retry bookkeeping; only verdict changes are observable.
-  private readonly tr = new Map<number, number>();
+  private readonly tries = new Map<number, number>();
   /** A series' verdicts by `episodeKey`: the episode its poster asks about. */
-  private readonly ev = new SvelteMap<string, Verdict>();
+  private readonly episodeVerdicts = new SvelteMap<string, Verdict>();
   /** When each episode verdict was given, and whether this visit's scout gave it. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Bookkeeping; only verdicts are UI state.
-  private readonly ea = new Map<string, { at: number; settled: boolean }>();
+  private readonly episodeAnswers = new Map<string, { at: number; settled: boolean }>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request scheduling, as `wanted`.
-  private readonly ew = new Map<string, EpisodeProbe>();
+  private readonly episodeWanted = new Map<string, EpisodeProbe>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping, as `pending`.
-  private readonly ep = new Set<string>();
+  private readonly episodePending = new Set<string>();
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Retry bookkeeping, as `tries`.
-  private readonly et = new Map<string, number>();
+  private readonly episodeTries = new Map<string, number>();
   /** Each series' Continue Watching entry (`out` false while it waits for the episode), and its new episode. */
-  private readonly cont = new SvelteMap<number, Episode & { out: boolean }>();
-  private readonly news = new SvelteMap<number, Episode>();
-  private tm: ReturnType<typeof setTimeout> | undefined;
+  private readonly continuing = new SvelteMap<number, Episode & { out: boolean }>();
+  private readonly newEpisodes = new SvelteMap<number, Episode>();
+  private timer: ReturnType<typeof setTimeout> | undefined;
   /** Only one availability batch asks upstream at once; new mounts gather behind it. */
-  private b: number | undefined;
-  private n = 0;
+  private asking: number | undefined;
+  private askSerial = 0;
   /** The active batch request, cancelled when another configured scout supersedes it. */
-  private req: AbortController | undefined;
+  private request: AbortController | undefined;
   /** Invalidates old-service responses and retry timers when the configured scout changes. */
-  private gen = 0;
+  private generation = 0;
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Timer cleanup bookkeeping, not UI state.
-  private readonly rt = new Set<ReturnType<typeof setTimeout>>();
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   /**
    * Scout said "not now" (429) until then: nothing is asked before it. A refusal used to count as "still checking",
    * so each poster was asked again 10 s later, three times, and then never — whatever the wait scout gave.
    */
-  private pause = 0;
-  private src: Scout | null = null;
-  /** Exact in-memory authority. Persisted storage contains only its opaque digest. */
-  private key: string | undefined;
-  private home = JSON.stringify(['test', null, 'test']);
-  private ns: string | undefined;
+  private pausedUntil = 0;
+  private scout: Scout | null = null;
+  /** The household and profile the verdicts belong to (`activate`), as JSON. */
+  private activeAuthority = JSON.stringify(['test', null, 'test']);
+  /** The household, profile, scout install and base the verdicts are from; only a different one starts them over. */
+  private answeredBy: string | undefined;
+  /** `answeredBy` as the opaque digest the kept verdicts are stored under; unset until a scout is connected. */
+  private namespace: string | undefined;
 
-  /** Storage is restored only by `connect`, after the exact household and Scout authority are known. */
+  /** Kept verdicts are restored by `connect`, once the exact household, profile and scout are known. */
   constructor(
-    private readonly st: Storage | undefined = typeof localStorage === 'undefined'
+    private readonly storage: Storage | undefined = typeof localStorage === 'undefined'
       ? undefined
       : localStorage,
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** A different household or profile drops every verdict, request and timer of the previous one. */
   activate(authority: AvailabilityAuthority): void {
-    const home = JSON.stringify(authority);
-    if (home !== this.home) this.reset();
-    this.home = home;
+    const active = JSON.stringify(authority);
+    if (active !== this.activeAuthority) this.reset();
+    this.activeAuthority = active;
   }
 
   /**
@@ -171,69 +176,71 @@ export class Availability {
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
   ): void {
-    this.src = null;
+    this.scout = null;
     if (!scout) return;
-    const exact = JSON.stringify([this.home, scout.install, scout.base]);
-    if (exact === this.key) {
-      this.src = { base: scout.base, content, fetch: fetchImpl };
-      this.queue();
-      return;
+    const exact = JSON.stringify([this.activeAuthority, scout.install, scout.base]);
+    if (exact !== this.answeredBy) {
+      this.reset();
+      this.answeredBy = exact;
+      this.namespace = localAuthorityKey(exact);
+      this.restore();
     }
-    this.reset();
-    this.key = exact;
-    this.ns = localAuthorityKey(exact);
-    this.load();
-    this.src = { base: scout.base, content, fetch: fetchImpl };
-    this.queue();
+    this.scout = { base: scout.base, content, fetch: fetchImpl };
+    this.gather();
   }
 
+  /** Forget everything the previous authority gave, and abort what is asked of it. */
   private reset(): void {
-    this.gen++;
-    clearTimeout(this.tm);
-    this.tm = undefined;
-    this.req?.abort();
-    this.req = undefined;
-    for (const timer of this.rt) clearTimeout(timer);
-    this.rt.clear();
-    for (const id of this.p) this.w.add(id);
-    this.p.clear();
-    this.b = undefined;
-    this.pause = 0;
-    this.src = null;
-    this.key = undefined;
-    this.ns = undefined;
-    this.v.clear();
-    this.s.clear();
-    this.at.clear();
-    this.tr.clear();
-    for (const key of this.ep) {
+    this.generation++;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.request?.abort();
+    this.request = undefined;
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
+    for (const id of this.pending) this.wanted.add(id);
+    this.pending.clear();
+    this.asking = undefined;
+    this.pausedUntil = 0;
+    this.scout = null;
+    this.answeredBy = undefined;
+    this.namespace = undefined;
+    this.verdicts.clear();
+    this.settled.clear();
+    this.givenAt.clear();
+    this.tries.clear();
+    for (const key of this.episodePending) {
       const [id, season, episode] = key.split(':').map(Number);
-      this.ew.set(key, { id: id!, season: season!, episode: episode! });
+      this.episodeWanted.set(key, { id: id!, season: season!, episode: episode! });
     }
-    this.ep.clear();
-    this.ev.clear();
-    this.ea.clear();
-    this.et.clear();
+    this.episodePending.clear();
+    this.episodeVerdicts.clear();
+    this.episodeAnswers.clear();
+    this.episodeTries.clear();
   }
 
-  private load(): void {
+  /**
+   * The last day's verdicts of this exact authority fade their posters at once, and scout is still asked. Rows of
+   * another authority, and the unscoped rows written before verdicts were scoped, are removed unread.
+   */
+  private restore(): void {
     try {
-      const stored = JSON.parse(this.st?.getItem(STORAGE_KEY) ?? 'null') as Stored;
-      if (stored?.[0] !== this.ns) {
-        if (stored !== null) this.st?.removeItem(STORAGE_KEY);
+      const stored = JSON.parse(
+        this.storage?.getItem(STORAGE_KEY) ?? 'null',
+      ) as StoredVerdicts | null;
+      if (!stored || stored[0] !== this.namespace) {
+        if (stored !== null) this.storage?.removeItem(STORAGE_KEY);
         return;
       }
       for (const [id, [verdict, at]] of Object.entries(stored[1])) {
         if (verdict === 'unknown' || !(this.now() - at < KEPT_MS)) continue;
         if (id.startsWith('tv:')) {
-          const key = id.slice(3);
-          this.ev.set(key, verdict);
-          this.ea.set(key, { at, settled: false });
-        } else {
-          const key = Number(id);
-          this.v.set(key, verdict);
-          this.at.set(key, at);
+          this.episodeVerdicts.set(id.slice(3), verdict);
+          this.episodeAnswers.set(id.slice(3), { at, settled: false });
+          continue;
         }
+        this.verdicts.set(Number(id), verdict);
+        this.givenAt.set(Number(id), at);
       }
     } catch {
       // Unreadable or refused storage: this authority starts without retained verdicts.
@@ -259,35 +266,35 @@ export class Availability {
       for (const { title, episode, upcoming } of entries)
         if (title.type === 'tv' && episode && !next.has(title.id))
           next.set(title.id, { season: episode.season, episode: episode.episode, out: !upcoming });
-      for (const id of this.cont.keys()) if (!next.has(id)) this.cont.delete(id);
+      for (const id of this.continuing.keys()) if (!next.has(id)) this.continuing.delete(id);
       for (const [id, entry] of next) {
-        const held = this.cont.get(id);
+        const held = this.continuing.get(id);
         if (
           held?.season !== entry.season ||
           held.episode !== entry.episode ||
           held.out !== entry.out
         )
-          this.cont.set(id, entry);
+          this.continuing.set(id, entry);
       }
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one comparison and discarded.
       const found = new Map(
         news.map(({ series, season, episode }) => [series, { season, episode }]),
       );
-      for (const id of this.news.keys()) if (!found.has(id)) this.news.delete(id);
+      for (const id of this.newEpisodes.keys()) if (!found.has(id)) this.newEpisodes.delete(id);
       for (const [id, episode] of found) {
-        const held = this.news.get(id);
+        const held = this.newEpisodes.get(id);
         if (held?.season !== episode.season || held.episode !== episode.episode)
-          this.news.set(id, episode);
+          this.newEpisodes.set(id, episode);
       }
     });
   }
 
   /** The episode this series' poster asks about now (`seriesAvailabilityEpisode`). */
-  private episode(title: Pick<Title, 'id' | 'releaseDate'>): Episode | undefined {
+  private episodeOf(title: Pick<Title, 'id' | 'releaseDate'>): Episode | undefined {
     return seriesAvailabilityEpisode(
       {
-        newEpisode: this.news.get(title.id),
-        continuing: this.cont.get(title.id),
+        newEpisode: this.newEpisodes.get(title.id),
+        continuing: this.continuing.get(title.id),
         firstAired: title.releaseDate,
       },
       // eslint-disable-next-line svelte/prefer-svelte-reactivity -- A reading of the clock, never mutated.
@@ -298,53 +305,54 @@ export class Availability {
   /** A poster is showing: its title is asked about along with the others showing now. */
   want(title: Pick<Title, 'type' | 'id' | 'imdbId' | 'releaseDate'>): void {
     if (title.type === 'tv') {
-      this.wantTv(title);
+      this.wantEpisode(title);
       return;
     }
     if (
       title.type !== 'movie' ||
-      this.has(title.id) ||
-      this.w.has(title.id) ||
-      this.p.has(title.id)
+      this.answered(title.id) ||
+      this.wanted.has(title.id) ||
+      this.pending.has(title.id)
     )
       return;
     // A title already carrying its IMDb id does not need a content query.
-    if (title.imdbId) this.imdb.set(`movie:${title.id}`, title.imdbId);
-    this.w.add(title.id);
-    this.queue();
+    if (title.imdbId) this.imdbIds.set(`movie:${title.id}`, title.imdbId);
+    this.wanted.add(title.id);
+    this.gather();
   }
 
-  private wantTv(title: Pick<Title, 'id' | 'imdbId' | 'releaseDate'>): void {
+  private wantEpisode(title: Pick<Title, 'id' | 'imdbId' | 'releaseDate'>): void {
     // Tracked: a poster's effect asks again when its series' episode moves on.
-    const episode = this.episode(title);
+    const episode = this.episodeOf(title);
     if (!episode) return;
     const key = episodeKey(title.id, episode);
-    if (this.hasTv(key) || this.ew.has(key) || this.ep.has(key)) return;
-    if (title.imdbId) this.imdb.set(`tv:${title.id}`, title.imdbId);
-    this.ew.set(key, { id: title.id, ...episode });
-    this.queue();
+    if (this.episodeAnswered(key) || this.episodeWanted.has(key) || this.episodePending.has(key))
+      return;
+    if (title.imdbId) this.imdbIds.set(`tv:${title.id}`, title.imdbId);
+    this.episodeWanted.set(key, { id: title.id, ...episode });
+    this.gather();
   }
 
   /** Scout answered this visit, and the answer still stands (`UNAVAILABLE_MS`). */
-  private has(id: number): boolean {
-    if (!this.s.has(id)) return false;
-    if (this.v.get(id) !== 'unavailable') return true;
-    return this.now() - (this.at.get(id) ?? 0) < UNAVAILABLE_MS;
+  private answered(id: number): boolean {
+    if (!this.settled.has(id)) return false;
+    if (this.verdicts.get(id) !== 'unavailable') return true;
+    return this.now() - (this.givenAt.get(id) ?? 0) < UNAVAILABLE_MS;
   }
 
-  private hasTv(key: string): boolean {
-    const answer = this.ea.get(key);
+  private episodeAnswered(key: string): boolean {
+    const answer = this.episodeAnswers.get(key);
     if (!answer?.settled) return false;
-    if (this.ev.get(key) !== 'unavailable') return true;
+    if (this.episodeVerdicts.get(key) !== 'unavailable') return true;
     return this.now() - answer.at < UNAVAILABLE_MS;
   }
 
   /** Whether scout said this title — a series at the episode its poster asks about — has nothing to play. */
   unavailable(title: Pick<Title, 'type' | 'id' | 'releaseDate'>): boolean {
-    if (title.type === 'movie') return this.v.get(title.id) === 'unavailable';
+    if (title.type === 'movie') return this.verdicts.get(title.id) === 'unavailable';
     if (title.type !== 'tv') return false;
-    const episode = this.episode(title);
-    return !!episode && this.ev.get(episodeKey(title.id, episode)) === 'unavailable';
+    const episode = this.episodeOf(title);
+    return !!episode && this.episodeVerdicts.get(episodeKey(title.id, episode)) === 'unavailable';
   }
 
   /**
@@ -357,45 +365,50 @@ export class Availability {
     available: boolean,
   ): void {
     const verdict = available ? 'available' : 'unavailable';
-    if (title.type === 'movie') this.set(title.id, verdict);
+    if (title.type === 'movie') this.settle(title.id, verdict);
     else if (title.type === 'tv' && episode) {
       const key = episodeKey(title.id, episode);
-      this.ew.delete(key);
-      this.setTv(key, verdict);
+      this.episodeWanted.delete(key);
+      this.settleEpisode(key, verdict);
     } else return;
-    this.save();
+    this.keep();
   }
 
-  private queue(): void {
-    if (!this.src || this.b !== undefined || this.tm || (this.w.size === 0 && this.ew.size === 0))
+  private gather(): void {
+    if (
+      !this.scout ||
+      this.asking !== undefined ||
+      this.timer ||
+      (this.wanted.size === 0 && this.episodeWanted.size === 0)
+    )
       return;
-    this.tm = setTimeout(
+    this.timer = setTimeout(
       () => {
-        this.tm = undefined;
+        this.timer = undefined;
         void this.ask();
       },
-      Math.max(GATHER_MS, this.pause - this.now()),
+      Math.max(GATHER_MS, this.pausedUntil - this.now()),
     );
   }
 
   private async ask(): Promise<void> {
-    const scout = this.src;
-    if (!scout || this.b !== undefined) return;
-    const run = ++this.n;
-    const generation = this.gen;
-    this.b = run;
+    const scout = this.scout;
+    if (!scout || this.asking !== undefined) return;
+    const run = ++this.askSerial;
+    const generation = this.generation;
+    this.asking = run;
     // When both kinds have a backlog, each gets half the batch: neither can sit behind several full pages of the
     // other. Spare capacity goes to movies, so one episode beside a large shelf still yields one full request.
-    const episodeCapacity = this.w.size > 0 ? Math.floor(MAX_IDS / 2) : MAX_IDS;
-    const episodes = [...this.ew].slice(0, episodeCapacity);
-    const ids = [...this.w].slice(0, MAX_IDS - episodes.length);
+    const episodeCapacity = this.wanted.size > 0 ? Math.floor(MAX_IDS / 2) : MAX_IDS;
+    const episodes = [...this.episodeWanted].slice(0, episodeCapacity);
+    const ids = [...this.wanted].slice(0, MAX_IDS - episodes.length);
     for (const id of ids) {
-      this.w.delete(id);
-      this.p.add(id);
+      this.wanted.delete(id);
+      this.pending.add(id);
     }
     for (const [key] of episodes) {
-      this.ew.delete(key);
-      this.ep.add(key);
+      this.episodeWanted.delete(key);
+      this.episodePending.add(key);
     }
 
     try {
@@ -410,7 +423,7 @@ export class Availability {
         ...episodes.map(([key, probe]): BatchTarget => ({ kind: 'episode', key, probe })),
       ];
       await each(targets, LOOKUPS, async (target) => {
-        const imdb = await this.lookup(
+        const imdb = await this.imdbId(
           target.kind === 'movie' ? 'movie' : 'tv',
           target.kind === 'movie' ? target.id : target.probe.id,
           scout.content,
@@ -431,15 +444,15 @@ export class Availability {
           else byRequest.set(requestId, [target]);
         }
       });
-      if (generation !== this.gen) return;
-      for (const id of noImdb) this.set(id, 'unknown');
-      for (const key of noEpisodeImdb) this.setTv(key, 'unknown');
+      if (generation !== this.generation) return;
+      for (const id of noImdb) this.settle(id, 'unknown');
+      for (const key of noEpisodeImdb) this.settleEpisode(key, 'unknown');
 
       let answer: Record<string, unknown> = {};
       let refused = false;
       if (byRequest.size > 0) {
         const controller = new AbortController();
-        this.req = controller;
+        this.request = controller;
         const timeout = setTimeout(() => controller.abort(), ANSWER_MS);
         try {
           const res = await scout.fetch(`${scout.base}/availability`, {
@@ -450,7 +463,7 @@ export class Availability {
           });
           if (res.status === 429) {
             refused = true;
-            this.pause = this.now() + retryAfterMs(res, RETRY_MS, this.now);
+            this.pausedUntil = this.now() + retryAfterMs(res, RETRY_MS, this.now);
           } else if (res.ok)
             answer =
               ((await res.json()) as { availability?: Record<string, unknown> }).availability ?? {};
@@ -458,20 +471,20 @@ export class Availability {
           // Out of reach: every title stays unknown, and is asked again.
         } finally {
           clearTimeout(timeout);
-          if (this.req === controller) this.req = undefined;
+          if (this.request === controller) this.request = undefined;
         }
       }
-      if (generation !== this.gen) return;
+      if (generation !== this.generation) return;
       // Not an answer about any of them, and no try spent: asked again once the wait is over.
       if (refused)
         for (const targets of byRequest.values()) {
           for (const target of targets) {
             if (target.kind === 'movie') {
-              this.p.delete(target.id);
-              this.w.add(target.id);
+              this.pending.delete(target.id);
+              this.wanted.add(target.id);
             } else {
-              this.ep.delete(target.key);
-              this.ew.set(target.key, target.probe);
+              this.episodePending.delete(target.key);
+              this.episodeWanted.set(target.key, target.probe);
             }
           }
         }
@@ -481,107 +494,111 @@ export class Availability {
           for (const target of targets) {
             if (target.kind === 'movie') {
               if (verdict === 'unknown') again.push(target.id);
-              else this.set(target.id, verdict);
+              else this.settle(target.id, verdict);
             } else if (verdict === 'unknown') episodeAgain.push([target.key, target.probe]);
-            else this.setTv(target.key, verdict);
+            else this.settleEpisode(target.key, verdict);
           }
         }
-      this.save();
-      this.retry(again);
-      for (const [key, probe] of episodeAgain) this.retryTv(key, probe);
+      this.keep();
+      this.later(again);
+      for (const [key, probe] of episodeAgain) this.episodeLater(key, probe);
     } catch {
       // A lookup implementation that unexpectedly rejects must not leave the IDs permanently pending.
-      if (generation === this.gen) {
-        this.retry(ids.filter((id) => this.p.has(id)));
-        for (const [key, probe] of episodes) if (this.ep.has(key)) this.retryTv(key, probe);
+      if (generation === this.generation) {
+        this.later(ids.filter((id) => this.pending.has(id)));
+        for (const [key, probe] of episodes)
+          if (this.episodePending.has(key)) this.episodeLater(key, probe);
       }
     } finally {
-      if (this.b === run) this.b = undefined;
-      this.queue();
+      if (this.asking === run) this.asking = undefined;
+      this.gather();
     }
   }
 
-  private set(id: number, verdict: Verdict): void {
-    this.p.delete(id);
-    this.v.set(id, verdict);
-    this.s.add(id);
-    this.at.set(id, this.now());
+  private settle(id: number, verdict: Verdict): void {
+    this.pending.delete(id);
+    this.verdicts.set(id, verdict);
+    this.settled.add(id);
+    this.givenAt.set(id, this.now());
   }
 
-  private setTv(key: string, verdict: Verdict): void {
-    this.ep.delete(key);
-    this.ev.set(key, verdict);
-    this.ea.set(key, { at: this.now(), settled: true });
+  private settleEpisode(key: string, verdict: Verdict): void {
+    this.episodePending.delete(key);
+    this.episodeVerdicts.set(key, verdict);
+    this.episodeAnswers.set(key, { at: this.now(), settled: true });
   }
 
   /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */
-  private save(): void {
-    if (!this.ns) return;
-    const kept: Kept = {};
-    for (const [id, verdict] of this.v) {
-      const at = this.at.get(id);
+  private keep(): void {
+    if (!this.namespace) return;
+    const kept: KeptVerdicts = {};
+    for (const [id, verdict] of this.verdicts) {
+      const at = this.givenAt.get(id);
       if (verdict !== 'unknown' && at !== undefined) kept[id] = [verdict, at];
     }
-    for (const [key, verdict] of this.ev) {
-      const at = this.ea.get(key)?.at;
+    for (const [key, verdict] of this.episodeVerdicts) {
+      const at = this.episodeAnswers.get(key)?.at;
       if (verdict !== 'unknown' && at !== undefined) kept[`tv:${key}`] = [verdict, at];
     }
     try {
-      this.st?.setItem(STORAGE_KEY, JSON.stringify([this.ns, kept]));
+      this.storage?.setItem(
+        STORAGE_KEY,
+        JSON.stringify([this.namespace, kept] satisfies StoredVerdicts),
+      );
     } catch {
       // Refused storage: the verdicts are this visit's.
     }
   }
 
   /** Ask again after scout has had time to check — until the tries run out, when unknown is the answer. */
-  private retry(ids: number[]): void {
+  private later(ids: number[]): void {
     const retry = ids.filter((id) => {
-      const tries = (this.tr.get(id) ?? 0) + 1;
-      this.tr.set(id, tries);
-      if (tries > RETRIES) this.set(id, 'unknown');
+      const tries = (this.tries.get(id) ?? 0) + 1;
+      this.tries.set(id, tries);
+      if (tries > RETRIES) this.settle(id, 'unknown');
       return tries <= RETRIES;
     });
     if (retry.length === 0) return;
-    this.defer(() => {
+    this.after(() => {
       for (const id of retry) {
-        this.p.delete(id);
-        this.w.add(id);
+        this.pending.delete(id);
+        this.wanted.add(id);
       }
-      this.queue();
+      this.gather();
     });
   }
 
-  private retryTv(key: string, probe: EpisodeProbe): void {
-    const tries = (this.et.get(key) ?? 0) + 1;
-    this.et.set(key, tries);
+  private episodeLater(key: string, probe: EpisodeProbe): void {
+    const tries = (this.episodeTries.get(key) ?? 0) + 1;
+    this.episodeTries.set(key, tries);
     if (tries > RETRIES) {
-      this.setTv(key, 'unknown');
+      this.settleEpisode(key, 'unknown');
       return;
     }
-    this.defer(() => {
-      this.ep.delete(key);
-      this.ew.set(key, probe);
-      this.queue();
+    this.after(() => {
+      this.episodePending.delete(key);
+      this.episodeWanted.set(key, probe);
+      this.gather();
     });
   }
 
   /** `run` after `RETRY_MS`, unless the scout changes first. */
-  private defer(run: () => void): void {
-    const generation = this.gen;
+  private after(run: () => void): void {
+    const generation = this.generation;
     const timer = setTimeout(() => {
-      this.rt.delete(timer);
-      if (generation === this.gen) run();
+      this.retryTimers.delete(timer);
+      if (generation === this.generation) run();
     }, RETRY_MS);
-    this.rt.add(timer);
+    this.retryTimers.add(timer);
   }
 
-  private async lookup(
+  private async imdbId(
     type: 'movie' | 'tv',
     id: number,
     content: ContentServiceClientPort,
   ): Promise<string | null | undefined> {
     const key = `${type}:${id}`;
-    if (this.imdb.has(key)) return this.imdb.get(key);
+    if (this.imdbIds.has(key)) return this.imdbIds.get(key);
     const answer = await content
       .query({ kind: 'title.external-id', title: { type, id } })
       .catch(() => null);
@@ -591,7 +608,7 @@ export class Availability {
         : answer?.imdbId.state === 'absent'
           ? null
           : undefined;
-    if (imdb !== undefined) this.imdb.set(key, imdb);
+    if (imdb !== undefined) this.imdbIds.set(key, imdb);
     return imdb;
   }
 }

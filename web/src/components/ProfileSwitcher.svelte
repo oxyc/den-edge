@@ -133,7 +133,7 @@
     kidFormFailed = false;
     kidFormLoading = true;
     const loaded = await loadAddKidProfileForm().catch(() => {
-      console.error('den:p/controls-load');
+      console.error('den: kid profile controls could not be loaded');
       kidFormFailed = true;
       return null;
     });
@@ -229,7 +229,7 @@
     try {
       saved = await profiles.setOwnerPin(value);
     } catch {
-      console.error('den:p/pin-save');
+      console.error('den: the owner PIN could not be saved');
       saved = false;
     } finally {
       switching = false;

@@ -129,7 +129,7 @@
       typed = '';
     } catch (error) {
       if (current !== attempt) return;
-      console.warn('den:recovery/make', error);
+      console.warn('den: a recovery code could not be made', error);
       phase = 0;
       showMessage(error instanceof DeriveFailed ? deviceCouldNot.make : failures.failed);
     } finally {

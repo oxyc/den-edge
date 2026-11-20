@@ -85,7 +85,7 @@
         writes: historyImportItems(plan.marks, plan.shows),
       };
     } catch (error) {
-      console.warn('den:import/prime', error);
+      console.warn('den: Prime Video import failed', error);
       owned.state = {
         step: 'failed',
         message:

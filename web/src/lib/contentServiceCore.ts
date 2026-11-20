@@ -158,7 +158,7 @@ export class ContentServiceCore {
       try {
         listener(messages);
       } catch (error) {
-        console.error('den:c/core-listener', error);
+        console.error('den: a content service listener failed', error);
       }
   }
 }

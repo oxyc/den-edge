@@ -302,7 +302,7 @@ export class LibraryRetirements {
       else await cleanup();
     } catch (error) {
       await this.#fail(receipt, 'storage');
-      console.warn('den:library/retire-cache', error);
+      console.warn('den: the retired library cache could not be dropped', error);
     } finally {
       waiting = false;
       clearTimeout(timer);

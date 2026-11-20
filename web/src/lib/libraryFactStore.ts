@@ -930,7 +930,9 @@ export class LibraryFactStore {
     if (entries.length) this.held.journals++;
     if (!complete || this.held.journals < JOURNAL_LIMIT || this.folding) return;
     this.folding = this.compact(generation)
-      .catch((error: unknown) => console.warn('den:fact/fold', error))
+      .catch((error: unknown) =>
+        console.warn('den: the library journal could not be folded; it is read as it is', error),
+      )
       .finally(() => (this.folding = undefined));
   }
 

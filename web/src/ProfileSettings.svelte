@@ -72,7 +72,7 @@
       const unlocked = await coordinator.unlockSettings(entered);
       if (current()) denied = !unlocked;
     } catch (error) {
-      console.warn('den:p/pin', error);
+      console.warn('den: the Owner PIN could not be checked for Kid Settings', error);
       if (current()) verificationFailed = true;
     } finally {
       if (current()) {
@@ -116,7 +116,12 @@
         await setInterfaceLanguage(changes.interfaceLanguage);
       }
     } catch (error: unknown) {
-      console.warn(written ? 'den:p/pref-present' : 'den:p/pref-save', error);
+      console.warn(
+        written
+          ? 'den: the saved profile language could not be presented'
+          : 'den: profile preference save failed',
+        error,
+      );
       if (generation === preferenceGeneration && active === session) {
         failure = [written ? 'presentation' : 'profile.saveFailed', active, changes, written];
       }

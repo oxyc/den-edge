@@ -124,7 +124,7 @@ export class SessionServices {
       },
       (error: unknown) => {
         if (!current() || generation !== this.#atlasGeneration) return;
-        console.warn('den:p/source', error);
+        console.warn('den: content source configuration failed', error);
       },
     );
   }
@@ -448,7 +448,9 @@ export class SessionServices {
           reel: this.reel,
           remux: this.remux,
         })
-        .catch((error: unknown) => console.warn('den:p/discovery', error));
+        .catch((error: unknown) =>
+          console.warn('den: provider discovery could not be retained', error),
+        );
     }, 1_000);
   }
 }

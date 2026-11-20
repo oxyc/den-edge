@@ -321,7 +321,7 @@
               __DEN_TV__ ? 1 : undefined,
             );
           })().catch((error: unknown) => {
-            if (current) console.warn('den:p/checkin', error);
+            if (current) console.warn('den: this device could not check in', error);
           }),
         1_000,
       );
@@ -731,7 +731,7 @@
         return household.ensureDefaultKidProfile();
       },
       { live: () => alive },
-    ).catch(() => console.error('den:p/kid-create'));
+    ).catch(() => console.error('den: the household kid profile could not be made'));
   });
 
   // Kid chosen before the household existed: once it does and its Kid is there, the PIN chosen then becomes the
@@ -754,7 +754,7 @@
         if (result.outcome === 'failed' || result.outcome === 'denied')
           console.warn('den: profile switch', 'kid', result.outcome);
       })
-      .catch(() => console.warn('den:p/kid-switch'));
+      .catch(() => console.warn('den: the staged kid profile transition failed'));
   });
 
   /** How often an open tab asks to renew assistant grants; the library service renews at most once a day. */
@@ -858,7 +858,7 @@
       await retireMovedLibrary(source);
       return 'joined';
     } catch (error) {
-      console.warn('den:p/h-join', error);
+      console.warn('den: this browser’s household could not join that household yet', error);
       return 'failed';
     } finally {
       opened.close();
@@ -1021,7 +1021,7 @@
       } else if (outcome === 'refused') householdRefused = true;
       else if (outcome !== 'empty') retryMs = retryAfterMs ?? HOUSEHOLD_RETRY_MS;
     } catch (error) {
-      console.warn('den:p/h-create', error);
+      console.warn('den: this browser’s household could not be made yet', error);
       retryMs = HOUSEHOLD_RETRY_MS;
     } finally {
       householdStarting = false;
@@ -1115,7 +1115,7 @@
       staged?.dispose();
       return 'adopted';
     } catch (error) {
-      console.warn('den:p/h-move', error);
+      console.warn('den: this browser’s library could not move into its household yet', error);
       owner.close();
       destination.close();
       return waitMs;
@@ -1132,7 +1132,7 @@
     if (verified?.verified && verified.householdKey === ownHousehold)
       void recheckHousehold(verified).then(async (failed) => {
         if (failed) {
-          console.warn(`den:p/library-kept:${failed}`);
+          console.warn(`den: the library kept in this browser stays for now: ${failed}`);
           return;
         }
         await dropLocalLibrary(verified.stagingKey);
@@ -1346,7 +1346,7 @@
       if (error instanceof LibraryServiceError && error.failure.code === 'unauthorized') {
         return 'unauthorized';
       }
-      console.warn('den:p/reset-start');
+      console.warn('den: the profile key reset could not start');
       return pendingReset?.compound && pendingReset.from === from ? 'blocked' : 'failed';
     } finally {
       resetInFlight = false;
@@ -1431,7 +1431,7 @@
           if (alive && (result === 'waiting' || result === 'blocked'))
             compoundRetry = setTimeout(() => (pendingReset = readPendingReset()), 15_000);
         })
-        .catch(() => console.warn('den:p/reset-next'));
+        .catch(() => console.warn('den: the profile key reset could not continue'));
     run();
     return () => clearTimeout(compoundRetry);
   });
@@ -1875,7 +1875,7 @@
         if (outcome === 'failed' && alive && guestTries < GUEST_RETRIES)
           setTimeout(() => alive && guestTries++, GUEST_RETRY_MS);
       })
-      .catch(() => console.warn('den:p/guest'))
+      .catch(() => console.warn('den: a guest library could not be started'))
       .finally(() => (guestStarting = false));
   });
 </script>

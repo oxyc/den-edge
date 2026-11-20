@@ -392,7 +392,7 @@ async function remove(ctx: RecoveryContext, locator: string): Promise<void> {
   try {
     await call(ctx, 'DELETE', { locator });
   } catch (error) {
-    console.warn('den:recovery/delete', error);
+    console.warn('den: a recovery entry was not deleted; the next check retries', error);
   }
 }
 

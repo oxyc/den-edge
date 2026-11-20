@@ -158,6 +158,6 @@ function deliver<T>(listeners: ReadonlySet<(message: T) => void>, message: T): v
     try {
       listener(message);
     } catch (error) {
-      console.error('den:l/adaptive-listener', error);
+      console.error('den: an adaptive library transport listener failed', error);
     }
 }

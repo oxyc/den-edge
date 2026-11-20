@@ -377,7 +377,7 @@ function deliver<T>(listeners: ReadonlySet<(message: T) => void>, message: T): v
     try {
       listener(message);
     } catch (error) {
-      console.error('den:l/shared-listener', error);
+      console.error('den: a shared library transport listener failed', error);
     }
   }
 }
