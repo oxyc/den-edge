@@ -477,5 +477,8 @@ if (process.argv.includes('--capture')) {
   // Ending a read held before first paint (#1378) measured 127,771 against main's 127,740 (+31, main at 5a8eef62): one
   // branch in the library Worker's foreground-ready handler, which every Worker graph carries. A lazy split cannot
   // reduce it. Startup is unchanged within chunk-hash churn. Allow the smallest 128-byte boundary, retaining 101.
-  if (coreTotalDelta > 127872) throw new Error('Browser total JS/CSS budget exceeded');
+  // Keeping the old link when a legacy key-reset marker is unreadable (#1252) measured 127,951: one storage probe and one
+  // branch in `forgetMoved`, in the links module every Browser graph carries. A lazy split cannot reduce it. Startup is
+  // unchanged. Allow the next 128-byte boundary, retaining 49.
+  if (coreTotalDelta > 128000) throw new Error('Browser total JS/CSS budget exceeded');
 }

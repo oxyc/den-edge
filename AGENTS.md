@@ -99,6 +99,13 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Keeping the old link when a legacy key-reset marker is unreadable (#1252) was measured on the PR head rebased onto
+  main `f4123e9f`: core delta 127,951 locally (the hosted gate measured 127,889 with a longer log line; the figure moves
+  with chunk-hash churn), translations 51,722 (unchanged), startup 207,129 (unchanged). The growth is one storage probe
+  and one branch in `forgetMoved`, in the links module every Browser graph carries, so a lazy split cannot reduce the
+  complete graph. The complete ceiling advances from 127,872 to 128,000 (retaining 49); the translation and startup
+  ceilings are unchanged. It adds no request, timer, listener or dependency.
+
 - Ending a read held before first paint (#1378) was measured by the hosted gate, and reproduced locally, on the PR head
   rebased onto main `5a8eef62` (core delta 127,740, translations 51,722, startup 206,998): core delta 127,771 (+31),
   translations 51,722 (unchanged), startup 207,001 (+3; chunk-hash churn, the change is Worker-only). The growth is one
