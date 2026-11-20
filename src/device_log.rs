@@ -8,7 +8,7 @@
 
 use crate::handler::{client_ip, constant_time_eq, error, json_reply as bare_json, retry_after};
 use crate::AppState;
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{header, Method, StatusCode};
 use axum::response::Response;
@@ -61,7 +61,7 @@ pub async fn handle(state: &Arc<AppState>, req: Request) -> Response {
         .uri(&sink.upstream)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
         .header(header::AUTHORIZATION, format!("Bearer {}", sink.token))
-        .body(Full::new(Bytes::from(body)))
+        .body(Full::new(body))
     else {
         return bare_json(StatusCode::INTERNAL_SERVER_ERROR, &error("device_log_upstream"));
     };
