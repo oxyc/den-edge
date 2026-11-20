@@ -13,9 +13,10 @@ import { sourcePhrases as spanishPhrases } from './src/lib/messages/phrases/es.t
 import { sourcePhrases as swedishPhrases } from './src/lib/messages/phrases/sv.ts';
 
 // The TV builds merge this config and keep the automatic split: grouped, their app never got past "Starting Den…".
-const libraryOnly = process.env.DEN_TV_PLATFORM
-  ? new Set<string>()
-  : libraryModules(fileURLToPath(new URL('./src', import.meta.url)));
+const grouped = libraryModules(
+  fileURLToPath(new URL('./src', import.meta.url)),
+  Boolean(process.env.DEN_TV_PLATFORM),
+);
 
 const phraseKey = (value: string): string => {
   let hash = 0x811c9dc5;
@@ -241,6 +242,35 @@ const preloadApplication = () => ({
   },
 });
 
+/**
+ * What only the library reaches loads as one chunk, and what it shares with the first paint as another
+ * (`scripts/libraryModules.ts`). The client build only: grouped in the server-rendered shell's build, a module of the
+ * group ran before the one it extends (`SvelteMap is not a constructor`), so group chunks are not free of ordering
+ * hazards and stay where the end-to-end runs see them.
+ */
+const libraryChunks = (): Plugin => ({
+  name: 'den-library-chunks',
+  config(_config, { isSsrBuild }) {
+    if (isSsrBuild) return;
+    return {
+      build: {
+        rolldownOptions: {
+          output: {
+            codeSplitting: {
+              groups: (['library', 'startup'] as const).map((which) => ({
+                name: which === 'library' ? 'routed-library' : 'startup-shared',
+                // Their dependencies are in the other graph or the same one, and stay where they are.
+                includeDependenciesRecursively: false,
+                test: (id: string) => grouped[which].has(id.split('?')[0]!.replaceAll('\\', '/')),
+              })),
+            },
+          },
+        },
+      },
+    };
+  },
+});
+
 export default defineConfig({
   define: {
     __DEN_TV__: 'false',
@@ -289,6 +319,7 @@ export default defineConfig({
     compiledPhrases(),
     svelte({ preprocess: localizeMarkup() }),
     preloadApplication(),
+    libraryChunks(),
   ],
   server: {
     // Pairing and the library's keys need WebCrypto, which a browser gives only to a secure context: a plain
@@ -336,29 +367,18 @@ export default defineConfig({
             },
           }
         : {}),
-      output: {
-        // What only the library reaches loads as one chunk (`scripts/libraryModules.ts`).
-        codeSplitting: {
-          groups: [
-            {
-              name: 'routed-library',
-              // Its dependencies are the startup graph's too, and stay where they are.
-              includeDependenciesRecursively: false,
-              test: (id: string) => libraryOnly.has(id.split('?')[0]!.replaceAll('\\', '/')),
-            },
-          ],
-        },
-        ...(process.env.DEN_E2E_SEED === '1'
-          ? {
+      ...(process.env.DEN_E2E_SEED === '1'
+        ? {
+            output: {
               entryFileNames: (chunk: { name: string }) =>
                 chunk.name === 'assistantProjectionWorker'
                   ? 'assets/assistantProjectionWorker.js'
                   : chunk.name === 'shell'
                     ? 'shell.js'
                     : 'assets/[name]-[hash].js',
-            }
-          : {}),
-      },
+            },
+          }
+        : {}),
     },
   },
   test: {

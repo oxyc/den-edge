@@ -119,6 +119,24 @@ async function setup(page, { libraryDelayMs = 0, delayed = [] } = {}) {
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toBeVisible();
 }
 
+test('an unpaired TV start shows the pairing screen without the library’s chunks', async ({
+  page,
+}) => {
+  await routeGuestEdge(page, newEdge());
+  const library = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    if (/\/(?:RoutedLibrary|routed-library|Library|Billboard|PosterCard)[-.]/.test(pathname))
+      library.push(pathname);
+  });
+  await page.goto(E2E_ORIGIN);
+  await expect(page.getByText('Open with a recovery code', { exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.waitForTimeout(2_000);
+  expect(library).toEqual([]);
+});
+
 test('Search pressed before the library has loaded opens once it has, with its field focused', async ({
   page,
 }) => {
