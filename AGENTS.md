@@ -100,15 +100,17 @@ everything the committed code imports is committed too.
 ## Bundle budget records
 
 - AirPlay's way back (#1202) was measured on matched local production builds at main `71f28b69` and the PR head: the
-  complete non-translation delta moves BASE → MEASURED (+DELTA), translations TRANSLATIONS (+50: "Playing on AirPlay"
-  and "Stop AirPlay"), and startup STARTUP over the fixed baseline. All of the growth is in the lazy Player chunk: the
+  complete non-translation delta moves 128,173 → 128,691 (+518), translations 51,786 → 51,833 (+47: "Playing on
+  AirPlay" and "Stop AirPlay", leaving 7 under the translation ceiling), and startup 11,025 → 11,012 over the fixed
+  baseline (-13, chunk-hash churn). All of the growth is in the lazy Player chunk: the
   AirPlay bar above the picture (Close and Stop AirPlay, which opens Safari's picker), the one-second settle of a lost
   wireless target, the reload at the receiver's position once playback is back on this device, and the switch to TorBox
   where the cast page offers no AirPlay. The first draft measured +658 with five phrases (translations 51,892, over
   their ceiling); dropping three phrases brought it to +530, and reusing the shared `Button` for Stop AirPlay instead of
   its own CSS to +483 (at main `f4123e9f`). The TorBox switch's label reuses `player.switchTo`, so no phrase is added
   for it. It must sit with the element's WebKit events it answers; another split would add a request mid-playback.
-  CEILING_NOTE It adds one bounded 1 s timer per wireless loss and no request, polling or dependency; the reload
+  The complete ceiling advances from 128,256 to 128,768, the smallest 128-byte boundary containing it (retaining 77);
+  the startup and translation ceilings are unchanged. It adds one bounded 1 s timer per wireless loss and no request, polling or dependency; the reload
   re-fetches the playlist once when AirPlay ends.
 
 - An audio choice on a TorBox stream that names no audio tracks (#1419) was measured on matched local production builds
