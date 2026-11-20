@@ -185,6 +185,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'No se encontró ningún Chromecast en esta red. Comprueba que esté encendido y en la misma wifi, y pulsa Transmitir para volver a intentarlo.',
   Retry: 'Reintentar',
   'Stop casting': 'Dejar de transmitir',
+  'Playing on AirPlay': 'Reproduciendo con AirPlay',
+  'Stop AirPlay': 'Detener AirPlay',
   'The Chromecast couldn’t play this, so it’s playing here again.':
     'El Chromecast no pudo reproducir esto, así que vuelve a reproducirse aquí.',
   'The Chromecast didn’t start playing, so it’s playing here again.':

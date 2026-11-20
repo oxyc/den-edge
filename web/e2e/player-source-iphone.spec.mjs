@@ -441,7 +441,7 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
     }
   });
 
-  test('AirPlay gives Apple sole control while active, restores Den, and reports flapping', async () => {
+  test('AirPlay leaves Apple the picture, keeps a way out, restores Den, and reports flapping', async () => {
     const browser = await webkit.launch();
     try {
       const page = await (await iphone(browser, 'en-US', { airPlay: true })).newPage();
@@ -472,14 +472,25 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       await expect.poll(() => page.evaluate(() => window.airPlayPickerCalls ?? 0)).toBe(2);
       await page.evaluate(() => window.setAirPlayTarget(true));
 
-      // Apple's native transport is the only owner while AirPlay is active. The video element is not replaced, so
-      // its HLS session and playhead survive the handoff.
+      // Apple's native transport owns the picture while AirPlay is active. The video element is not replaced, so
+      // its HLS session and playhead survive the handoff. Den keeps one bar above the picture, never over it: Close,
+      // and Stop AirPlay, which can only open Safari's device list.
       await expect(video).toHaveAttribute('controls', '');
-      await expect(page.locator('.player > header, .player > footer')).toHaveCount(0);
+      await expect(page.locator('.player > header.web-top, .player > footer')).toHaveCount(0);
       await expect(controls).toHaveCount(0);
+      const bar = page.locator('.player > header.web-airplay');
+      await expect(bar).toContainText('Playing on AirPlay');
+      const [barBox, videoBox] = [await bar.boundingBox(), await video.boundingBox()];
+      expect(videoBox.y).toBeGreaterThanOrEqual(barBox.y + barBox.height - 0.5);
+      const stop = bar.getByRole('button', { name: 'Stop AirPlay' });
+      expect(await tapLandsOnStamp(stop)).toBe(true);
+      await stop.tap();
+      await expect.poll(() => page.evaluate(() => window.airPlayPickerCalls ?? 0)).toBe(3);
+      await expect(bar.getByRole('button', { name: 'Close player' })).toBeVisible();
 
       await page.evaluate(() => window.setAirPlayTarget(false));
       await expect(video).not.toHaveAttribute('controls', '');
+      await expect(bar).toHaveCount(0);
       await expect(page.locator('.player > header.web-top')).toHaveCount(1);
       await expect(page.locator('.player > footer')).toHaveCount(0);
       await expect(controls).toHaveCount(1);
@@ -497,6 +508,66 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       expect(airPlayReports.find((report) => report.kind === 'airplay')).not.toHaveProperty(
         'failed',
       );
+    } catch (error) {
+      await savePageTraces();
+      throw error;
+    } finally {
+      contexts.length = 0;
+      await browser.close();
+    }
+  });
+
+  // Reported on an iPhone after an LG receiver: once playback came back to the phone its picture stayed black. Coming
+  // back, the same source is loaded again where the receiver was; a wireless loss that returns at once changes nothing.
+  // The reload is native HLS's, which every iPhone plays with. A WebKit without native HLS (Linux's, in CI: its
+  // segments load as XHR) plays through hls.js, which keeps its own attachment, so there it must not reload.
+  test('back from AirPlay the source loads again at the receiver position; a flap does not', async () => {
+    const browser = await webkit.launch();
+    try {
+      const page = await (await iphone(browser, 'en-US', { airPlay: true })).newPage();
+      // The 1 s settle runs on the page's clock, driven here; installed before load so the page's timers use it.
+      await page.clock.install();
+      const playback = await guestPlayer(page, {
+        originalLanguage: 'en',
+        hearth: () => ({ json: torboxAnswer }),
+      });
+      const video = page.locator('.player video');
+      const native = await video.evaluate(
+        (element) => element.canPlayType('application/vnd.apple.mpegurl') !== '',
+      );
+      await page.evaluate(() => {
+        const element = document.querySelector('.player video');
+        window.mediaLoads = 0;
+        element.addEventListener('emptied', () => (window.mediaLoads += 1));
+        element.currentTime = 20;
+        window.setAirPlayAvailability('available');
+        window.setAirPlayTarget(true);
+      });
+      await expect(video).toHaveAttribute('controls', '');
+
+      // A loss that comes straight back: AirPlay stays in charge, nothing reloads, nothing is asked of Hearth.
+      await page.evaluate(() => {
+        window.setAirPlayTarget(false);
+        window.setAirPlayTarget(true);
+      });
+      await page.clock.runFor(1_500);
+      await expect(video).toHaveAttribute('controls', '');
+      expect(await page.evaluate(() => window.mediaLoads)).toBe(0);
+
+      const at = await video.evaluate((element) => element.currentTime);
+      expect(at).toBeGreaterThan(19);
+      await page.evaluate(() => window.setAirPlayTarget(false));
+      await page.clock.runFor(1_001);
+      // Den's own bar is back: the settle's callback ran, and the reload is decided in that same callback.
+      await expect(page.locator('.player > header.web-top')).toHaveCount(1);
+      if (native) {
+        await expect.poll(() => page.evaluate(() => window.mediaLoads)).toBe(1);
+        expect(await video.evaluate((element) => element.src)).toBe(torboxAnswer.url);
+      } else expect(await page.evaluate(() => window.mediaLoads)).toBe(0);
+      await expect
+        .poll(() => video.evaluate((element) => element.readyState >= 1 && element.currentTime))
+        .toBeGreaterThanOrEqual(at - 1);
+      expect(playback).toHaveLength(1);
     } catch (error) {
       await savePageTraces();
       throw error;

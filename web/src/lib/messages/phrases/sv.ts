@@ -182,6 +182,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'Ingen Chromecast hittades i det här nätverket. Kontrollera att den är på och på samma wifi, och tryck sedan på Casta för att försöka igen.',
   Retry: 'Försök igen',
   'Stop casting': 'Sluta casta',
+  'Playing on AirPlay': 'Spelas via AirPlay',
+  'Stop AirPlay': 'Stoppa AirPlay',
   'The Chromecast couldn’t play this, so it’s playing here again.':
     'Chromecast kunde inte spela det här, så det spelas här igen.',
   'The Chromecast didn’t start playing, so it’s playing here again.':

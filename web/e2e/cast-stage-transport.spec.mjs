@@ -52,9 +52,31 @@ function launch(browserType) {
   return webkit.launch();
 }
 
-async function open(browserType, { iphone = false } = {}) {
+async function open(browserType, { iphone = false, airPlay = false } = {}) {
   const browser = await launch(browserType);
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  // Safari's AirPlay picker, in every frame; a press records the call. WebKit's own availability answer is withheld:
+  // it fires once, and measured here a frame got `available`, `not-available` or nothing depending on when its
+  // listener and its media arrived. Only the test's own (untrusted) events reach the page: Safari never answering.
+  if (airPlay)
+    await context.addInitScript(() => {
+      HTMLVideoElement.prototype.webkitShowPlaybackTargetPicker = function () {
+        window.denAirPlayPicker = (window.denAirPlayPicker ?? 0) + 1;
+      };
+      const listen = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function (type, listener, options) {
+        if (type !== 'webkitplaybacktargetavailabilitychanged' || typeof listener !== 'function')
+          return listen.call(this, type, listener, options);
+        return listen.call(
+          this,
+          type,
+          (event) => {
+            if (!event.isTrusted) listener.call(this, event);
+          },
+          options,
+        );
+      };
+    });
   // An iPhone's Safari, which no engine here is: no element can be made fullscreen, and a video can only enter
   // Apple's own fullscreen player. In every frame, so the cast page sees it too; a press records the call.
   if (iphone)
@@ -270,8 +292,9 @@ for (const [name, browserType] of engines) {
         const slot = page.locator('.frame-fullscreen');
         await expect(slot).toHaveCount(1);
         // In the dock, where the player's fullscreen button sits: just before More, at the dock's right end. The top
-        // bar keeps its hole for Cast and AirPlay only, of which a test browser has neither.
-        await expect(page.locator('.frame-outputs')).toHaveCount(0);
+        // bar keeps its hole for Cast and AirPlay only: no test browser has Cast. WebKit has AirPlay's picker, whose
+        // one availability answer races the frame's media (see `open`), so only the other engines are sure of none.
+        if (browserType !== webkit) await expect(page.locator('.frame-outputs')).toHaveCount(0);
         expect(
           await slot.evaluate((hole) => {
             const more = hole.nextElementSibling;
@@ -309,3 +332,30 @@ for (const [name, browserType] of engines) {
     });
   });
 }
+
+// On an iPhone the AirPlay button was gone once Den Remux moved into this frame. Where Safari has the picker, the
+// frame offers AirPlay by the player's own rule: until Safari says no device is there, not only once it says one is.
+test('WebKit: the frame offers AirPlay wherever Safari has its picker, until no device is there', async () => {
+  const { browser, page } = await open(webkit, { airPlay: true });
+  try {
+    await playingPast(page, 1);
+    await reveal(page);
+    const frame = page.frameLocator('iframe[title="Den Cast player"]');
+    const airPlay = frame.locator('#airplay');
+    await expect(airPlay).toBeVisible();
+    await expect(page.locator('.frame-outputs')).toHaveCount(1);
+    await airPlay.click();
+    const cast = page.frames().find((f) => f.url().startsWith(CAST));
+    await expect.poll(() => cast.evaluate(() => window.denAirPlayPicker ?? 0)).toBe(1);
+
+    await cast.evaluate(() => {
+      const event = new Event('webkitplaybacktargetavailabilitychanged');
+      Object.defineProperty(event, 'availability', { value: 'not-available' });
+      document.querySelector('video').dispatchEvent(event);
+    });
+    await expect(airPlay).toBeHidden();
+    await expect(page.locator('.frame-outputs')).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
