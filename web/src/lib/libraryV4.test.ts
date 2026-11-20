@@ -501,6 +501,63 @@ describe('pre-v4 backups', () => {
     expect(await log.write(blankTitle({ type: 'movie', id: 7 }, 1_000))).toBeNull();
     expect(server.log.commits).toEqual([]);
   });
+
+  /** The store replaced under a log that is already open: whatever `rows` holds, under a new generation. */
+  async function replaceStore(server: Awaited<ReturnType<typeof edge>>, rows: Row[]) {
+    server.stored.clear();
+    server.restore();
+    for (const row of rows) await server.append(row);
+  }
+
+  it('clears the refusal once a current v4 replacement is read to its head, and writes into it', async () => {
+    const server = await edge([rec('movie', 550)], { wireMin: 3 });
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(log.readOnlyReason).toBe(PRE_V4_BACKUP_ERROR);
+
+    await replaceStore(server, [filmDocument(1), filmDocument(2), filmDocument(3)]);
+    await log.refresh();
+
+    expect(log.readOnly).toBe(false);
+    expect(log.readOnlyReason).toBeNull();
+    expect(await log.write(rec('movie', 7))).not.toBeNull();
+    expect(server.stored.size).toBe(4);
+    const reopened = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+    expect(reopened.title({ type: 'movie', id: 7 })).toBeDefined();
+  });
+
+  it('stays read-only while the replacement is only partly read', async () => {
+    const server = await edge([rec('movie', 550)], { wireMin: 3 });
+    let failChanges = false;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (failChanges && String(input).includes('/changes') && /since=3&/.test(String(input)))
+        throw new TypeError('offline');
+      return server.fetchImpl(input, init);
+    };
+    const log = (await LibraryLog.open(LIBRARY_KEY, fetchImpl, undefined, null))!;
+    expect(log.readOnly).toBe(true);
+
+    await replaceStore(server, [filmDocument(1), filmDocument(2), filmDocument(3)]);
+    failChanges = true;
+    await log.refresh();
+    expect(log.readOnlyReason).toBe(PRE_V4_BACKUP_ERROR);
+    expect(await log.write(rec('movie', 7))).toBeNull();
+
+    failChanges = false;
+    await log.refresh();
+    expect(log.readOnly).toBe(false);
+  });
+
+  it('stays read-only when the replacement is itself pre-v4', async () => {
+    const server = await edge([rec('movie', 550)], { wireMin: 3 });
+    const log = (await LibraryLog.open(LIBRARY_KEY, server.fetchImpl, undefined, null))!;
+
+    await replaceStore(server, [filmDocument(1), rec('movie', 551)]);
+    await log.refresh();
+
+    expect(log.readOnlyReason).toBe(PRE_V4_BACKUP_ERROR);
+    expect(await log.write(rec('movie', 7))).toBeNull();
+    expect(server.log.commits).toEqual([]);
+  });
 });
 
 describe('SIMKL delivery on Library v4', () => {
