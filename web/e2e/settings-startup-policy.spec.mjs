@@ -10,6 +10,65 @@ import { routeTmdb } from './network.mjs';
 test('a saved language and Automatic subtitles read correctly before deferred policy loads', async ({
   page,
 }) => {
+  // TEMP-1184 capture: a timeline of the kept finished-views entries against the writes and the reload.
+  const timeline = [];
+  const mark = (what) => timeline.push(`${Date.now() % 1_000_000} ${what}`);
+  page.on('console', (message) => {
+    if (message.text().startsWith('IDBWATCH')) mark(message.text());
+  });
+  page.on('response', (response) => {
+    const url = new URL(response.url());
+    if (url.pathname.endsWith('/batch') || url.pathname.endsWith('/changes'))
+      mark(`${response.request().method()} ${url.pathname.split('/').pop()}${url.search} ${response.status()}`);
+  });
+  await page.addInitScript(() => {
+    if (window !== window.top) return;
+    let last = '';
+    const digest = (value) => {
+      if (!value) return 'none';
+      const bytes = new Uint8Array(value.buffer ?? value);
+      let hash = 0;
+      for (const byte of bytes) hash = (hash * 31 + byte) | 0;
+      return `${bytes.length}:${hash}`;
+    };
+    const watch = (db) => {
+      db.onversionchange = () => db.close();
+      setInterval(() => {
+        try {
+          const store = db.transaction('kept').objectStore('kept');
+          const keys = store.getAllKeys();
+          keys.onsuccess = () => {
+            const wanted = keys.result.filter((key) =>
+              /(:finished-views\.v1|:local-authority\.v1|:runtime:pending:.*)$/.test(String(key)),
+            );
+            Promise.all(
+              wanted.map(
+                (key) =>
+                  new Promise((done) => {
+                    const got = store.get(key);
+                    got.onsuccess = () => done(`${String(key).split(':').slice(1).join(':')}=${digest(got.result)}`);
+                    got.onerror = () => done('error');
+                  }),
+              ),
+            ).then((parts) => {
+              const now = parts.join(' ');
+              if (now !== last) {
+                last = now;
+                console.log(`IDBWATCH ${now}`);
+              }
+            });
+          };
+        } catch {}
+      }, 20);
+    };
+    const find = async () => {
+      if (!(await indexedDB.databases()).some((db) => db.name === 'den-library'))
+        return setTimeout(find, 20);
+      const open = indexedDB.open('den-library');
+      open.onsuccess = () => watch(open.result);
+    };
+    void find();
+  });
   const edge = newEdge();
   await routeGuestEdge(page, edge);
   await routeTmdb(page, (route) =>
@@ -70,6 +129,18 @@ test('a saved language and Automatic subtitles read correctly before deferred po
   // Deferred policy never arrives from here on, in the page or its library Worker: its request is left unanswered.
   await page.route('**/den_core_deferred_bg.wasm', () => {});
   // What the page draws now comes from this browser's own copy; a pull may wait on deferred policy, so none is awaited.
+  mark('RELOAD');
+  const index = test.info().repeatEachIndex;
+  const printTimeline = async () => {
+    const value = await page
+      .locator('#subtitle-language select')
+      .inputValue({ timeout: 1_000 })
+      .catch(() => '?');
+    if (value === '__automatic' || value === '?') return;
+    mark(`value ${value}`);
+    console.log(`TIMELINE-1184 ${index}\n${timeline.join('\n')}`);
+  };
+  setTimeout(() => void printTimeline(), 8_000);
   await page.reload();
   const startupSubtitles = page.locator('#subtitle-language select');
   const startupLanguage = page.locator('#interface-language select');
