@@ -1,7 +1,6 @@
 <script lang="ts">
   import { currentAppPath } from './lib/runtimeUrl';
   import NavigationBar from './components/NavigationBar.svelte';
-  import RoutedLibrary from './RoutedLibrary.svelte';
   import ScreenLoading from './components/ScreenLoading.svelte';
   import { onMount, untrack } from 'svelte';
   import { installKeyboardNavigation } from './lib/keyboardNavigation';
@@ -23,6 +22,7 @@
     LibraryRetirementNoticeScreen,
     LinkScreen,
     PhoneDialogScreen,
+    RoutedLibraryScreen,
   } from './lib/screens.svelte';
   import type { ProfileModeCoordinator } from './lib/profileModeCoordinator.svelte';
   import type { ProfileHint } from './lib/profileHint';
@@ -107,6 +107,8 @@
     // Pairing, and the curve it runs on, load only for a browser that isn't paired yet and hasn't already chosen to
     // look around without it.
     if (!links.current && !links.browsing) void LinkScreen.load();
+    // The library's graph (Home, the catalogue, the library service) is the other side of that same decision.
+    else void RoutedLibraryScreen.load();
   });
 
   // The links hold this browser's keys, and Safari clears a site's storage after a week unused unless it is
@@ -191,37 +193,44 @@
 {#if LibraryRetirementNoticeScreen.current}<LibraryRetirementNoticeScreen.current />{/if}
 
 <main>
-  {#if links.current}
-    {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
-      <RoutedLibrary
-        link={links.current}
-        {query}
-        {explore}
-        {people}
-        {watchedYear}
-        {titleSeason}
-        onchange={(next) => (route = next)}
-        onprofilechange={resetProfilePresentation}
-        onprofilecontrol={(control) => (profiles = control)}
-        onprofilehint={(hint) => (profileHint = hint)}
-        onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
-      />
-    {/key}
-  {:else if links.browsing}
-    <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
-         absent case the components already model. -->
-    <RoutedLibrary
-      link={null}
-      {query}
-      {explore}
-      {people}
-      {watchedYear}
-      {titleSeason}
-      onchange={(next) => (route = next)}
-      onprofilechange={resetProfilePresentation}
-      onprofilecontrol={(control) => (profiles = control)}
-      onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
-    />
+  {#if links.current || links.browsing}
+    {#if RoutedLibraryScreen.current}
+      {@const RoutedLibrary = RoutedLibraryScreen.current}
+      {#if links.current}
+        {#key `${links.current.inboxKey}:${links.current.libraryKey}`}
+          <RoutedLibrary
+            link={links.current}
+            {query}
+            {explore}
+            {people}
+            {watchedYear}
+            {titleSeason}
+            onchange={(next) => (route = next)}
+            onprofilechange={resetProfilePresentation}
+            onprofilecontrol={(control) => (profiles = control)}
+            onprofilehint={(hint) => (profileHint = hint)}
+            onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
+          />
+        {/key}
+      {:else}
+        <!-- The guest: the same app, with no library behind it. Not a second tree — `link: null` is the
+             absent case the components already model. -->
+        <RoutedLibrary
+          link={null}
+          {query}
+          {explore}
+          {people}
+          {watchedYear}
+          {titleSeason}
+          onchange={(next) => (route = next)}
+          onprofilechange={resetProfilePresentation}
+          onprofilecontrol={(control) => (profiles = control)}
+          onhouseholdadmin={(allowed) => (householdAdmin = allowed)}
+        />
+      {/if}
+    {:else if RoutedLibraryScreen.failed}
+      <ScreenLoading screen={RoutedLibraryScreen} />
+    {/if}
   {:else if LinkScreen.current}
     <LinkScreen.current />
   {:else if LinkScreen.failed}

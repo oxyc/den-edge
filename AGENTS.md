@@ -99,6 +99,14 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- The paired library's graph out of an unpaired start (#1381) was measured locally on matched builds of main `f4123e9f`
+  (core delta 127,831, translations 51,722, startup 207,064, 120 files) and this head: core delta 136,796 (+8,965),
+  translations 51,722 (unchanged), startup 111,092 (-95,972), 138 files. `RoutedLibrary` is now a lazy screen loaded by
+  the same decision that loads `LinkScreen`, so Home, the catalogue and the library service load only for a paired or
+  browsing browser. The growth is code that was one startup chunk now compressing as 18 more chunks, not new code, so
+  a lazy split cannot reduce it. The complete ceiling advances from 127,872 to 136,832 (retaining 36); the translation
+  and startup ceilings are unchanged. It adds no request on a paired start beyond the chunk fetch itself.
+
 - Ending a read held before first paint (#1378) was measured by the hosted gate, and reproduced locally, on the PR head
   rebased onto main `5a8eef62` (core delta 127,740, translations 51,722, startup 206,998): core delta 127,771 (+31),
   translations 51,722 (unchanged), startup 207,001 (+3; chunk-hash churn, the change is Worker-only). The growth is one

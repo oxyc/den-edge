@@ -3,7 +3,7 @@
 // /capabilities/profiles once, however many sessions want them.
 import { test, expect, chromium } from '@playwright/test';
 import { E2E_ORIGIN } from './base-url.mjs';
-import { newEdge } from './guest-edge.mjs';
+import { newEdge, routeGuestEdge } from './guest-edge.mjs';
 import { bigHousehold, routeBigHousehold } from './big-library.mjs';
 
 // The Worker script itself is not counted: each library has a Worker of its own by design (one LibraryLog per
@@ -43,6 +43,27 @@ async function countedLoad(page, path) {
 
 const countsOf = (seen) =>
   Object.fromEntries(Object.entries(seen).map(([kind, list]) => [kind, list.length]));
+
+test('an unpaired start loads the pairing screen without the paired library’s graph', async ({
+  page,
+}) => {
+  await routeGuestEdge(page, newEdge());
+  // RoutedLibrary and Library, which pull in the library service and Home: by file name in the dev server's modules
+  // and by chunk name in the build.
+  const library = [];
+  page.on('request', (request) => {
+    const { pathname } = new URL(request.url());
+    if (/\/(?:RoutedLibrary|Library)[-.]/.test(pathname)) library.push(pathname);
+  });
+  await page.goto(E2E_ORIGIN);
+  await expect(page.getByLabel('Link code, twelve characters')).toBeVisible({ timeout: 30_000 });
+  await page.waitForTimeout(2_000);
+  expect(library).toEqual([]);
+
+  // Choosing to look around is the same decision turned the other way: now the library is wanted.
+  await page.getByRole('button', { name: 'Look around instead' }).click();
+  await expect.poll(() => library.length, { timeout: 30_000 }).toBeGreaterThan(0);
+});
 
 test('a profile household’s load downloads den-core once and asks each startup question once', async () => {
   const browser = await chromium.launch({

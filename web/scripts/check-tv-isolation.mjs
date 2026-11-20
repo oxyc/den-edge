@@ -477,5 +477,9 @@ if (process.argv.includes('--capture')) {
   // Ending a read held before first paint (#1378) measured 127,771 against main's 127,740 (+31, main at 5a8eef62): one
   // branch in the library Worker's foreground-ready handler, which every Worker graph carries. A lazy split cannot
   // reduce it. Startup is unchanged within chunk-hash churn. Allow the smallest 128-byte boundary, retaining 101.
-  if (coreTotalDelta > 127872) throw new Error('Browser total JS/CSS budget exceeded');
+  // Loading RoutedLibrary only once a browser is paired or browsing (#1381) measured 136,796 against main's 127,831
+  // (+8,965, main at f4123e9f) and takes startup 207,064 -> 111,092 (-95,972), so an unpaired start no longer fetches
+  // the library's graph. No code was added: the same modules now compress as 18 more chunks instead of one startup
+  // chunk. Allow the smallest 128-byte boundary containing it, retaining 36.
+  if (coreTotalDelta > 136832) throw new Error('Browser total JS/CSS budget exceeded');
 }
