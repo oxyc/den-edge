@@ -1109,6 +1109,7 @@ async fn relay_with(
     let playback_probe = playback_path && method == Method::OPTIONS;
     let receipt_end =
         playback_receipt_path(req.uri().path()) && matches!(method, Method::POST | Method::DELETE);
+    let play_ticket = play_ticket_path(req.uri().path()) && matches!(method, Method::GET | Method::HEAD);
     let receipt_library = if playback && grant.is_none() {
         let claim = member_claim(&req);
         if crate::library::is_household_member(state, claim.as_deref()).await {
@@ -1168,7 +1169,8 @@ async fn relay_with(
         && matches!(face, crate::handler::Face::Web | crate::handler::Face::Tv)
         && (scout || den || remux)
         && !den_install_manifest(&method, req.uri().path())
-        && !receipt_end;
+        && !receipt_end
+        && !play_ticket;
     if member_only {
         let ip = crate::handler::client_ip(state, &req);
         // A forged member header must meet an address budget before it can make the library store load anything.
@@ -1773,7 +1775,7 @@ async fn relay_with(
         || (public_playback && parts.status.is_success())
         || rewrites;
     if !collect {
-        return answer_response(
+        let mut resp = answer_response(
             &parts,
             passed_body(
                 body,
@@ -1790,6 +1792,10 @@ async fn relay_with(
             playback || guest_configure,
             None,
         );
+        if play_ticket {
+            forward_ticket_redirect(&parts, &mut resp);
+        }
+        return resp;
     }
     let (budget, multiplier, limit) = if session_operation {
         (None, 1, PUBLIC_SESSION_MAX_BYTES)
@@ -1987,14 +1993,46 @@ async fn relay_with(
         }
     }
     drop(slot);
-    answer_response(
+    let mut resp = answer_response(
         &parts,
         collected_body(bytes, charge),
         public_session || playback || guest_configure || playground || speed,
         member_only || grant.is_some(),
         playback || guest_configure,
         scope,
-    )
+    );
+    if play_ticket {
+        forward_ticket_redirect(&parts, &mut resp);
+    }
+    resp
+}
+
+/// Hearth's play ticket, `/den/p/<ticket>`: the signed, short-lived URL a native player is handed for one release,
+/// which Hearth answers with a redirect to the media. It mints no install and scrapes nothing — the release was
+/// resolved when the ticket was issued — so it needs no household membership, and a player must not have to send
+/// one: the redirect's target is the debrid's CDN, and a player replays non-credential headers to it.
+fn play_ticket_path(path: &str) -> bool {
+    path.strip_prefix("/den/p/").is_some_and(|ticket| {
+        !ticket.is_empty()
+            && ticket.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    })
+}
+
+/// A play ticket's redirect is its whole answer, so its `Location` crosses where no other upstream redirect may
+/// (`answer_response`) — and only to an https target, never a plain address on this side of the relay.
+fn forward_ticket_redirect(parts: &axum::http::response::Parts, resp: &mut Response) {
+    if !parts.status.is_redirection() {
+        return;
+    }
+    let Some(location) = parts.headers.get(header::LOCATION) else { return };
+    let https = location
+        .to_str()
+        .ok()
+        .and_then(|value| url::Url::parse(value).ok())
+        .is_some_and(|url| url.scheme() == "https" && url.host_str().is_some());
+    if https {
+        resp.headers_mut().insert(header::LOCATION, location.clone());
+    }
 }
 
 fn playback_receipt_path(path: &str) -> bool {
@@ -4320,6 +4358,48 @@ mod tests {
         assert!(!headers.contains_key(header::IF_NONE_MATCH));
         assert!(!headers.contains_key("x-den-owner"));
         assert!(!headers.contains_key("x-den-public-session"));
+    }
+
+    #[tokio::test]
+    async fn a_public_play_ticket_needs_no_membership_and_hands_its_https_redirect_to_the_player() {
+        use axum::http::{header, HeaderValue};
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback(move |req: Request| async move {
+            let target = match req.uri().path() {
+                "/den/p/plain-target" => "http://192.168.1.2/media",
+                _ => "https://cdn.example/dld/1?token=t",
+            };
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::FOUND;
+            response.headers_mut().insert(header::LOCATION, HeaderValue::from_static(target));
+            response
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/den=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let public = [("host", "d.oxy.fi")];
+
+        let ticket = h.send("GET", "/den/p/NPIXq-J_0", None, &public).await;
+        assert_eq!(ticket.status(), StatusCode::FOUND);
+        assert_eq!(ticket.headers()[header::LOCATION], "https://cdn.example/dld/1?token=t");
+        // Never a plain address, which would point a player outside at this side of the relay.
+        let plain = h.send("GET", "/den/p/plain-target", None, &public).await;
+        assert_eq!(plain.status(), StatusCode::FOUND);
+        assert!(!plain.headers().contains_key(header::LOCATION));
+        // Everything else under `/den` keeps the household gate, and no other route's redirect crosses.
+        let stream = h.send("GET", "/den/cfg/stream/movie/tt1.json", None, &public).await;
+        assert_eq!(stream.status(), StatusCode::NOT_FOUND);
+        let nested = h.send("GET", "/den/p/a/b", None, &public).await;
+        assert_eq!(nested.status(), StatusCode::NOT_FOUND);
+        assert!(super::play_ticket_path("/den/p/abc_-1"));
+        assert!(!super::play_ticket_path("/den/p/"));
+        assert!(!super::play_ticket_path("/den/cfg/p/abc"));
     }
 
     #[tokio::test]
