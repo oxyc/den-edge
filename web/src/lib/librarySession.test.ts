@@ -3,11 +3,13 @@ import { HouseholdSession } from './householdSession.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import { persistentProfileIdentity } from './profileIdentity';
 import { activeProfileSession, legacyProfileSession } from './profileSession.svelte';
+import { availability } from './availability.svelte';
 
 const KID_ID = '0123456789abcdef0123456789abcdef';
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -316,10 +318,18 @@ describe('ProfileSession presentation state', () => {
       household,
       profileModel,
     );
+    const activate = vi.spyOn(availability, 'activate');
 
+    session.configureServices();
     session.foregroundReady();
     session.close();
 
+    expect(activate).toHaveBeenCalledWith([
+      'profiles',
+      'household-key',
+      `profile:${KID_ID}:kid-library-key`,
+    ]);
+    expect(activate).toHaveBeenCalledOnce();
     expect(householdForeground).toHaveBeenCalledOnce();
     expect(profileForeground).toHaveBeenCalledOnce();
     expect(profileClose).toHaveBeenCalledOnce();

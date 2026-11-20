@@ -17,6 +17,7 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import type { Addon } from './scout';
 import { relayFetch } from './relayFetch';
 import { retryAfterMs } from './retryAfter';
+import { localAuthorityKey } from './localAuthorityKey';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
 interface Episode {
@@ -75,6 +76,17 @@ type EpisodeProbe = Episode & { id: number };
 type BatchTarget =
   { kind: 'movie'; id: number } | { kind: 'episode'; key: string; probe: EpisodeProbe };
 
+/** Exact active viewer and household. Credential-bearing keys are admitted here but only the digest is persisted. */
+export type AvailabilityAuthority = readonly [
+  householdKind: string,
+  householdKey: string | null,
+  profile: string,
+];
+
+type KeptVerdicts = Record<string, [Verdict, number]>;
+/** The opaque namespace of the authority that gave the verdicts, then the verdicts. */
+type StoredVerdicts = [namespace: string, verdicts: KeptVerdicts];
+
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
   private readonly verdicts = new SvelteMap<number, Verdict>();
@@ -125,34 +137,26 @@ export class Availability {
    */
   private pausedUntil = 0;
   private scout: Scout | null = null;
-  /** The scout the verdicts are from: only a different one starts them over, not a session that has none yet. */
+  /** The household and profile the verdicts belong to (`activate`), as JSON. */
+  private activeAuthority = JSON.stringify(['test', null, 'test']);
+  /** The household, profile, scout install and base the verdicts are from; only a different one starts them over. */
   private answeredBy: string | undefined;
+  /** `answeredBy` as the opaque digest the kept verdicts are stored under; unset until a scout is connected. */
+  private namespace: string | undefined;
 
-  /** The last day's verdicts from `storage` fade their posters at once, and scout is still asked. */
+  /** Kept verdicts are restored by `connect`, once the exact household, profile and scout are known. */
   constructor(
     private readonly storage: Storage | undefined = typeof localStorage === 'undefined'
       ? undefined
       : localStorage,
     private readonly now: () => number = Date.now,
-  ) {
-    try {
-      const kept = JSON.parse(storage?.getItem(STORAGE_KEY) ?? '{}') as Record<
-        string,
-        [Verdict, number]
-      >;
-      for (const [id, [verdict, at]] of Object.entries(kept)) {
-        if (verdict === 'unknown' || !(now() - at < KEPT_MS)) continue;
-        if (id.startsWith('tv:')) {
-          this.episodeVerdicts.set(id.slice(3), verdict);
-          this.episodeAnswers.set(id.slice(3), { at, settled: false });
-          continue;
-        }
-        this.verdicts.set(Number(id), verdict);
-        this.givenAt.set(Number(id), at);
-      }
-    } catch {
-      // Unreadable or refused storage: this visit starts without them.
-    }
+  ) {}
+
+  /** A different household or profile drops every verdict, request and timer of the previous one. */
+  activate(authority: AvailabilityAuthority): void {
+    const active = JSON.stringify(authority);
+    if (active !== this.activeAuthority) this.reset();
+    this.activeAuthority = active;
   }
 
   /**
@@ -172,35 +176,75 @@ export class Availability {
     content: ContentServiceClientPort,
     fetchImpl: typeof fetch = relayFetch,
   ): void {
-    this.scout = scout ? { base: scout.base, content, fetch: fetchImpl } : null;
+    this.scout = null;
     if (!scout) return;
-    const previous = this.answeredBy;
-    this.answeredBy = scout.base;
-    if (previous !== undefined && scout.base !== previous) {
-      this.generation++;
-      clearTimeout(this.timer);
-      this.timer = undefined;
-      this.request?.abort();
-      this.request = undefined;
-      for (const timer of this.retryTimers) clearTimeout(timer);
-      this.retryTimers.clear();
-      for (const id of this.pending) this.wanted.add(id);
-      this.pending.clear();
-      this.asking = undefined;
-      this.pausedUntil = 0;
-      this.verdicts.clear();
-      this.settled.clear();
-      this.tries.clear();
-      for (const key of this.episodePending) {
-        const [id, season, episode] = key.split(':').map(Number);
-        this.episodeWanted.set(key, { id: id!, season: season!, episode: episode! });
-      }
-      this.episodePending.clear();
-      this.episodeVerdicts.clear();
-      this.episodeAnswers.clear();
-      this.episodeTries.clear();
+    const exact = JSON.stringify([this.activeAuthority, scout.install, scout.base]);
+    if (exact !== this.answeredBy) {
+      this.reset();
+      this.answeredBy = exact;
+      this.namespace = localAuthorityKey(exact);
+      this.restore();
     }
+    this.scout = { base: scout.base, content, fetch: fetchImpl };
     this.gather();
+  }
+
+  /** Forget everything the previous authority gave, and abort what is asked of it. */
+  private reset(): void {
+    this.generation++;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.request?.abort();
+    this.request = undefined;
+    for (const timer of this.retryTimers) clearTimeout(timer);
+    this.retryTimers.clear();
+    for (const id of this.pending) this.wanted.add(id);
+    this.pending.clear();
+    this.asking = undefined;
+    this.pausedUntil = 0;
+    this.scout = null;
+    this.answeredBy = undefined;
+    this.namespace = undefined;
+    this.verdicts.clear();
+    this.settled.clear();
+    this.givenAt.clear();
+    this.tries.clear();
+    for (const key of this.episodePending) {
+      const [id, season, episode] = key.split(':').map(Number);
+      this.episodeWanted.set(key, { id: id!, season: season!, episode: episode! });
+    }
+    this.episodePending.clear();
+    this.episodeVerdicts.clear();
+    this.episodeAnswers.clear();
+    this.episodeTries.clear();
+  }
+
+  /**
+   * The last day's verdicts of this exact authority fade their posters at once, and scout is still asked. Rows of
+   * another authority, and the unscoped rows written before verdicts were scoped, are removed unread.
+   */
+  private restore(): void {
+    try {
+      const stored = JSON.parse(
+        this.storage?.getItem(STORAGE_KEY) ?? 'null',
+      ) as StoredVerdicts | null;
+      if (!stored || stored[0] !== this.namespace) {
+        if (stored !== null) this.storage?.removeItem(STORAGE_KEY);
+        return;
+      }
+      for (const [id, [verdict, at]] of Object.entries(stored[1])) {
+        if (verdict === 'unknown' || !(this.now() - at < KEPT_MS)) continue;
+        if (id.startsWith('tv:')) {
+          this.episodeVerdicts.set(id.slice(3), verdict);
+          this.episodeAnswers.set(id.slice(3), { at, settled: false });
+          continue;
+        }
+        this.verdicts.set(Number(id), verdict);
+        this.givenAt.set(Number(id), at);
+      }
+    } catch {
+      // Unreadable or refused storage: this authority starts without retained verdicts.
+    }
   }
 
   /**
@@ -486,7 +530,8 @@ export class Availability {
 
   /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */
   private keep(): void {
-    const kept: Record<string, [Verdict, number]> = {};
+    if (!this.namespace) return;
+    const kept: KeptVerdicts = {};
     for (const [id, verdict] of this.verdicts) {
       const at = this.givenAt.get(id);
       if (verdict !== 'unknown' && at !== undefined) kept[id] = [verdict, at];
@@ -496,7 +541,10 @@ export class Availability {
       if (verdict !== 'unknown' && at !== undefined) kept[`tv:${key}`] = [verdict, at];
     }
     try {
-      this.storage?.setItem(STORAGE_KEY, JSON.stringify(kept));
+      this.storage?.setItem(
+        STORAGE_KEY,
+        JSON.stringify([this.namespace, kept] satisfies StoredVerdicts),
+      );
     } catch {
       // Refused storage: the verdicts are this visit's.
     }

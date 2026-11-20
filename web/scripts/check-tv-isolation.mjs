@@ -185,7 +185,13 @@ if (process.argv.includes('--capture')) {
   // its rows are a plain link or button because `<svelte:element>` pulled 1,640 bytes of runtime into the shared
   // startup chunk. Allow the next 128-byte boundary and the smallest five-decimal factor that reaches it, retaining
   // 127 bytes.
-  if (initialDelta > Math.min(10752, Math.floor(baseline.initialGzip * 0.05475)))
+  // Scoping retained availability to the exact household, profile and Scout (#1156) adds 275 gzip bytes at startup on
+  // matched main/head builds (10,744 -> 11,019): the authority admission `ProfileSession` makes before it configures
+  // the household, and the reset and restore that fence a verdict, request or timer to one authority. They sit with
+  // `Availability` in the eagerly mounted profile/session graph, since the fence must hold before any poster asks.
+  // Allow the smallest 128-byte boundary containing it and the smallest five-decimal factor that reaches it,
+  // retaining 117 bytes.
+  if (initialDelta > Math.min(11136, Math.floor(baseline.initialGzip * 0.05671)))
     throw new Error('Browser initial JS/CSS budget exceeded');
   // Complete UI translations are opt-in chunks: neither is fetched on the higher-priority English path. Budget
   // their compressed size separately so adding copy can never disguise growth in application code, while the
@@ -480,5 +486,9 @@ if (process.argv.includes('--capture')) {
   // Keeping the old link when a legacy key-reset marker is unreadable (#1252) measured 127,951: one storage probe and one
   // branch in `forgetMoved`, in the links module every Browser graph carries. A lazy split cannot reduce it. Startup is
   // unchanged. Allow the next 128-byte boundary, retaining 49.
-  if (coreTotalDelta > 128000) throw new Error('Browser total JS/CSS budget exceeded');
+  // Scoping retained availability to the exact household, profile and Scout (#1156) measured 128,142 against matched
+  // main's 128,000 (+142, main at e3940b7e): the same authority admission, reset and restore as the startup note
+  // above, plus the shared local authority digest that release memory now takes from the same module. Startup carries
+  // it, so a lazy split cannot reduce the complete graph. Allow the next 128-byte boundary, retaining 114.
+  if (coreTotalDelta > 128256) throw new Error('Browser total JS/CSS budget exceeded');
 }

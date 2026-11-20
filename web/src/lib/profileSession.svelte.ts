@@ -4,11 +4,13 @@ import type { ContentServiceClientPort } from './contentServiceClient';
 import { HouseholdSession } from './householdSession.svelte';
 import { titleKey, type Shape, type Title } from './library';
 import { cancelLibraryTitleNaming } from './libraryNaming';
+import { availability } from './availability.svelte';
 import type { LibraryModel } from './libraryModel.svelte';
 import { libraryUpdateRequired } from './libraryUpdateRequired';
 import { profilePolicy, type ProfileContentPolicy, type ProfilePolicy } from './profilePolicy';
 import {
   legacyProfileIdentity,
+  profileSessionKey,
   type PersistentProfileIdentity,
   type ProfileIdentity,
 } from './profileIdentity';
@@ -245,6 +247,11 @@ export class ProfileSession {
   }
 
   configureServices(): void {
+    availability.activate([
+      this.household.identity.kind,
+      this.household.identity.libraryKey,
+      profileSessionKey(this.identity, this.policyKey),
+    ]);
     this.household.configureServices();
   }
 

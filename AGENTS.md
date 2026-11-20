@@ -99,6 +99,15 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- Scoping retained availability to the exact household, profile and Scout (#1156) was measured locally on the PR head
+  merged with main `e3940b7e` against that main built the same way: core delta 128,142 (main 128,000, +142),
+  translations 51,722 (unchanged), startup delta 11,019 (main 10,744, +275). The growth is the authority admission
+  `ProfileSession` makes before it configures the household, and `Availability`'s reset, restore and opaque
+  namespace, with the local authority digest that release memory now shares. The fence must hold before any poster
+  asks, so a lazy split cannot reduce the startup graph. The complete ceiling advances from 128,000 to 128,256
+  (retaining 114) and the startup ceiling from 10,752 to 11,136 (retaining 117, factor 0.05475 to 0.05671); the
+  translation ceiling is unchanged. It adds no request, timer, listener or dependency.
+
 - Keeping the old link when a legacy key-reset marker is unreadable (#1252) was measured on the PR head rebased onto
   main `f4123e9f`: core delta 127,951 locally (the hosted gate measured 127,889 with a longer log line; the figure moves
   with chunk-hash churn), translations 51,722 (unchanged), startup 207,129 (unchanged). The growth is one storage probe
