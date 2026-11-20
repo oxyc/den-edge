@@ -582,7 +582,7 @@ export class Links {
     if (readPendingReset()?.from === link.libraryKey) return;
     if (pendingResetUnreadable()) {
       // The old library's `410` may be this browser's own reset, whose marker holds the only copy of the new key.
-      console.error('den: a key reset marker cannot be read; the old link is kept, not forgotten');
+      console.error('den: reset marker unreadable, link kept');
       return;
     }
     await this.remove(link.inboxKey);
