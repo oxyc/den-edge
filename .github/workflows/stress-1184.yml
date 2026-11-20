@@ -17,10 +17,10 @@ jobs:
         include:
           - { workers: 1, load: 0, copy: a }
           - { workers: 4, load: 0, copy: a }
-          - { workers: 4, load: 0, copy: b }
-          - { workers: 2, load: 2, copy: a }
           - { workers: 4, load: 4, copy: a }
           - { workers: 4, load: 4, copy: b }
+          - { workers: 4, load: 4, copy: c }
+          - { workers: 4, load: 4, copy: d }
     name: stress w${{ matrix.workers }} load${{ matrix.load }} ${{ matrix.copy }}
     container:
       image: mcr.microsoft.com/playwright:v1.65.0-noble
@@ -45,7 +45,7 @@ jobs:
           LOAD: ${{ matrix.load }}
         run: |
           for i in $(seq 1 "$LOAD"); do (while :; do :; done) > /dev/null 2>&1 & done
-          npx playwright test e2e/settings-startup-policy.spec.mjs --repeat-each=30 --workers=${{ matrix.workers }} | tee stress.log
+          npx playwright test e2e/settings-startup-policy.spec.mjs --repeat-each=50 --workers=${{ matrix.workers }} | tee stress.log
       - name: Timelines
         if: always()
         run: grep -A 60 TIMELINE-1184 stress.log || true
