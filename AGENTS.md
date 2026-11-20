@@ -99,6 +99,12 @@ everything the committed code imports is committed too.
 
 ## Bundle budget records
 
+- An audio choice on a TorBox stream that names no audio tracks (#1419) was measured on matched local production builds
+  at main `1184de9d` and the PR head: the complete non-translation delta moves BASE → MEASURED (+DELTA), translations
+  TRANSLATIONS (one phrase), and startup STARTUP. It is all in the lazy Player chunk: the Audio section's "Switch to Den
+  Remux" row, which reuses the existing switch and its label, and the dock's Audio & subtitles button shown for it.
+  CEILING_NOTE It adds no request, timer or dependency.
+
 - Scoping retained availability to the exact household, profile and Scout (#1156) was measured locally on the PR head
   merged with main `e3940b7e` against that main built the same way: core delta 128,142 (main 128,000, +142),
   translations 51,722 (unchanged), startup delta 11,019 (main 10,744, +275). The growth is the authority admission

@@ -9,7 +9,12 @@ import { readFile } from 'node:fs/promises';
 import { E2E_ORIGIN as ORIGIN } from './base-url.mjs';
 import { CODE, GID, newEdge, routeGuestEdge } from './guest-edge.mjs';
 import { routeTmdb } from './network.mjs';
-import { openOptionsPage, revealControls } from './player-options.mjs';
+import {
+  openOptionsPage,
+  revealControls,
+  subtitlesButton,
+  tapPhoneControl,
+} from './player-options.mjs';
 
 const hls = new URL('./media/hls/', import.meta.url);
 const TITLE = 1002;
@@ -392,6 +397,41 @@ test.describe('the delivery stamp on an iPhone, through the real app', () => {
       await expect(page.locator('.player nav.web-transport')).toHaveCount(1);
       expect(playback[2]).toMatchObject({ directOnly: true, filename: 'fixture.mkv' });
       expect(playback[2]).not.toHaveProperty('directFailed');
+    } catch (error) {
+      await savePageTraces();
+      throw error;
+    } finally {
+      contexts.length = 0;
+      await browser.close();
+    }
+  });
+
+  // Reported on an iPhone: an English and Italian release on TorBox started in Italian with no audio choice at all.
+  // Hearth names no tracks for a release Scout never probed, and TorBox plays its first. Den Remux reads the file and
+  // lists them, so the Audio section offers the switch to it.
+  test('a TorBox stream that names no audio tracks offers Den Remux as its audio choice', async () => {
+    const browser = await webkit.launch();
+    try {
+      const page = await (await iphone(browser, 'en-US')).newPage();
+      const playback = await guestPlayer(page, {
+        originalLanguage: 'en',
+        hearth: (body) => ({ json: body.directFailed ? remuxAnswer : torboxAnswer }),
+      });
+      const stamp = page.getByTestId('playback-source');
+      await expect(stamp).toHaveText('TorBox');
+      const button = subtitlesButton(page);
+      await tapPhoneControl(page, button);
+      const audio = page.getByRole('group', { name: 'Audio' });
+      const toRemux = audio.getByRole('menuitem', { name: /^Switch to Den Remux/ });
+      await expect(toRemux).toContainText('TorBox plays its first audio track');
+      await toRemux.tap();
+      await expect(stamp).toHaveText('Den Remux', { timeout: 30_000 });
+      expect(playback[1]).toMatchObject({ directFailed: true, filename: 'fixture.mkv' });
+
+      // Den Remux names its tracks: they are the choice now, and the switch is gone.
+      await tapPhoneControl(page, button);
+      await expect(audio.getByRole('menuitemradio')).toHaveCount(1);
+      await expect(audio.getByRole('menuitem', { name: /^Switch to Den Remux/ })).toHaveCount(0);
     } catch (error) {
       await savePageTraces();
       throw error;
