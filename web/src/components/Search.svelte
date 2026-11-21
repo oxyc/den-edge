@@ -44,11 +44,13 @@
   import type { Hit } from '../lib/search';
   import { rememberSearch } from '../lib/recentSearches';
   import type { ContentServiceClientPort } from '../lib/contentServiceClient';
+  import type { InterfaceLanguage } from '../lib/interfaceLanguage';
 
   let {
     query,
     explore = {},
     content,
+    interfaceLanguage,
     atlas,
     prefs,
     shown = () => true,
@@ -60,6 +62,8 @@
     /** What Explore is browsing, from the address. */
     explore?: Explore;
     content: ContentServiceClientPort;
+    /** Exact request authority. Changing it cancels and repeats an active query in the new language. */
+    interfaceLanguage: InterfaceLanguage;
     atlas: string | null;
     prefs: Prefs;
     /** What the browse rows hide — the grid is one of them. Typed results keep their own, looser rule. */
@@ -266,6 +270,7 @@
 
   $effect(() => {
     const text = query.trim();
+    void interfaceLanguage;
     void rulesKey;
     const rules = untrack(() => prefs);
     let current = true;
