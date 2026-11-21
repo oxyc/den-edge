@@ -170,6 +170,52 @@ test('a direct startup failure refreshes TorBox only, then offers both paths exp
   }
 });
 
+test('a direct startup failure names its refresh and offers both paths in the interface language', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const page = await browser.newPage();
+    await base(page);
+    let asked = 0;
+    let releaseRefresh;
+    const refreshGate = new Promise((resolve) => (releaseRefresh = resolve));
+    await page.route(`${ORIGIN}/den/config/playback`, async (route) => {
+      asked += 1;
+      if (asked === 1)
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(direct('startup-fails')),
+        });
+      await refreshGate;
+      return route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: 'source_unavailable' }),
+      });
+    });
+    await page.route(`${ORIGIN}/torbox/startup-fails/**`, (route) =>
+      route.fulfill({ status: 404 }),
+    );
+
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&interfaceLanguage=sv`);
+    await expect.poll(() => asked).toBe(2);
+    await expect(page.getByRole('status')).toHaveText('TorBox startade inte – uppdaterar…');
+    releaseRefresh();
+    await expect(page.getByRole('alert')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('TorBox startade inte – uppdaterar…')).toHaveCount(0);
+    await openOptionsPage(page, 'Källa');
+    await expect(
+      page.getByRole('menuitem', { name: 'Prova TorBox utan Den undertexter' }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: 'Prova Den Remux' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a replacement still opening is retried instead of leaving the player waiting forever', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

@@ -140,6 +140,32 @@ test('delivery changes explain the wait immediately and until the replacement pa
   }
 });
 
+test('a delivery change names its wait in the interface language', async () => {
+  test.skip(!existsSync(chromium.executablePath()), 'Chromium is not installed here');
+  const browser = await chromium.launch({ args: ['--autoplay-policy=no-user-gesture-required'] });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const releases = [];
+    const playback = await mockHearth(page, {
+      beforePlayback: (_body, attempt) =>
+        attempt === 1 ? undefined : new Promise((resolve) => releases.push(resolve)),
+    });
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed&interfaceLanguage=sv`);
+    const video = page.locator('.player video');
+    await expect
+      .poll(() => video.evaluate((element) => element.currentTime), { timeout: 30_000 })
+      .toBeGreaterThan(2);
+    await openOptionsPage(page, 'Källa');
+    await page.getByRole('menuitem', { name: 'Byt till Den Remux' }).click();
+    await expect.poll(() => playback.length).toBe(2);
+    await expect(page.getByRole('status')).toHaveText('Byter till Den Remux…');
+    releases.shift()();
+    await expect(page.getByText('Byter till Den Remux…')).toHaveCount(0, { timeout: 30_000 });
+  } finally {
+    await browser.close();
+  }
+});
+
 const layouts = [
   ['phone', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }],
   ['desktop', { viewport: { width: 1280, height: 800 } }],

@@ -46,6 +46,7 @@ export const parameters = {
     '{count} källor svarade fortfarande när den här tidiga listan kom, så den kan vara ofullständig.',
   'error.couldntReachDevice': 'Det gick inte att nå {device}. Kontrollera att enheten är ansluten.',
   'player.switchTo': 'Byt till {source}',
+  'player.switchingTo': 'Byter till {source}…',
   'player.resumeFrom': 'Fortsätt från {time}',
   'player.stream': 'Ström: {stream}',
   'player.audioTrack': 'Ljudspår: {track}',

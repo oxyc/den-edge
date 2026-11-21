@@ -1444,4 +1444,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Searching for a release': 'Söker efter en utgåva',
   'Searching now': 'Söker nu',
   'another device': 'en annan enhet',
+  'TorBox did not start—refreshing…': 'TorBox startade inte – uppdaterar…',
+  'TorBox stopped—refreshing…': 'TorBox stannade – uppdaterar…',
+  'Trying TorBox without Den subtitles…': 'Provar TorBox utan Den undertexter…',
+  'Trying Den Remux…': 'Provar Den Remux…',
 };
