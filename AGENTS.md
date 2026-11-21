@@ -169,6 +169,12 @@ everything the committed code imports is committed too.
   51,712 to 51,840 (retaining 118); the startup ceiling is unchanged. It adds no request, timer, listener or
   dependency.
 
+- Localized "Remake" card caption (#1206, 2026-11-21): Spanish "Nueva versión" and Swedish "Nyinspelning" join the
+  existing lazy phrase catalogs, so Other versions captions follow the live profile language on Browser, LG and
+  Samsung. The translation total measures 51,860 against main's 51,833 (+27, 7 under its ceiling), which advances
+  from 51,840 to 51,968 (retaining 108). The startup and complete-graph ceilings are unchanged; no request, timer,
+  listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip

@@ -853,6 +853,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Religious: 'Religioso',
   Reload: 'recargar',
   'Reload Den': 'Recargar Den',
+  Remake: 'Nueva versión',
   Remove: 'Quitar',
   'Remove add-on': 'Quitar complemento',
   'Remove add-on…': 'Quitar complemento…',
