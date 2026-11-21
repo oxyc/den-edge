@@ -210,7 +210,9 @@ if (process.argv.includes('--capture')) {
   // Settings retries (#1045) add one phrase, "Saved, but not shown.", for a profile language that was saved but
   // could not be presented: 51,722 in CI against main's 51,689 (+33, main at 20463fa0). The SIMKL notes reuse
   // existing phrases. Allow the next 128-byte boundary, retaining 118.
-  if (current.translationGzip > 51840) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-21 (#1206): the Spanish and Swedish "Remake" card caption adds two phrases, 51,860 against main's
+  // 51,833 (+27), which sat 7 bytes under the ceiling. Allow the next 128-byte boundary, retaining 108.
+  if (current.translationGzip > 51968) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.

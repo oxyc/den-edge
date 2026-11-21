@@ -836,6 +836,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   Religious: 'Religiösa',
   Reload: 'Ladda om',
   'Reload Den': 'Ladda om Den',
+  Remake: 'Nyinspelning',
   Remove: 'Ta bort',
   'Remove add-on': 'Ta bort tillägget',
   'Remove add-on…': 'Ta bort tillägg...',

@@ -540,5 +540,13 @@ test('other versions sit between the franchise and More like this, never repeati
   const top = async (region) => (await region.boundingBox()).y;
   expect(await top(franchise)).toBeLessThan(await top(versions));
   expect(await top(versions)).toBeLessThan(await top(similar));
+
+  // A live language change re-captions the mounted card; the year stays and nothing is fetched again.
+  const remake = page.getByRole('link', { name: /^Seed Again / });
+  await page.evaluate(() => globalThis.fixtureSetLanguage('sv'));
+  await expect(remake).toContainText('2019 · Nyinspelning');
+  await page.evaluate(() => globalThis.fixtureSetLanguage('es'));
+  await expect(remake).toContainText('2019 · Nueva versión');
+  await expect(page.getByRole('link', { name: /^The Seed Stage Film / })).toContainText('1962');
   await page.close();
 });
