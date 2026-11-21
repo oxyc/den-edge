@@ -15,8 +15,11 @@
     warnings = undefined,
     region = 'US',
     status = undefined,
+    maturity = [],
     content,
   }: {
+    /** The official ratings and where each came from, one line each (`maturityLines`). */
+    maturity?: string[];
     detail: TitleDetail;
     /** A series' run, from TVmaze's status (`seriesStatusBadge`). */
     status?: 'Ended' | 'Returning';
@@ -183,6 +186,13 @@
     </span>
   {/if}
 </div>
+{#if maturity.length}<p
+    class="maturity"
+    data-maturity
+    aria-label={`${i18n.phrase('Official content ratings')}: ${maturity.join(', ')}`}
+  >
+    {maturity.join('  ·  ')}
+  </p>{/if}
 {#if d.genres.length}<p class="genres">
     {#each d.genres as genre, i (genre.id)}{#if i}<span class="separator" aria-hidden="true">·</span
         >{/if}{#if __DEN_TV__}<span>{genre.name}</span>{:else}<a
@@ -271,9 +281,14 @@
     color: var(--muted);
   }
 
-  .genres {
+  .genres,
+  .maturity {
     color: var(--muted);
     margin: 12px 0 0;
+  }
+
+  .maturity {
+    font-size: 13px;
   }
 
   .genres .separator {
