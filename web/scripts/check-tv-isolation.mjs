@@ -212,7 +212,10 @@ if (process.argv.includes('--capture')) {
   // existing phrases. Allow the next 128-byte boundary, retaining 118.
   // 2026-11-21 (#1206): the Spanish and Swedish "Remake" card caption adds two phrases, 51,860 against main's
   // 51,833 (+27), which sat 7 bytes under the ceiling. Allow the next 128-byte boundary, retaining 108.
-  if (current.translationGzip > 51968) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-21 (#1254): the held SIMKL removals' row value, title fallbacks and approval notes in Swedish and Spanish
+  // measure 52,074 against main's 51,860 (+214), which sat 108 bytes under the ceiling. Allow the next 128-byte
+  // boundary, retaining 22.
+  if (current.translationGzip > 52096) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
