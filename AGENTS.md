@@ -175,6 +175,12 @@ everything the committed code imports is committed too.
   from 51,840 to 51,968 (retaining 108). The startup and complete-graph ceilings are unchanged; no request, timer,
   listener or dependency is added.
 
+- Localized held SIMKL removals (#1254, 2026-11-21): the row value, the Movie/Series id fallbacks and the approval
+  notes (refused changed batch, approved readback) join the existing lazy catalogs in Spanish and Swedish, with
+  the plural row value and fallbacks as parameter messages. The translation total measures 52,074 against main's
+  51,860 (+214, 108 under its ceiling), which advances from 51,968 to 52,096 (retaining 22). The startup and
+  complete-graph ceilings are unchanged; no request, timer, listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip

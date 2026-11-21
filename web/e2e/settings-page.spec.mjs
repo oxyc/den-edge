@@ -462,6 +462,14 @@ test('profile Owner tracker state and mutations use activity authority, never th
   const replacementSection = page.getByRole('region', { name: 'SIMKL' });
   await expect(replacementSection).toContainText('Movie 550');
   await expect(replacementSection).toContainText('Remove 1 title from SIMKL');
+  // The held-removal row value, the title fallback and the confirmation follow the interface language.
+  await page.evaluate(() => globalThis.fixtureInterfaceLanguage('es'));
+  await expect(page.getByRole('button', { name: /1 eliminación en espera/ })).toBeVisible();
+  const localizedSection = page.locator('#simkl-panel');
+  await expect(localizedSection).toContainText('Película 550');
+  await expect(localizedSection).toContainText('Quitar 1 título de SIMKL');
+  await page.evaluate(() => globalThis.fixtureInterfaceLanguage('en'));
+  await expect(replacementSimkl).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => globalThis.fixtureTrackerAuthority.subscriptions()))
     .toEqual({ owner: 0, replacement: 1 });

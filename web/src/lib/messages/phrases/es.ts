@@ -1448,4 +1448,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'This device’s library isn’t on Den. Your changes are kept here—join your household’s library in Settings › Linked devices.':
     'La biblioteca de este dispositivo no está en Den. Tus cambios se guardan aquí; únete a la biblioteca de tu hogar en Configuración › Dispositivos vinculados.',
   'Open Linked devices': 'Abrir Dispositivos vinculados',
+  'Not connected': 'No conectado',
+  'The list changed while you were looking at it. Check it again before approving.':
+    'La lista cambió mientras la mirabas. Revísala de nuevo antes de aprobar.',
+  'Removed from your SIMKL watchlist.': 'Quitado de tu lista de SIMKL.',
 };

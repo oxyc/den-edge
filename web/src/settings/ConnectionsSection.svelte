@@ -410,6 +410,7 @@
   let simklNote = $state<string | null>(null);
   /** Said when an approval found the held list changed under it. */
   let removalsNote = $state<string | null>(null);
+  let removalsApproved = $state(false);
   let simklAttempt = 0;
   $effect(() => {
     const connected = simklConnected;
@@ -1017,9 +1018,11 @@
         ? 'Not connected'
         : heldRemovals.length === 0
           ? 'Connected'
-          : heldRemovals.length === 1
-            ? '1 removal held'
-            : `${heldRemovals.length} removals held`}
+          : i18n.format(
+              heldRemovals.length === 1 ? 'simkl.held.one' : 'simkl.held.other',
+              heldRemovals.length === 1 ? '1 removal held' : '{count} removals held',
+              { count: heldRemovals.length },
+            )}
     >
       {#if simkl && heldRemovals.length && approveRemovals}
         <div class="form">
@@ -1027,7 +1030,10 @@
             Den held back these watchlist removals because there were so many at once:
             {#each heldRemovals as title, i (`${title.type}:${title.id}`)}<a
                 href={routePath({ page: 'title', type: title.type, id: title.id })}
-                >{title.name ?? `${title.type === 'movie' ? 'Movie' : 'Series'} ${title.id}`}</a
+                >{title.name ??
+                  (title.type === 'movie'
+                    ? i18n.format('simkl.movieFallback', 'Movie {id}', { id: title.id })
+                    : i18n.format('simkl.seriesFallback', 'Series {id}', { id: title.id }))}</a
               >{i < heldRemovals.length - 1 ? ', ' : '.'}{/each}
             Approve to remove them from your SIMKL watchlist too. Approving here counts for every device.
           </p>
@@ -1049,15 +1055,19 @@
             detail="This can't be undone."
             {disabled}
             onconfirm={() =>
-              void approveRemovals().then(
-                (approved) =>
-                  (removalsNote = approved
-                    ? null
-                    : 'The list changed while you were looking at it. Check it again before approving.'),
-              )}
+              void approveRemovals().then((approved) => {
+                removalsApproved = approved;
+                removalsNote = approved
+                  ? 'Removed from your SIMKL watchlist.'
+                  : 'The list changed while you were looking at it. Check it again before approving.';
+              })}
           />
-          {#if removalsNote}<p class="status bad" role="status">{removalsNote}</p>{/if}
         </div>
+      {/if}
+      {#if removalsNote}
+        <p class="status" class:bad={!removalsApproved} role="status">
+          {i18n.phrase(removalsNote)}
+        </p>
       {/if}
       {#if simkl}
         <div class="form">
