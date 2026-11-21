@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ContentServiceError } from './contentServiceClient';
 import type { Title } from './library';
 import { Pager } from './pager.svelte';
 
 const film = (id: number): Title => ({ type: 'movie', id, title: `Film ${id}` });
 const pageOf = (start: number, size = 20) =>
   Array.from({ length: size }, (_, i) => film(start + i));
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe('Pager', () => {
   it.each([
@@ -104,7 +110,46 @@ describe('Pager', () => {
     await pager.more();
     expect(calls).toBe(1);
     expect(pager.done).toBe(true);
-    expect(pager.failed).toBe(true);
+    expect(pager.failed).toBe('Load failed');
+    expect(pager.page + 1).toBe(1);
+  });
+
+  it.each([
+    ['rate-limited', true, 'TMDB rate limit'],
+    ['unavailable', true, 'Services unavailable'],
+    ['internal', true, 'Services unavailable'],
+    ['not-ready', false, 'Services unavailable'],
+    ['refused', false, 'Load failed'],
+  ] as const)('keeps only a safe %s service reason', async (code, retryable, reason) => {
+    const pager = new Pager(
+      async () => {
+        throw new ContentServiceError({
+          code,
+          message: 'secret provider URL and response body',
+          retryable,
+        });
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failed).toBe(reason);
+    expect(JSON.stringify(pager.failed)).not.toContain('secret');
+  });
+
+  it('reports an offline device without inspecting an arbitrary exception', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const pager = new Pager(
+      async () => {
+        throw new Error('credential-bearing provider detail');
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failed).toBe('Offline');
+    expect(pager.page + 1).toBe(1);
+    expect(warning).not.toHaveBeenCalled();
+    expect(JSON.stringify(warning.mock.calls)).not.toContain('credential');
   });
 
   it('says a page failed, and carries on from it when asked to try again', async () => {
@@ -120,7 +165,8 @@ describe('Pager', () => {
     );
     await pager.more();
     await pager.more();
-    expect(pager.failed).toBe(true);
+    expect(pager.failed).toBe('Load failed');
+    expect(pager.page + 1).toBe(2);
     expect(pager.done).toBe(true);
     expect(pager.titles).toHaveLength(20);
     down = false;
@@ -129,6 +175,23 @@ describe('Pager', () => {
     expect(pager.failed).toBe(false);
     expect(pager.done).toBe(false);
     expect(pager.titles).toHaveLength(40);
+    expect(pager.page).toBe(2);
+  });
+
+  it('replaces a repeated failure reason for the same page in the current Pager generation', async () => {
+    const reasons: Array<'rate-limited' | 'unavailable'> = ['rate-limited', 'unavailable'];
+    const pager = new Pager(
+      async () => {
+        const code = reasons.shift()!;
+        throw new ContentServiceError({ code, message: 'private detail', retryable: true });
+      },
+      () => true,
+    );
+    await pager.more();
+    expect(pager.failed).toBe('TMDB rate limit');
+    await pager.retry();
+    expect(pager.failed).toBe('Services unavailable');
+    expect(pager.page).toBe(0);
   });
 
   it('never loads the same title twice across pages', async () => {

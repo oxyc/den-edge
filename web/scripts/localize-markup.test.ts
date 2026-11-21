@@ -57,6 +57,9 @@ describe('UI translation coverage', () => {
       Bingeable: 'Atracones',
       Whodunits: 'Novelas policíacas',
       Services: 'Servicios',
+      'Load failed': 'No se pudo cargar',
+      Offline: 'Sin conexión',
+      'TMDB rate limit': 'Límite de solicitudes de TMDB',
       'Services unavailable': 'Servicios no disponibles',
       'Assistant library permissions couldn’t be read. Try again.':
         'No se pudieron leer los permisos de biblioteca de asistentes. Inténtalo de nuevo.',
@@ -70,6 +73,9 @@ describe('UI translation coverage', () => {
       Downloads: 'Hämtningar',
       Play: 'Spela',
       Services: 'Tjänster',
+      'Load failed': 'Det gick inte att ladda',
+      Offline: 'Offline',
+      'TMDB rate limit': 'TMDB:s anropsgräns',
       'Services unavailable': 'Tjänsterna är inte tillgängliga',
       'Assistant library permissions couldn’t be read. Try again.':
         'Assistenternas biblioteksbehörigheter kunde inte läsas. Försök igen.',

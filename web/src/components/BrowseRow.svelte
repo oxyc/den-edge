@@ -352,9 +352,10 @@
     {/each}
     {#if pager.failed}
       <!-- A page that didn't load says so where the row stopped, rather than the row simply ending. -->
-      <button class="retry" onclick={() => void pager.retry()}
-        >Couldn’t load these. Try again</button
-      >
+      <button class="retry" onclick={() => void pager.retry()}>
+        {i18n.phrase(pager.failed)}
+        Try again
+      </button>
     {/if}
     <span bind:this={end} class="end" aria-hidden="true"></span>
   </PosterRow>

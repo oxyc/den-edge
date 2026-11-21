@@ -10,6 +10,14 @@ import type { ContentCatalogSpec } from './contentServiceProtocol';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import type { HomeRowAffinity } from './homeRowRanking';
 
+/** Recovery copy shared by the eager shell and catalogue Pagers without adding another chunk edge. */
+export const PAGER_FAILURE = [
+  'Load failed',
+  'Offline',
+  'TMDB rate limit',
+  'Services unavailable',
+] as const;
+
 /** A TMDB `/discover` query (DenKit DiscoverQuery). Within one parameter a comma is AND and a pipe OR. */
 export interface DiscoverQuery {
   mediaType: MediaType;

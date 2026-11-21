@@ -263,7 +263,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'couldn’t be matched': 'gick inte att matcha',
   'couldn’t be matched safely': 'kunde inte matchas säkert',
   'Couldn’t finish': 'Kunde inte avsluta',
-  'Couldn’t load': 'Det gick inte att ladda',
+  'Load failed': 'Det gick inte att ladda',
   'Couldn’t load the episodes. Nothing was marked Seen.':
     'Avsnitten kunde inte läsas in. Inget markerades som sett.',
   'Couldn’t remove that download. Try again.': 'Hämtningen kunde inte tas bort. Försök igen.',
@@ -700,6 +700,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'of what you’ve already marked seen were skipped.':
     'av det du redan har markerat sett hoppades över.',
   Off: 'Av',
+  Offline: 'Offline',
   'Off.': 'Av.',
   omdb: 'omdb',
   'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without one, Den shows the ratings it already keeps for a title.':
@@ -1152,8 +1153,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   TMDB: 'TMDB',
   'TMDB has no IMDb record for this title, so sources can’t be matched yet.':
     'TMDB har ingen IMDb-post för denna titel, så källor kan inte matchas ännu.',
-  'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.':
-    'TMDB begränsar tillfälligt förfrågningar. Vissa titlar kan saknas; försök igen efter en kort väntan.',
+  'TMDB rate limit': 'TMDB:s anropsgräns',
   'TMDB key': 'TMDB nyckel',
   to: 'till',
   'to browse sources.': 'för att bläddra i källor.',

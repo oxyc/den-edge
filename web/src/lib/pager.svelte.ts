@@ -2,12 +2,14 @@
 // end nears, and both hide titles after loading — a hide rule, or a shelf's primary genre — so a page can arrive
 // with nothing left to show. This keeps asking while that happens, a few pages at most per go.
 
-import { appendUniqueTitles } from './catalog';
+import { appendUniqueTitles, PAGER_FAILURE } from './catalog';
 import type { Title } from './library';
 
 /** Keep loading while a screenful hasn't survived the hide rules — a few pages at most per go. */
 const FILL = 8;
 const MAX_BURST = 3;
+
+export type PagerFailure = (typeof PAGER_FAILURE)[number];
 
 export class Pager {
   /** Every title loaded so far, before the caller's hide rules. */
@@ -18,8 +20,8 @@ export class Pager {
   exhausted = $state(false);
   /** Pages loaded so far; 0 until the first one lands. */
   page = $state(0);
-  /** The last page asked for failed: the list says so and offers `retry`, rather than simply ending. */
-  failed = $state(false);
+  /** The current Pager generation's failed `page + 1`, with only a presentation-safe reason. */
+  failed = $state<PagerFailure | false>(false);
   #loading = false;
   readonly #lifetime = new AbortController();
   readonly #load: (page: number, signal?: AbortSignal) => Promise<Title[]>;
@@ -49,9 +51,20 @@ export class Pager {
           if (next.length === 0) this.done = this.exhausted = true;
         } catch (error) {
           if (signal.aborted) break;
-          // The row stops where its source failed, until `retry`; what failed is said, not swallowed.
-          console.warn('pager: page', this.page + 1, 'failed', error);
-          this.failed = this.done = true;
+          // Keep raw provider/transport details out of presentation and ordinary device logs.
+          const failure = (error as { failure?: { code?: string; retryable?: boolean } } | null)
+            ?.failure;
+          const code = failure?.code;
+          const reason =
+            globalThis.navigator?.onLine === false
+              ? 1
+              : code === 'rate-limited'
+                ? 2
+                : failure?.retryable || code === 'not-ready'
+                  ? 3
+                  : 0;
+          this.failed = PAGER_FAILURE[reason];
+          this.done = true;
           break;
         }
         if (this.titles.filter(this.#admitted).length >= FILL * this.page) break;
@@ -68,7 +81,8 @@ export class Pager {
   /** Ask again for the page that failed, and carry on from there. */
   retry(): Promise<void> {
     if (!this.failed || this.#loading || this.#lifetime.signal.aborted) return Promise.resolve();
-    this.failed = this.done = false;
+    this.failed = false;
+    this.done = false;
     return this.more();
   }
 

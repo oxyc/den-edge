@@ -28,6 +28,7 @@
     contentPages,
     homeRows,
     interleave,
+    PAGER_FAILURE,
     personalRows,
     type RowDef,
   } from './lib/catalog';
@@ -2986,9 +2987,7 @@
 
 {#if keptNotice || tmdbLimited}
   <p class="tmdb-limit" role="alert">
-    {keptNotice
-      ? i18n.phrase(keptNotice)
-      : 'TMDB is temporarily limiting requests. Some titles may be missing; try again after a short wait.'}
+    {keptNotice ? i18n.phrase(keptNotice) : PAGER_FAILURE[2]}
   </p>
 {/if}
 
@@ -3335,7 +3334,7 @@
           !directoryState.pending &&
           !directoryState.services.length &&
           (directoryServices === null || !directoryState.failed)
-            ? 'Services unavailable'
+            ? PAGER_FAILURE[3]
             : undefined}
           serviceRecovery={directoryState.retrying
             ? 'retrying'

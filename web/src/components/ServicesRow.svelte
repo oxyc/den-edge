@@ -3,6 +3,7 @@
      is availability data. A settled failure keeps one quiet placeholder so lower rows do not jump. -->
 <script lang="ts">
   import { i18n } from '../lib/i18n.svelte';
+  import { PAGER_FAILURE } from '../lib/catalog';
   import { capitalizeHeading } from '../lib/headingText';
   import type { ResolvedService } from '../lib/services';
   import { observeNearViewport } from '../lib/nearViewport';
@@ -120,7 +121,7 @@
           {/if}
           <span role="status"
             >{i18n.phrase(
-              recovery === 'retrying' ? 'Trying again…' : (empty ?? 'Services unavailable'),
+              recovery === 'retrying' ? 'Trying again…' : (empty ?? PAGER_FAILURE[3]),
             )}</span
           >
         </span>

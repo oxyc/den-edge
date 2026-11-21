@@ -63,7 +63,9 @@ test('a failed recommendation continuation stays visible and retries the same pa
   await expect(row.getByRole('link', { name: /^Remote film 100 / })).toBeVisible();
 
   await row.locator('.track').evaluate((track) => (track.scrollLeft = track.scrollWidth));
-  const retry = row.getByRole('button', { name: 'Couldn’t load these. Try again' });
+  const retry = row.getByRole('button', {
+    name: 'Services unavailable Try again',
+  });
   await expect(retry).toBeVisible();
   await expect(row.locator('.slot')).toHaveCount(20);
 

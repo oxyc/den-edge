@@ -37,6 +37,7 @@
   import { contentFilterCounts, contentFilterValues } from '../lib/contentAtlas';
   import type { ExploreType, MediaType, Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
+  import { i18n } from '../lib/i18n.svelte';
   import { Pager } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
   import { isHidden, type Prefs } from '../lib/prefs';
@@ -725,7 +726,7 @@
         {#if feed.pager.failed}
           <!-- A page that didn't load says so where the grid stopped, rather than the grid simply ending. -->
           <p class="note" role="status">
-            Couldn’t load {feedHits.length ? 'more' : 'these'}.
+            {i18n.phrase(feed.pager.failed)}
             <button type="button" class="clear" onclick={() => void feed.pager.retry()}
               >Try again</button
             >
