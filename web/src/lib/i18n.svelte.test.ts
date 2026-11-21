@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import { groupFilmographyByRole, parseFilmography } from './detail';
 import { i18n, setInterfaceLanguage } from './i18n.svelte';
 
 it('rejects a first-load catalog superseded before its import settles', async () => {
@@ -197,5 +198,39 @@ it('localizes a saved-language presentation failure without claiming the write f
   for (const [language, message] of cases) {
     await setInterfaceLanguage(language);
     expect(i18n.phrase('Saved, but not shown.')).toBe(message);
+  }
+});
+
+it('localizes every person filmography role heading', async () => {
+  const title = (id: number) => ({ id, media_type: 'movie', title: `Movie ${id}` });
+  const labels = groupFilmographyByRole(
+    parseFilmography({
+      cast: [title(1)],
+      crew: [
+        { ...title(2), department: 'Directing', job: 'Director' },
+        { ...title(3), department: 'Writing', job: 'Writer' },
+        { ...title(4), department: 'Writing', job: 'Screenplay' },
+        { ...title(5), department: 'Production', job: 'Producer' },
+        { ...title(6), department: 'Sound' },
+      ],
+    }),
+  ).map((group) => group.label);
+  expect(labels).toEqual(['Actor', 'Director', 'Writer', 'Screenwriter', 'Producer', 'Crew']);
+
+  const expected = {
+    en: labels,
+    es: ['Interpretación', 'Dirección', 'Escritura', 'Guion', 'Producción', 'Equipo técnico'],
+    sv: [
+      'Skådespelare',
+      'Regissör',
+      'Författare',
+      'Manusförfattare',
+      'Producent',
+      'Produktionsteam',
+    ],
+  } as const;
+  for (const language of ['en', 'es', 'sv'] as const) {
+    await setInterfaceLanguage(language);
+    expect(labels.map((label) => i18n.phrase(label))).toEqual(expected[language]);
   }
 });

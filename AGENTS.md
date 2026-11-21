@@ -195,6 +195,12 @@ everything the committed code imports is committed too.
   (+146), which advances from 52,736 to 52,864 (retaining 25). The startup and complete-graph ceilings are
   unchanged; no request, timer, listener or dependency is added.
 
+- Localized person filmography role headings (oxyc/den#881, 2026-11-21): Actor, Director, Writer, Screenwriter,
+  Producer and Crew join the existing lazy Swedish and Spanish catalogs (matching the native apps), and the Spanish
+  "Show in Filmography" reads "Mostrar en la filmografía". The translation total measures 52,983 against the
+  52,864 ceiling, which advances to 52,992 (retaining 9). The startup and complete-graph ceilings are unchanged;
+  no request, timer, listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip
