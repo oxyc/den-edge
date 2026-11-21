@@ -188,6 +188,13 @@ everything the committed code imports is committed too.
   #1254's 52,074 (+619), which advances from 52,096 to 52,736 (retaining 43). The startup and complete-graph
   ceilings are unchanged; no request, timer, listener or dependency is added.
 
+- Localized managed playback recovery notices (#1233, 2026-11-21): "TorBox did not start/stopped—refreshing…",
+  "Trying TorBox without Den subtitles…", "Trying Den Remux…" and the switch's "Switching to {source}…" (a
+  parameter message, so the provider names stay verbatim) join the existing lazy catalogs; the banner and the
+  source menu already render through `i18n.phrase`. The translation total measures 52,839 against #1244's 52,693
+  (+146), which advances from 52,736 to 52,864 (retaining 25). The startup and complete-graph ceilings are
+  unchanged; no request, timer, listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip

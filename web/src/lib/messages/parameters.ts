@@ -45,6 +45,7 @@ export const PARAMETER_FALLBACKS = {
     'Sources still answering when this early list arrived: {count}. It may be short.',
   'error.couldntReachDevice': 'Couldn’t reach {device}. Check that this device is online.',
   'player.switchTo': 'Switch to {source}',
+  'player.switchingTo': 'Switching to {source}…',
   'player.resumeFrom': 'Resume from {time}',
   'player.stream': 'Stream: {stream}',
   'player.audioTrack': 'Audio track: {track}',

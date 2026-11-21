@@ -5447,7 +5447,9 @@
       to: current.external ? 'den_remux' : 'torbox',
       context: 'active_session',
     });
-    const pending = showTransition(label ?? `Switching to ${to}…`);
+    const pending = showTransition(
+      label ?? i18n.format('player.switchingTo', 'Switching to {source}…', { source: to }),
+    );
     report();
     carryPosition();
     deliverySwitching = true;

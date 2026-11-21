@@ -47,6 +47,7 @@ export const parameters = {
   'error.couldntReachDevice':
     'No se pudo conectar con {device}. Comprueba que este dispositivo esté conectado.',
   'player.switchTo': 'Cambiar a {source}',
+  'player.switchingTo': 'Cambiando a {source}…',
   'player.resumeFrom': 'Reanudar desde {time}',
   'player.stream': 'Emisión: {stream}',
   'player.audioTrack': 'Pista de audio: {track}',

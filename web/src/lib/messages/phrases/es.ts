@@ -1464,4 +1464,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Searching for a release': 'Buscando una versión',
   'Searching now': 'Buscando ahora',
   'another device': 'otro dispositivo',
+  'TorBox did not start—refreshing…': 'TorBox no se inició; actualizando…',
+  'TorBox stopped—refreshing…': 'TorBox se detuvo; actualizando…',
+  'Trying TorBox without Den subtitles…': 'Probando TorBox sin subtítulos Den…',
+  'Trying Den Remux…': 'Probando Den Remux…',
 };

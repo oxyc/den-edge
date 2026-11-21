@@ -218,7 +218,10 @@ if (process.argv.includes('--capture')) {
   // 2026-11-21 (#1244): the Downloads status line (twelve state phrases and thirteen figure messages with their
   // plurals, in Swedish and Spanish) measures 52,693 against #1254's 52,074 (+619), more than one 128-byte step.
   // Allow the next 128-byte boundary containing it, retaining 43.
-  if (current.translationGzip > 52736) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-21 (#1233): the managed recovery notices (TorBox refresh, Den Remux/TorBox tries, the switch's wait) in
+  // Swedish and Spanish measure 52,839 against #1244's 52,693 (+146), which sat 43 bytes under the ceiling. Allow the
+  // next 128-byte boundary, retaining 25.
+  if (current.translationGzip > 52864) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
