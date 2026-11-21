@@ -59,6 +59,7 @@ class FixtureService {
   };
   readonly recoveryTasks: LibraryTask['kind'][] = [];
   readonly commandKinds: LibraryCommand['kind'][] = [];
+  readonly queryKinds: LibraryQuery['kind'][] = [];
   readonly progressOperationIds: string[] = [];
   readonly parentalPinOperationIds: string[] = [];
   readonly assistantGrantQueries = { attempts: 0 };
@@ -180,6 +181,7 @@ class FixtureService {
   }
 
   async query(query: LibraryQuery, signal?: AbortSignal) {
+    this.queryKinds.push(query.kind);
     const historyDetails = query.kind === 'history.episodes';
     const assistantGrants = query.kind === 'assistant.grants';
     if (historyDetails) this.historyDetails.attempts++;
@@ -564,6 +566,7 @@ export function fixtureLibraryService({
     recoveryTasks: fixtureService.recoveryTasks,
     commandKinds: fixtureService.commandKinds,
     assistantGrantQueries: fixtureService.assistantGrantQueries,
+    queryKinds: fixtureService.queryKinds,
     progressOperationIds: fixtureService.progressOperationIds,
     parentalPinOperationIds: fixtureService.parentalPinOperationIds,
     publish: (affected?: LibrarySelectionScope[]) => fixtureService?.publish(affected),

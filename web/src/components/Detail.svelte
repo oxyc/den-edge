@@ -267,11 +267,18 @@
       return;
     }
     const d = detail;
-    if (!active || !d || !onplayhere) return;
-    const requestKey = `${playRequest.season ?? ''}:${playRequest.episode ?? ''}:${playRequest.filename ?? ''}`;
+    // A title-only series request must use the same authoritative target as the mounted Play and Sources
+    // controls. In particular, do not turn seriesPresentation's premiere-gated absence back into Library's
+    // compatibility S1E1 fallback. Hand that target through too; an explicitly addressed episode remains
+    // independently playable even when the title has not premiered.
+    const coordinate = playRequest.episode == null ? playbackTarget : playRequest;
+    if (!active || !d || !onplayhere || !coordinate) return;
+    // Keyed by the resolved coordinate and filename, not the request's object: the Router replaces that object on
+    // every address rewrite without making a new request.
+    const requestKey = `${coordinate.season ?? ''}:${coordinate.episode ?? ''}:${playRequest.filename ?? ''}`;
     if (handledPlayRequest === requestKey) return;
     handledPlayRequest = requestKey;
-    onplayhere(d.title, playRequest.season, playRequest.episode, playRequest.filename);
+    onplayhere(d.title, coordinate.season, coordinate.episode, playRequest.filename);
   });
 
   $effect(() => {
@@ -302,7 +309,7 @@
   // first play's request carry it, rather than start a session only to measure and start another. Given up on when
   // the page stops being the active one — which pressing Play does.
   $effect(() => {
-    if (!active || !onplayhere || !remux) return;
+    if (!active || !onplayhere || !remux || !playbackTarget) return;
     return premeasureLink(remux);
   });
   let sourcesPanel = $state<TitleSources>();
@@ -785,12 +792,18 @@
   const series = $derived(
     airedDetail ? seriesPresentation(airedDetail, episodes, row, continued) : null,
   );
-  const seenOverride = $derived(ref.type === 'tv' ? seriesSeenOverride(series) : undefined);
-  const target = $derived(ref.type === 'tv' ? series?.target : undefined);
+  // seriesPresentation has no episode coordinates for movies, and seriesSeenOverride returns undefined when its
+  // episode total is zero. Reuse those contracts instead of carrying duplicate media-type branches in Detail.
+  const seenOverride = $derived(seriesSeenOverride(series));
+  const target = $derived(series?.target);
   // A fresh position from another device is more specific than Continue Watching's projected target. The latter
   // may already name the next episode while the device is still writing the episode on screen; every Resume and
   // Sources action must agree with the live status row until that session stops.
-  const playbackTarget = $derived(live?.episode ?? target);
+  // Movies need no episode coordinate, so an empty target keeps their actions on the same truthy gate as a series'
+  // authoritative coordinate without another reactive value or repeated type branches in every action.
+  const playbackTarget = $derived<{ season?: number; episode?: number } | undefined>(
+    ref.type === 'tv' ? (live?.episode ?? target) : {},
+  );
   const sourceCoord = $derived(sourceTarget ?? target);
   /**
    * The episodes of the season Sources is for, to switch between there: named where that season is the one on screen,
@@ -1260,8 +1273,8 @@
             {seenOverride}
             seenItems={seriesSeenItems}
             onreact={(reaction) => onreact(d.title, reaction)}
-            onplay={!__DEN_TV__ && onplay
-              ? (tv) => onplay(tv, d.title, playbackTarget?.season, playbackTarget?.episode)
+            onplay={!__DEN_TV__ && onplay && playbackTarget
+              ? (tv) => onplay(tv, d.title, playbackTarget.season, playbackTarget.episode)
               : undefined}
             {tvs}
             primaryPlay={live && !transportPlaying && ontransport
@@ -1273,18 +1286,20 @@
                   tv: live.deviceId,
                 }
               : undefined}
-            onplayhere={onplayhere
-              ? () => onplayhere(d.title, playbackTarget?.season, playbackTarget?.episode)
+            onplayhere={onplayhere && playbackTarget
+              ? () => onplayhere(d.title, playbackTarget.season, playbackTarget.episode)
               : undefined}
-            playHref={titleHref({
-              ...d.title,
-              season: playbackTarget?.season,
-              episode: playbackTarget?.episode,
-              play: true,
-            })}
-            onsources={!guestScout && !restricted
+            playHref={playbackTarget
+              ? titleHref({
+                  ...d.title,
+                  season: playbackTarget.season,
+                  episode: playbackTarget.episode,
+                  play: true,
+                })
+              : undefined}
+            onsources={!guestScout && !restricted && playbackTarget
               ? () => {
-                  sourceTarget = playbackTarget;
+                  sourceTarget = live?.episode ?? target;
                   void sourcesPanel?.show();
                 }
               : undefined}
@@ -1376,7 +1391,7 @@
         {i18n.phrase('Title details loaded.')}
       </p>
     {/if}
-    {#if !guestScout}
+    {#if !guestScout && playbackTarget}
       <div class="title-sources" hidden={restricted}>
         <TitleSources
           model={model ?? undefined}
