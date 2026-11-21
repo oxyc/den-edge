@@ -1185,6 +1185,7 @@
               {warnings}
               {region}
               status={statusBadge}
+              maturity={titleFacts?.maturity}
             />
             {#if d.overview}<p class="overview desktop-overview">{d.overview}</p>{/if}
             <div class="desktop-overview">

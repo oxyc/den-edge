@@ -198,6 +198,49 @@ describe('ContentAuthority', () => {
     });
   });
 
+  it('reads official maturity provenance from the same title request and types its failure', async () => {
+    const credentials = new WorkerContentCredentials();
+    credentials.configureAtlas('http://atlas.test/base');
+    let status = 200;
+    const asked: string[] = [];
+    const authority = new ContentAuthority(credentials, {
+      providerFetch: async (input) => {
+        asked.push(String(input));
+        return status === 200
+          ? json({
+              type: 'movie',
+              id: 42,
+              indexed: true,
+              maturityRatings: [{ authority: 'KAVI', authorityId: 'kavi', rating: 'K-16' }],
+              runtimeMaturityRatings: [
+                { authority: 'IMDA', authorityId: 'imda', jurisdiction: 'sg', rating: 'R21' },
+              ],
+            })
+          : new Response('{}', { status });
+      },
+    });
+    const ask = () =>
+      authority.query(
+        {
+          kind: 'title.extras',
+          title: { type: 'movie', id: 42 },
+          warningCategories: [],
+          fields: ['facts'],
+        },
+        new AbortController().signal,
+      );
+
+    status = 503;
+    expect(await ask()).toMatchObject({ extras: { facts: { state: 'unavailable' } } });
+    status = 200;
+    expect(await ask()).toMatchObject({
+      extras: {
+        facts: { state: 'ready', value: { maturity: ['KAVI K-16', 'IMDA R21 (SG)'] } },
+      },
+    });
+    expect(asked).toHaveLength(2);
+  });
+
   it('refuses malformed or mismatched Atlas title facts instead of inventing empty facts', async () => {
     const credentials = new WorkerContentCredentials();
     credentials.configureAtlas('http://atlas.test/base');

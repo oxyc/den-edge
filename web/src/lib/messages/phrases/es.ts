@@ -724,6 +724,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'of what you’ve already marked seen were skipped.': 'de lo que ya marcó como visto se omitieron.',
   Off: 'Apagado',
   'Off.': 'Apagado.',
+  'Official content ratings': 'Clasificaciones oficiales',
   omdb: 'omdb',
   'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without one, Den shows the ratings it already keeps for a title.':
     'OMDb agrega calificaciones de IMDb, Rotten Tomatoes y Metacritic en las páginas de detalles (clave gratuita en omdbapi.com). Sin uno, Den muestra las calificaciones que ya mantiene para un título.',

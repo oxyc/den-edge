@@ -219,6 +219,7 @@ it('validates bounded semantic requests and unversioned content replies', () => 
             authors: [],
             moods: ['Warm'],
             countries: ['FI'],
+            maturity: ['KAVI K-12'],
           },
         },
         iconicStudios: { state: 'ready', value: [{ id: 'Q1', name: 'Studio' }] },

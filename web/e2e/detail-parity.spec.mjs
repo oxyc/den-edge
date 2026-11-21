@@ -1367,6 +1367,43 @@ test('optional title facts retain ready detail and retry only the failed lane', 
   expect(requests.filter(unrelated)).toHaveLength(unrelatedBefore);
 });
 
+test('official maturity provenance reads from the title request, with no extra request', async ({
+  page,
+}) => {
+  const requests = [];
+  page.on('request', (request) => requests.push(new URL(request.url()).pathname));
+  await setup(page);
+  await page.route('**/atlas/index/studios/series/9.json*', (route) =>
+    route.fulfill({ status: 404, json: { error: 'not_found' } }),
+  );
+  await page.route('**/atlas/index/title/series/9.json*', (route) =>
+    route.fulfill({
+      json: {
+        type: 'series',
+        id: 9,
+        indexed: true,
+        maturityRatings: [
+          { authority: 'KAVI', authorityId: 'kavi', rating: 'K-12', normalizedAge: 12 },
+        ],
+        runtimeMaturityRatings: [
+          { authority: 'IMDA', authorityId: 'imda', jurisdiction: 'sg', rating: 'R21' },
+        ],
+      },
+    }),
+  );
+
+  await page.addInitScript(() => history.replaceState(null, '', '/tv/9?language=sv'));
+  await page.goto(`${E2E_ORIGIN}/test/detail-parity.html?language=sv`);
+  const active = page.locator('[data-active="true"]');
+  const maturity = active.locator('[data-maturity]');
+  await expect(maturity).toHaveText('KAVI K-12 · IMDA R21 (SG)');
+  await expect(maturity).toHaveAttribute(
+    'aria-label',
+    'Officiella åldersgränser: KAVI K-12, IMDA R21 (SG)',
+  );
+  expect(requests.filter((path) => path.endsWith('/index/title/series/9.json'))).toHaveLength(1);
+});
+
 test('terminal and ready-empty optional title facts stay quiet', async ({ page }) => {
   await setup(page);
   let factsCalls = 0;

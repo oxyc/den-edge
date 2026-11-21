@@ -615,10 +615,12 @@ function result(value: unknown): value is ContentResult {
       'authors',
       'moods',
       'countries',
+      'maturity',
     ]) &&
     ['companies', 'networks', 'subjects', 'places', 'authors'].every((key) =>
       browsable(candidate[key]),
     ) &&
+    strings(candidate.maturity, 32) &&
     strings(candidate.moods, 128) &&
     strings(candidate.countries, 128);
   const studios = (candidate: unknown) =>

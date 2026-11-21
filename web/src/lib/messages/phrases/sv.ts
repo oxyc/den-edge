@@ -707,6 +707,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
     'av det du redan har markerat sett hoppades över.',
   Off: 'Av',
   'Off.': 'Av.',
+  'Official content ratings': 'Officiella åldersgränser',
   omdb: 'omdb',
   'OMDb adds IMDb, Rotten Tomatoes, and Metacritic ratings on detail pages (free key at omdbapi.com). Without one, Den shows the ratings it already keeps for a title.':
     'OMDb lägger till betyg för IMDb, Rotten Tomatoes och Metacritic på detaljsidor (gratisnyckel på omdbapi.com). Utan en så visar Den de betyg som den redan har för en titel.',

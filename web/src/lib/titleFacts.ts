@@ -19,9 +19,12 @@ export interface TitleFacts {
   moods: string[];
   /** Its countries of origin, as ISO codes (`ES`). */
   countries: string[];
+  /** Its official ratings, one line each: `maturityLines`. */
+  maturity: string[];
 }
 
 export const NO_FACTS: TitleFacts = {
+  maturity: [],
   companies: [],
   networks: [],
   subjects: [],
@@ -110,10 +113,77 @@ function browsable(list: unknown): Browsable[] {
   });
 }
 
+const MAX_MATURITY = 16;
+const MAX_MATURITY_TEXT = 128;
+
+interface Observation {
+  authority: string;
+  authorityId: string;
+  rating: string;
+  jurisdiction?: string;
+  format?: string;
+  runtimeMinutes?: number;
+}
+
+function observations(list: unknown): Observation[] {
+  if (!Array.isArray(list)) return [];
+  const clean = (value: unknown) =>
+    typeof value === 'string' && value.trim() && value.trim().length <= MAX_MATURITY_TEXT
+      ? value.trim()
+      : undefined;
+  return list.slice(0, MAX_MATURITY).flatMap((value): Observation[] => {
+    const at = (value ?? {}) as Record<string, unknown>;
+    const [authority, authorityId, rating] = [at.authority, at.authorityId, at.rating].map(clean);
+    if (!authority || !authorityId || !rating) return [];
+    return [
+      {
+        authority,
+        authorityId,
+        rating,
+        jurisdiction: clean(at.jurisdiction),
+        format: clean(at.format),
+        runtimeMinutes:
+          Number.isSafeInteger(at.runtimeMinutes) && (at.runtimeMinutes as number) > 0
+            ? (at.runtimeMinutes as number)
+            : undefined,
+      },
+    ];
+  });
+}
+
+/**
+ * Which official rating a title shows and where it came from — the rule the Apple apps apply too (DenKit's
+ * `MaturityProvenance`): the published labels lead in atlas's order, then a live provider's observation unless it
+ * repeats a published one; each reads `Authority label (cut, JURISDICTION)`. atlas's normalized age is filtering
+ * data and never part of the line.
+ */
+export function maturityLines(body: Record<string, unknown>): string[] {
+  const key = (o: Observation) => `${o.authorityId}\u001f${o.rating}`;
+  const published = observations(body.maturityRatings);
+  const seen = new Set(published.map(key));
+  const live = observations(body.runtimeMaturityRatings).filter((o) => {
+    if (seen.has(key(o))) return false;
+    seen.add(key(o));
+    return true;
+  });
+  return [...published, ...live].map((o) => {
+    const context = [
+      o.format,
+      o.runtimeMinutes ? `${o.runtimeMinutes} min` : undefined,
+      o.jurisdiction?.toUpperCase(),
+    ].filter(Boolean);
+    return `${o.authority} ${o.rating}${context.length ? ` (${context.join(', ')})` : ''}`.slice(
+      0,
+      256,
+    );
+  });
+}
+
 export function parseTitleFacts(body: unknown): TitleFacts {
   const at = (body ?? {}) as Record<string, unknown>;
   const moods = ((at.labels ?? {}) as Record<string, unknown>).moods;
   return {
+    maturity: maturityLines(at),
     companies: browsable(at.companies),
     networks: browsable(at.networks),
     subjects: browsable(at.subjects),
