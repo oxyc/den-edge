@@ -1,7 +1,7 @@
 // Evidence for the TV focus and readiness waits that have failed on CI without reproducing locally (#1376). Each
 // helper only adds what the page looked like to the failure message; none of them retries or relaxes the wait.
 
-/** Keeps the last 40 focus changes (with the caller of any programmatic `focus()`/`blur()`) on `window`. */
+/** Keeps the last 60 focus changes, key presses and route requests (with the caller of any programmatic `focus()`/`blur()`) on `window`. */
 export async function recordFocusTrail(page) {
   await page.addInitScript(() => {
     const trail = (window.__focusTrail = []);
@@ -10,7 +10,7 @@ export async function recordFocusTrail(page) {
       trail.push(
         `${Math.round(performance.now())}ms ${kind} ${label} ${location.pathname}${stack}`,
       );
-      if (trail.length > 40) trail.shift();
+      if (trail.length > 60) trail.shift();
     };
     for (const method of ['focus', 'blur']) {
       const original = HTMLElement.prototype[method];
@@ -25,6 +25,30 @@ export async function recordFocusTrail(page) {
     }
     document.addEventListener('focusin', (event) => push('focusin', event.target), true);
     document.addEventListener('focusout', (event) => push('focusout', event.target), true);
+    // Remote presses and the route requests that start a focus restoration, so a recurrence shows what was alive
+    // when a Select arrived. A request the shell holds before the library mounts is seen here too: the capture
+    // listener on `window` is installed before the app's own.
+    window.addEventListener(
+      'keydown',
+      (event) => {
+        push(`keydown ${event.key}`, event.target);
+        setTimeout(
+          () =>
+            push(
+              `keydown ${event.key} settled defaultPrevented=${event.defaultPrevented} active`,
+              document.activeElement,
+            ),
+          0,
+        );
+      },
+      true,
+    );
+    window.addEventListener(
+      'den:navigate',
+      (event) => push(`den:navigate ${JSON.stringify(event.detail)}`, null),
+      true,
+    );
+    window.addEventListener('popstate', () => push('popstate', null), true);
   });
 }
 
