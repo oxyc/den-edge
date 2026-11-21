@@ -201,6 +201,12 @@ everything the committed code imports is committed too.
   52,864 ceiling, which advances to 52,992 (retaining 9). The startup and complete-graph ceilings are unchanged;
   no request, timer, listener or dependency is added.
 
+- Official maturity provenance on title detail (#1219, 2026-11-21): the title's published and live (runtime) ratings
+  come from the facts lane's existing Atlas title request, so no request is added and a failure retries with that
+  lane. The one new Spanish and Swedish phrase, "Official content ratings", takes the translation total to 53,023
+  against the 52,992 ceiling, which advances to 53,120 (retaining 97). Startup and the complete-graph ceilings are
+  unchanged (one key and one check in the wire codec); no timer, listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip
