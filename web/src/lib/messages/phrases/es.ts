@@ -1452,4 +1452,16 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'The list changed while you were looking at it. Check it again before approving.':
     'La lista cambió mientras la mirabas. Revísala de nuevo antes de aprobar.',
   'Removed from your SIMKL watchlist.': 'Quitado de tu lista de SIMKL.',
+  'Download failed': 'Descarga fallida',
+  'Download stalled': 'Descarga detenida',
+  'Download paused': 'Descarga en pausa',
+  'Download refused': 'Descarga rechazada',
+  Queued: 'En cola',
+  'Service unavailable': 'Servicio no disponible',
+  'Release unavailable': 'Versión no disponible',
+  'Waiting for it to air': 'Esperando su emisión',
+  'No working release yet': 'Aún no hay una versión que funcione',
+  'Searching for a release': 'Buscando una versión',
+  'Searching now': 'Buscando ahora',
+  'another device': 'otro dispositivo',
 };

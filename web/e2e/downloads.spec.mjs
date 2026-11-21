@@ -216,6 +216,12 @@ test('a download queued on a title page is a row every device reads', async () =
         .locator('[data-download="movie:42:-1:-1"]')
         .getByRole('button', { name: 'Avbryt nedladdning' }),
     ).toBeVisible();
+    // The status line and its figures follow the language too: a localized percentage, decimal rate and plurals.
+    await expect(title.locator('[data-download="movie:42:-1:-1"]')).toContainText(
+      'Laddar ner 25 %',
+    );
+    await expect(title.locator('[data-download="movie:42:-1:-1"]')).toContainText('1,0 MB/s');
+    await expect(title.locator('[data-download="movie:42:-1:-1"]')).toContainText('5 seeds');
     // This browser queued it, so it says nothing about who did.
     await expect(title.locator('[data-download="movie:42:-1:-1"]')).not.toContainText(
       'Queued from',

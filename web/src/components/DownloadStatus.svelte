@@ -21,13 +21,15 @@
   const from = $derived(
     download.queuedBy.isSelf
       ? undefined
-      : `Queued from ${download.queuedBy.name ?? 'another device'}`,
+      : i18n.format('download.queuedFrom', 'Queued from {device}', {
+          device: download.queuedBy.name ?? i18n.phrase('another device'),
+        }),
   );
 </script>
 
 <div class="download-status">
   <p class="headline" class:trouble={viewTrouble(download)} role="status">
-    {i18n.phrase(viewHeadline(download))}
+    {viewHeadline(download)}
   </p>
   {#if lines.length}<p>{lines.join(' · ')}</p>{/if}
   {#if release && download.release}<p class="release">{download.release.label}</p>{/if}

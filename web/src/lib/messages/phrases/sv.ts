@@ -1432,4 +1432,16 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'The list changed while you were looking at it. Check it again before approving.':
     'Listan ändrades medan du tittade på den. Kontrollera den igen innan du godkänner.',
   'Removed from your SIMKL watchlist.': 'Borttagen från din SIMKL-lista.',
+  'Download failed': 'Nedladdningen misslyckades',
+  'Download stalled': 'Nedladdningen har stannat',
+  'Download paused': 'Nedladdningen är pausad',
+  'Download refused': 'Nedladdningen nekades',
+  Queued: 'I kö',
+  'Service unavailable': 'Tjänsten är inte tillgänglig',
+  'Release unavailable': 'Utgåvan är inte tillgänglig',
+  'Waiting for it to air': 'Väntar på sändning',
+  'No working release yet': 'Ingen fungerande utgåva ännu',
+  'Searching for a release': 'Söker efter en utgåva',
+  'Searching now': 'Söker nu',
+  'another device': 'en annan enhet',
 };

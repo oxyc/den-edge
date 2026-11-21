@@ -1,3 +1,4 @@
+import { i18n } from './i18n.svelte';
 import type { DownloadViewItem } from './libraryServiceProtocol';
 
 /** Temporary Library.svelte adapter; delete when its Home row consumes DownloadsView. */
@@ -11,27 +12,35 @@ export function headline(status: { state: string | null }, answer?: { progress?:
   return 'Download unavailable';
 }
 
+/** The headline in the interface language: static states are catalog phrases, the percentage a parameter message. */
 export function viewHeadline(download: DownloadViewItem): string {
   const { status } = download;
-  if (status.state === 'ready') return 'Ready to play';
-  if (status.fetch?.state === 'failed') return 'Download failed';
-  if (status.fetch?.state === 'stalled' || status.stalled) return 'Download stalled';
+  if (status.state === 'ready') return i18n.phrase('Ready to play');
+  if (status.fetch?.state === 'failed') return i18n.phrase('Download failed');
+  if (status.fetch?.state === 'stalled' || status.stalled) return i18n.phrase('Download stalled');
   if (status.state === 'fetching')
-    return `Downloading${status.fraction === undefined ? '' : ` ${Math.floor(status.fraction * 100)}%`}`;
-  if (status.state === 'paused') return 'Download paused';
-  if (status.state === 'not-started' || status.state === 'starting') return 'Queued';
-  if (status.state === 'refused') return 'Download refused';
-  if (status.state === 'unreachable') return 'Service unavailable';
-  if (status.state === 'release-gone') return 'Release unavailable';
-  if (status.state === 'awaiting-air') return 'Waiting for it to air';
-  return download.release ? 'No working release yet' : 'Searching for a release';
+    return status.fraction === undefined
+      ? i18n.phrase('Downloading')
+      : i18n.format('download.progress', 'Downloading {percent}%', {
+          percent: Math.floor(status.fraction * 100),
+        });
+  if (status.state === 'paused') return i18n.phrase('Download paused');
+  if (status.state === 'not-started' || status.state === 'starting') return i18n.phrase('Queued');
+  if (status.state === 'refused') return i18n.phrase('Download refused');
+  if (status.state === 'unreachable') return i18n.phrase('Service unavailable');
+  if (status.state === 'release-gone') return i18n.phrase('Release unavailable');
+  if (status.state === 'awaiting-air') return i18n.phrase('Waiting for it to air');
+  return download.release
+    ? i18n.phrase('No working release yet')
+    : i18n.phrase('Searching for a release');
 }
 
-/** "14:05", or "Mon 14:05" beyond today: when a wait ends. */
+/** "14:05", or "Mon 14:05" beyond today: when a wait ends, on the interface language's own clock. */
 function clockTime(at: number, now: number): string {
-  const time = new Date(at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const locale = i18n.language === 'en' ? undefined : i18n.language;
+  const time = new Date(at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   if (new Date(at).toDateString() === new Date(now).toDateString()) return time;
-  return `${new Date(at).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
+  return `${new Date(at).toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short' })} ${time}`;
 }
 
 export function viewTrouble(download: DownloadViewItem): boolean {
@@ -43,7 +52,17 @@ export function viewFacts(download: DownloadViewItem, now = Date.now()): string[
   const values: string[] = [];
   const service = status.fetch?.service ?? status.service;
   if (service) values.push(service);
-  if (status.bytesPerSecond) values.push(`${(status.bytesPerSecond / 1_000_000).toFixed(1)} MB/s`);
+  if (status.bytesPerSecond) {
+    const rate = status.bytesPerSecond / 1_000_000;
+    const figure =
+      i18n.language === 'en'
+        ? rate.toFixed(1)
+        : rate.toLocaleString(i18n.language, {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+          });
+    values.push(`${figure} MB/s`);
+  }
   if (
     status.etaSeconds !== undefined &&
     Number.isFinite(status.etaSeconds) &&
@@ -52,24 +71,55 @@ export function viewFacts(download: DownloadViewItem, now = Date.now()): string[
   )
     values.push(
       status.etaSeconds < 60
-        ? `${Math.ceil(status.etaSeconds)} sec left`
-        : `${Math.ceil(status.etaSeconds / 60)} min left`,
+        ? i18n.format('download.secLeft', '{count} sec left', {
+            count: Math.ceil(status.etaSeconds),
+          })
+        : i18n.format('download.minLeft', '{count} min left', {
+            count: Math.ceil(status.etaSeconds / 60),
+          }),
     );
-  if (status.fetch?.seeds !== undefined) values.push(`${status.fetch.seeds} seeds`);
-  if (status.fetch?.peers !== undefined) values.push(`${status.fetch.peers} peers`);
+  if (status.fetch?.seeds !== undefined)
+    values.push(
+      status.fetch.seeds === 1
+        ? i18n.format('download.seeds.one', '1 seed', { count: 1 })
+        : i18n.format('download.seeds.other', '{count} seeds', { count: status.fetch.seeds }),
+    );
+  if (status.fetch?.peers !== undefined)
+    values.push(
+      status.fetch.peers === 1
+        ? i18n.format('download.peers.one', '1 peer', { count: 1 })
+        : i18n.format('download.peers.other', '{count} peers', { count: status.fetch.peers }),
+    );
   if (status.stalled && status.progressAt)
     values.push(
-      `No progress for ${Math.max(1, Math.floor((now - status.progressAt) / 60_000))} min`,
+      i18n.format('download.noProgress', 'No progress for {count} min', {
+        count: Math.max(1, Math.floor((now - status.progressAt) / 60_000)),
+      }),
     );
   if (status.state === 'paused' && status.until && status.until > now)
-    values.push(`Retries in ${Math.max(1, Math.ceil((status.until - now) / 60_000))} min`);
+    values.push(
+      i18n.format('download.retriesIn', 'Retries in {count} min', {
+        count: Math.max(1, Math.ceil((status.until - now) / 60_000)),
+      }),
+    );
   if (status.state === 'awaiting-air' && status.until)
-    values.push(`Airs ${clockTime(status.until, now)}`);
+    values.push(
+      i18n.format('download.airs', 'Airs {time}', { time: clockTime(status.until, now) }),
+    );
   if (status.state === 'no-working-release' && status.until)
     values.push(
-      status.until > now ? `Searching again ${clockTime(status.until, now)}` : 'Searching now',
+      status.until > now
+        ? i18n.format('download.searchingAgain', 'Searching again {time}', {
+            time: clockTime(status.until, now),
+          })
+        : i18n.phrase('Searching now'),
     );
   if (download.candidates && download.tried > 1)
-    values.push(`Tried ${Math.min(download.tried, download.candidates)} of ${download.candidates}`);
+    values.push(
+      i18n.format('download.tried', 'Tried {count} of {total}', {
+        count: Math.min(download.tried, download.candidates),
+        total: download.candidates,
+      }),
+    );
   return values;
 }
