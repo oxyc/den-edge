@@ -215,7 +215,10 @@ if (process.argv.includes('--capture')) {
   // 2026-11-21 (#1254): the held SIMKL removals' row value, title fallbacks and approval notes in Swedish and Spanish
   // measure 52,074 against main's 51,860 (+214), which sat 108 bytes under the ceiling. Allow the next 128-byte
   // boundary, retaining 22.
-  if (current.translationGzip > 52096) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-21 (#1244): the Downloads status line (twelve state phrases and thirteen figure messages with their
+  // plurals, in Swedish and Spanish) measures 52,693 against #1254's 52,074 (+619), more than one 128-byte step.
+  // Allow the next 128-byte boundary containing it, retaining 43.
+  if (current.translationGzip > 52736) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.

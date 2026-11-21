@@ -181,6 +181,13 @@ everything the committed code imports is committed too.
   51,860 (+214, 108 under its ceiling), which advances from 51,968 to 52,096 (retaining 22). The startup and
   complete-graph ceilings are unchanged; no request, timer, listener or dependency is added.
 
+- Localized Downloads status (#1244, 2026-11-21): the headline states, the figure line (percent, rate, ETA, seeds and
+  peers with their singulars, stall, retry, air and search times, tried counts) and "Queued from" take the profile
+  language through the existing lazy catalogs, and the clock times and the MB/s decimal follow it. The formatter
+  keeps its inputs and shape; the page's 30-second clock is unchanged. The translation total measures 52,693 against
+  #1254's 52,074 (+619), which advances from 52,096 to 52,736 (retaining 43). The startup and complete-graph
+  ceilings are unchanged; no request, timer, listener or dependency is added.
+
 - A return visit with unsent work (#1401) draws what the browser holds at once and sends the work on the first
   foreground refresh; a cached opening pull takes the log's write lane only once adopted, and a change a
   non-reporting pass makes is said by the next refresh. All of it is in the library Worker's `log.ts` (about +76 gzip

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { downloadIsInFlight } from './downloadLifecycle';
 import { viewFacts, viewHeadline, viewTrouble } from './downloadStatus';
 import type { DownloadViewItem } from './libraryServiceProtocol';
+import { sourcePhrases as esPhrases } from './messages/phrases/es';
+import { sourcePhrases as svPhrases } from './messages/phrases/sv';
 
 const item = (status: Partial<DownloadViewItem['status']>): DownloadViewItem => ({
   content: 'movie:1:-1:-1',
@@ -51,6 +53,35 @@ describe('download view presentation', () => {
       false,
     );
     expect(downloadIsInFlight(item({ state: 'ready', phase: 'ready' }).status.state)).toBe(false);
+  });
+
+  it('counts a single seed or peer in the singular', () => {
+    expect(viewFacts(item({ fetch: { state: 'downloading', seeds: 1, peers: 2 } }))).toEqual([
+      '1 seed',
+      '2 peers',
+    ]);
+  });
+
+  it('has Spanish and Swedish copy for every state the headline names', () => {
+    for (const phrase of [
+      'Ready to play',
+      'Downloading',
+      'Download failed',
+      'Download stalled',
+      'Download paused',
+      'Queued',
+      'Download refused',
+      'Service unavailable',
+      'Release unavailable',
+      'Waiting for it to air',
+      'No working release yet',
+      'Searching for a release',
+      'Searching now',
+      'another device',
+    ]) {
+      expect(esPhrases[phrase], `Spanish ${phrase}`).toBeTruthy();
+      expect(svPhrases[phrase], `Swedish ${phrase}`).toBeTruthy();
+    }
   });
 
   it('shows normalized service, pause, and attempts while rejecting implausible ETAs', () => {
