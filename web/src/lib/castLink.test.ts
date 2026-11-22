@@ -24,15 +24,24 @@ describe('signed public link measurement', () => {
       () => times.shift() ?? 400,
     );
     expect(asked).toEqual(['https://203.0.113.7/remux/s/a/b/speed?bytes=8388608']);
-    expect(result).toBe(2_800_000);
+    expect(result).toEqual({ limit: 2_800_000, answered: true });
   });
 
-  it('returns no cap when the signed probe cannot be read', async () => {
+  it('returns no cap, and no answer, when the signed probe cannot be reached', async () => {
     expect(
       await signedLinkLimit('https://203.0.113.7/remux/s/a/b/speed', async () => {
         throw new TypeError('offline');
       }),
-    ).toBeUndefined();
+    ).toEqual({ limit: undefined, answered: false });
+  });
+
+  it('says the listener answered when it refused the probe', async () => {
+    expect(
+      await signedLinkLimit(
+        'https://203.0.113.7/remux/s/a/b/speed',
+        async () => new Response(null, { status: 429 }),
+      ),
+    ).toEqual({ limit: undefined, answered: true });
   });
 
   it('does not suspend playback for a sample below the parent player floor', () => {

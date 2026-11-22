@@ -104,3 +104,19 @@ export function retryWithoutHint(
 ): boolean {
   return session.hinted === true && !played && !retried;
 }
+
+/**
+ * Whether a member's session that failed should be asked for again with the wide listener (`wideListener`): den-edge
+ * opened it for the one address it saw this page come from (`narrow`), nothing of it ever arrived, and it has not been
+ * widened already. The address Cloudflare reports can differ from the one the media fetch leaves from: in one
+ * measured case five such sessions in a row were each opened `scope=browser` and den-remux served none of them a
+ * single segment, while every `wide:ipv6` session that week played. Which address the fetch used instead is
+ * inferred (iCloud Private Relay or a carrier NAT pool), not measured.
+ */
+export function retryWide(
+  session: { narrow?: boolean },
+  played: boolean,
+  widened: boolean,
+): boolean {
+  return session.narrow === true && !played && !widened;
+}

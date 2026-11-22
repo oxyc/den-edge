@@ -4413,6 +4413,16 @@ mod tests {
         );
         let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
         assert_eq!(asked, json!({ "open": true, "source": "203.0.113.1", "scope": "browser" }));
+        assert!(answer.get("narrow").is_none(), "a guest is not offered the wide scope: {answer}");
+        // A guest that asks for it anyway keeps its own address.
+        let mut wide = body.clone();
+        wide["wideListener"] = json!(true);
+        let resp = start("203.0.113.1", wide).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let scope = resp.extensions().get::<crate::handler::ListenerScope>().map(|s| s.0);
+        assert_eq!(scope, Some("browser"));
+        let asked: Value = serde_json::from_str(opened.recv().await.unwrap().trim()).unwrap();
+        assert_eq!(asked["scope"], "browser");
 
         // IPv6 and Cast would need the wide scope, which a guest never gets. Each is refused under its own code.
         let refused = |resp: Response| async move {
@@ -4456,6 +4466,7 @@ mod tests {
             r#"den_edge_public_media_hint_wanted_total{who="guest"} 1"#,
             r#"den_edge_public_media_wide_total{reason="cast",who="guest"} 0"#,
             r#"den_edge_public_media_wide_total{reason="ipv6",who="guest"} 0"#,
+            r#"den_edge_public_media_wide_total{reason="unreached",who="guest"} 0"#,
         ] {
             assert!(metrics.contains(counted), "{counted} in {metrics}");
         }

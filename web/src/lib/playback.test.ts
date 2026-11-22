@@ -192,6 +192,7 @@ describe('startPlayback', () => {
         lanBase: 'https://remux.home:8443',
         castOrigin: 'https://cast.example',
         hinted: true,
+        narrow: true,
         session: {
           id: 'id',
           playlist: '/remux/s/id/sig/master.m3u8',
@@ -223,6 +224,7 @@ describe('startPlayback', () => {
       lanPlaylist: 'https://remux.home:8443/remux/s/id/sig/master.m3u8',
       castOrigin: 'https://cast.example',
       hinted: true,
+      narrow: true,
       duration: 7200,
       subtitleResync: { supported: true, url: '/remux/s/id/sig/subtitle-resync' },
       subtitles: [

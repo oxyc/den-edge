@@ -30,7 +30,7 @@
   import { guestGrants } from '../lib/grants.svelte';
   import { hlsConfig } from '../lib/hlsConfig';
   import { reportMediaEngineFailure } from '../lib/mediaEngineDiagnostics';
-  import { retryWithoutHint } from '../lib/ipv4';
+  import { retryWide, retryWithoutHint } from '../lib/ipv4';
   import type { Title } from '../lib/library';
   import { interfaceLocale, type InterfaceLanguage } from '../lib/interfaceLanguage';
   import { languageName } from '../lib/languageName';
@@ -935,6 +935,12 @@
    * of it arrived: that address was not the one the media is fetched from, so no later session reports it either.
    */
   let noHint = false;
+  /**
+   * Set once a member's session den-edge opened for the one address it saw (`narrow`) failed before anything of it
+   * arrived, or was handed to AirPlay: the media comes from another address, so every later session asks for the wide
+   * listener (`wideListener`). Kept across episodes: the address it saw does not change with the episode.
+   */
+  let wideListener = false;
   /** Whether anything of the playing session has arrived: its first frame here, or the cast page's metadata. */
   // $state (den-edge#234): the startup notice's own derived reads this to clear itself once the first frame
   // arrives, which needs it reactive — every other read here is a plain check inside a function body.
@@ -1602,6 +1608,7 @@
         : {}),
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
+      ...(wideListener ? { wideListener } : {}),
       // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
       ...(excluded.length && delivery !== 'direct' ? { exclude: [...excluded] } : {}),
       ...extra,
@@ -2200,6 +2207,20 @@
     return reassertGrant(current, scout.install, undefined, sessionRoute ?? route).then(
       () => undefined,
     );
+  }
+
+  /**
+   * A member's `narrow` session that delivered nothing, asked again once for the same release with the wide listener
+   * (`retryWide`). Whether it did; false leaves the failure to go the usual way.
+   */
+  function widenAfterUnreached(current: Session): boolean {
+    if (session !== current || !retryWide(current, played, wideListener)) return false;
+    wideListener = true;
+    console.warn(
+      'Nothing arrived from the media listener opened for this address; asking again for every address.',
+    );
+    restartForRecovery('Nothing arrived—retrying…', { filename: current.release.filename });
+    return true;
   }
 
   /** The session is gone — ended by den-remux, or out of reach for too long: say so, and offer to pick up at `at`. */
@@ -3101,6 +3122,8 @@
       volume?: number;
       muted?: boolean;
       failure?: unknown;
+      code?: unknown;
+      wireless?: unknown;
     };
     if (
       message.type === 'den-ready' ||
@@ -3157,6 +3180,21 @@
           },
           current.castOrigin,
         );
+      }
+    } else if (message.type === 'den-unreached') {
+      // The cast page's speed probe got no answer at all from the public listener: the session it would play next
+      // can only stall the same way, so a narrow one is widened now rather than after `castPlayMs`.
+      widenAfterUnreached(current);
+    } else if (message.type === 'den-airplay') {
+      // The cast page's video went to an AirPlay receiver, which fetches the media from its own address.
+      if (message.wireless !== true) return;
+      reachAirPlay('started');
+      airPlayDelivery = 'remux';
+      if (current.narrow && !wideListener) {
+        wideListener = true;
+        void reassertGrant(current, scout.install, undefined, sessionRoute ?? route, undefined, {
+          wideListener: true,
+        });
       }
     } else if (message.type === 'den-reconnect') {
       // The cast page's segments stopped arriving: its address may have changed, and only this page can say so.
@@ -3275,7 +3313,19 @@
         return;
       }
       // A receiver that can't play what it was sent: a copy its conservative profile takes, as a decoder's refusal.
-      void broke(0, message.message ?? 'cast player failed', 'decode', 'cast_page_error');
+      // The cast page's own video names its MediaError code; a network error (2) is no verdict on the release.
+      const code =
+        Number.isInteger(message.code) &&
+        (message.code as number) >= 0 &&
+        (message.code as number) <= 4
+          ? (message.code as number)
+          : 0;
+      void broke(
+        code,
+        message.message ?? 'cast player failed',
+        code === 2 ? 'other' : 'decode',
+        'cast_page_error',
+      );
     }
   }
 
@@ -4101,6 +4151,9 @@
       });
       return;
     }
+    // Opened for the one address den-edge saw, and nothing arrived: the media fetch comes from another. The same
+    // release, asked once more with the listener open to every address, rather than a verdict on the release.
+    if (widenAfterUnreached(current)) return;
     // A dead release looks exactly like this too — `MediaError 3`, and on the native path this page never
     // sees the segment responses that would say otherwise. Ask den-remux for the segment playback stalled
     // on before blaming the picture: converting a release whose bytes have stopped arriving cannot help,

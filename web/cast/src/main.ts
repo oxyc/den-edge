@@ -421,7 +421,13 @@ if (airPlayAvailable) {
     airPlayAvailable = (event as Event & { availability?: string }).availability === 'available';
     renderOutputs();
   });
-  video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', renderOutputs);
+  video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', () => {
+    renderOutputs();
+    // The receiver fetches the media from its own address, which the player outside lets in (`den-airplay`).
+    tellFor(playingLoad, 'den-airplay', {
+      wireless: !!airPlayVideo.webkitCurrentPlaybackTargetIsWireless,
+    });
+  });
 }
 airPlayButton.addEventListener('click', () => airPlayVideo.webkitShowPlaybackTargetPicker?.());
 
@@ -665,6 +671,7 @@ function failFor(
   }
   tellFor(load, 'den-error', {
     message: translateStatus(message),
+    code,
     ...(failure ? { failure } : {}),
   });
 }
@@ -1037,8 +1044,15 @@ async function measure(load: LoadMessage): Promise<boolean> {
   if (!media.measure || !media.speed || measuredLoad === load) return false;
   measuredLoad = load;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const maxBitrate = usableLinkLimit(await signedLinkLimit(media.speed));
+    const { limit, answered } = await signedLinkLimit(media.speed);
     if (!ownsCurrent(load)) return false;
+    // Nothing answered on the public address: the session's playlist is on the same listener and would stall the
+    // same way. The player outside decides what to do (`den-unreached`); a second probe would only wait again.
+    if (!answered) {
+      tellFor(load, 'den-unreached');
+      return false;
+    }
+    const maxBitrate = usableLinkLimit(limit);
     if (maxBitrate) {
       tellFor(load, 'den-speed', { maxBitrate });
       return true;

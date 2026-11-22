@@ -252,7 +252,8 @@ fn subtitle_resync_answer(
 const SEGMENT_SCAN: &str = "/remux/segments/scan";
 
 /// Where a player re-asserts the public media grant for a session it already has, from whatever address it has now:
-/// `{"playlist": "/remux/s/<sid>/<sig>/master.m3u8"}`, plus `ipv4Hint`/`noHint` as a session start takes them.
+/// `{"playlist": "/remux/s/<sid>/<sig>/master.m3u8"}`, plus `ipv4Hint`/`noHint`/`wideListener` as a session start
+/// takes them.
 ///
 /// The grant is made for the address a session started from, and kept by the listener while that session is live.
 /// A viewer whose address changes mid-film (Wi-Fi to mobile, or a carrier that moves it) arrives from one the listener
@@ -1467,6 +1468,20 @@ async fn relay_with(
     } else {
         (body, None, false)
     };
+    // A member whose page got nothing from a listener opened for its observed address asks again with `wideListener`:
+    // the address Cloudflare reports is not always the one its media fetch comes from (iCloud Private Relay, a carrier
+    // NAT with an address per destination), and the exact-address grant then drops every packet of that fetch. It is
+    // taken out of the body here, so neither remux nor Hearth sees a field it would refuse. A guest is never given the
+    // wide scope, so a guest's ask is taken out and ignored.
+    let (body, wide_asked) = if public_session || public_playback {
+        match take_wide_listener(body) {
+            Some(taken) => taken,
+            None => return bad_request("wide_listener_body"),
+        }
+    } else {
+        (body, false)
+    };
+    let unreached = wide_asked && grant.is_none();
     // A managed Hearth operation may fall back to Remux. Preserve the caller's Cast intent at this outer boundary:
     // if the direct TorBox path is unavailable, the listener must be opened for the receiver rather than only the
     // browser's address. The guest's legacy `/remux/session` path keeps its stricter refusal below; only Hearth's
@@ -1488,7 +1503,7 @@ async fn relay_with(
         state.metrics.record_public_media_hint_wanted(if guest_remux { "guest" } else { "member" });
         return json(StatusCode::PRECONDITION_REQUIRED, "ipv4_hint_wanted");
     }
-    let hinted = match (public_session && !cast, address, hint) {
+    let hinted = match (public_session && !cast && !unreached, address, hint) {
         (true, Some(source), Some(hint)) if source.is_ipv6() => match hint_address(&hint) {
             Ok(v4) => Some(std::net::IpAddr::V4(v4)),
             Err(reason) => {
@@ -1849,9 +1864,10 @@ async fn relay_with(
         if let (Some(base), Some(socket), Some(address)) =
             (&state.public_media_base, &state.public_media_socket, address)
         {
-            let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, address) };
+            let asked = if hinted.is_some() { "hint" } else { listener_scope(cast, unreached, address) };
             scope = Some(ListenerScope(asked));
-            if heard(state, open_public_listener(socket, hinted.unwrap_or(address), cast).await) {
+            let wide = asked.starts_with("wide:");
+            if heard(state, open_public_listener(socket, hinted.unwrap_or(address), wide).await) {
                 if playback_session {
                     let committed = match playback_finalizer.clone() {
                         Some((target, request, owner, key, receipt)) => {
@@ -1947,6 +1963,11 @@ async fn relay_with(
                     // Opened for the page's reported address: if it was wrong, the page asks again without it.
                     if hinted.is_some() {
                         value["hinted"] = serde_json::Value::Bool(true);
+                    }
+                    // Opened for the observed address alone: if nothing arrives, a member's page may ask once for
+                    // the wide scope (`wideListener`). A guest is not told, as it would be refused it anyway.
+                    if asked == "browser" && grant.is_none() {
+                        value["narrow"] = serde_json::Value::Bool(true);
                     }
                     // Only to a client behind the home's own router. Anyone else — a remote member, an invited
                     // guest — cannot reach a private address, and would try it first on every play regardless.
@@ -2419,15 +2440,30 @@ impl http_body::Body for MediaPassed {
 /// Which listener grant a public session needs, as the request log names it: `browser` for the visitor's own
 /// address, else the wide scope and why. The media base is an IPv4 literal. A visitor Cloudflare saw over IPv6
 /// fetches it from an address this process never sees (dual-stack, NAT64, carrier NAT), so an exact-address grant
-/// would drop its own session; a Cast receiver fetches from its own address.
-fn listener_scope(cast: bool, source: std::net::IpAddr) -> &'static str {
+/// would drop its own session; a Cast receiver fetches from its own address. `unreached` is a member's page saying
+/// a grant for its observed IPv4 address delivered nothing (`wideListener`): its media fetch comes from elsewhere.
+fn listener_scope(cast: bool, unreached: bool, source: std::net::IpAddr) -> &'static str {
     if cast {
         "wide:cast"
     } else if source.is_ipv6() {
         "wide:ipv6"
+    } else if unreached {
+        "wide:unreached"
     } else {
         "browser"
     }
+}
+
+/// A public session or playback body without its `wideListener`, and whether it asked for the wide scope. A body that
+/// is not a JSON object, or does not name it, is left as it is. `None` only if the body cannot be written back.
+fn take_wide_listener(body: Bytes) -> Option<(Bytes, bool)> {
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_slice(&body) else {
+        return Some((body, false));
+    };
+    let Some(asked) = fields.remove("wideListener") else {
+        return Some((body, false));
+    };
+    serde_json::to_vec(&fields).ok().map(|written| (Bytes::from(written), asked.as_bool() == Some(true)))
 }
 
 /// A session start's body without its `ipv4Hint` and `noHint`, the hint unless the page said `noHint`, and whether
@@ -2823,9 +2859,8 @@ fn direct_json(status: StatusCode, value: &serde_json::Value) -> Response {
 async fn open_public_listener(
     socket: &std::path::Path,
     source: std::net::IpAddr,
-    cast: bool,
+    wide: bool,
 ) -> Option<bool> {
-    let wide = listener_scope(cast, source) != "browser";
     let operation = async {
         let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
         let request = serde_json::json!({
@@ -3997,10 +4032,9 @@ mod tests {
         });
 
         for source in ["2001:db8::7", "203.0.113.7"] {
-            assert_eq!(
-                super::open_public_listener(&socket, source.parse().unwrap(), false).await,
-                Some(true)
-            );
+            let source: std::net::IpAddr = source.parse().unwrap();
+            let wide = super::listener_scope(false, false, source).starts_with("wide:");
+            assert_eq!(super::open_public_listener(&socket, source, wide).await, Some(true));
         }
         let scope =
             |line: String| serde_json::from_str::<serde_json::Value>(line.trim()).unwrap()["scope"].clone();
@@ -5017,6 +5051,106 @@ mod tests {
         }
     }
 
+    /// A member seen over IPv4 gets a listener for that address and is told it is narrow. When nothing of it arrived
+    /// (the media fetch came from another address), the page asks again with `wideListener`, for a new session or
+    /// for the one it holds, and gets the wide scope; neither remux nor the log of what it was asked sees the field.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_members_unreached_narrow_grant_is_asked_again_wide() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let playlist = format!("/remux/s/{}/{}/master.m3u8", "A".repeat(22), "b".repeat(22));
+        let relayed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let app = axum::Router::new().fallback({
+            let relayed = Arc::clone(&relayed);
+            let playlist = playlist.clone();
+            move |req: axum::extract::Request| {
+                let relayed = Arc::clone(&relayed);
+                let playlist = playlist.clone();
+                async move {
+                    let head = req.method() == axum::http::Method::HEAD;
+                    let body = axum::body::to_bytes(req.into_body(), 1 << 20).await.unwrap();
+                    relayed.lock().unwrap().push(String::from_utf8(body.to_vec()).unwrap());
+                    if head {
+                        (StatusCode::OK, String::new())
+                    } else {
+                        (StatusCode::CREATED, json!({ "playlist": playlist }).to_string())
+                    }
+                }
+            }
+        });
+        tokio::spawn(async move { axum::serve(upstream, app).await.unwrap() });
+
+        let dir = crate::handler::tests::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("listener.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (sent, mut opened) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = unix.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                let _ = sent.send(serde_json::from_str::<serde_json::Value>(line.trim()).unwrap());
+                stream.into_inner().write_all(b"ok\n").await.unwrap();
+            }
+        });
+
+        let mut h = Harness::new();
+        let state = Arc::get_mut(&mut h.state).unwrap();
+        state.relays = crate::parse_relays(&format!("/remux=http://{upstream_addr}"));
+        state.web_hosts = crate::parse_hosts("WEB_HOSTS", "d.oxy.fi");
+        state.trusted_proxies = vec!["192.168.1.9".parse().unwrap()];
+        state.public_media_base = Some("https://203.0.113.10".into());
+        state.public_media_socket = Some(socket);
+        let claim = registered_library(&h).await;
+        Arc::get_mut(&mut h.state).unwrap().new_libraries = crate::library::NewLibraries::Members;
+        let send = |path: &'static str, body: serde_json::Value| {
+            let (h, claim) = (&h, claim.clone());
+            async move {
+                h.send(
+                    "POST",
+                    path,
+                    Some(body.to_string()),
+                    &[
+                        ("host", "d.oxy.fi"),
+                        ("content-type", "application/json"),
+                        ("x-den-library-member", &claim),
+                        ("x-forwarded-for", "203.0.113.8"),
+                    ],
+                )
+                .await
+            }
+        };
+        let scope = |resp: &axum::response::Response| resp.extensions().get::<ListenerScope>().map(|s| s.0);
+
+        let resp = send("/remux/session", json!({ "a": 1 })).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("browser")));
+        assert_eq!(crate::handler::tests::body_json(resp).await["narrow"], true);
+        assert_eq!(
+            opened.recv().await.unwrap(),
+            json!({ "open": true, "source": "203.0.113.8", "scope": "browser" })
+        );
+
+        let resp = send("/remux/session", json!({ "a": 1, "wideListener": true })).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::CREATED, Some("wide:unreached")));
+        assert!(crate::handler::tests::body_json(resp).await.get("narrow").is_none());
+        assert_eq!(opened.recv().await.unwrap()["scope"], "cast");
+        assert_eq!(relayed.lock().unwrap().last().unwrap(), r#"{"a":1}"#, "remux never sees the field");
+
+        // The session it already holds, opened wide in place.
+        let resp = send("/remux/grant", json!({ "playlist": playlist, "wideListener": true })).await;
+        assert_eq!((resp.status(), scope(&resp)), (StatusCode::NO_CONTENT, Some("wide:unreached")));
+        assert_eq!(opened.recv().await.unwrap()["scope"], "cast");
+
+        let metrics = h.state.metrics.render();
+        let counted = r#"den_edge_public_media_wide_total{reason="unreached",who="member"} 2"#;
+        assert!(metrics.contains(counted), "{counted} in {metrics}");
+    }
+
     #[test]
     fn an_ipv4_hint_is_one_global_ipv4_address() {
         let hint = |value: serde_json::Value| super::hint_address(&value).map(|a| a.to_string());
@@ -5082,10 +5216,26 @@ mod tests {
     fn a_public_session_names_the_listener_scope_it_needs() {
         let v4: std::net::IpAddr = "203.0.113.7".parse().unwrap();
         let v6: std::net::IpAddr = "2001:db8::7".parse().unwrap();
-        assert_eq!(super::listener_scope(false, v4), "browser");
-        assert_eq!(super::listener_scope(false, v6), "wide:ipv6");
-        assert_eq!(super::listener_scope(true, v4), "wide:cast");
-        assert_eq!(super::listener_scope(true, v6), "wide:cast");
+        assert_eq!(super::listener_scope(false, false, v4), "browser");
+        assert_eq!(super::listener_scope(false, false, v6), "wide:ipv6");
+        assert_eq!(super::listener_scope(true, false, v4), "wide:cast");
+        assert_eq!(super::listener_scope(true, false, v6), "wide:cast");
+        assert_eq!(super::listener_scope(false, true, v4), "wide:unreached");
+        assert_eq!(super::listener_scope(false, true, v6), "wide:ipv6");
+        assert_eq!(super::listener_scope(true, true, v4), "wide:cast");
+    }
+
+    #[test]
+    fn wide_listener_is_taken_out_of_the_body() {
+        let take = |body: &str| {
+            let (body, wide) = super::take_wide_listener(axum::body::Bytes::from(body.to_owned())).unwrap();
+            (String::from_utf8(body.to_vec()).unwrap(), wide)
+        };
+        assert_eq!(take(r#"{"a":1,"wideListener":true}"#), (r#"{"a":1}"#.into(), true));
+        assert_eq!(take(r#"{"a":1,"wideListener":false}"#), (r#"{"a":1}"#.into(), false));
+        assert_eq!(take(r#"{"a":1,"wideListener":"yes"}"#), (r#"{"a":1}"#.into(), false));
+        assert_eq!(take(r#"{ "a": 1 }"#), (r#"{ "a": 1 }"#.into(), false));
+        assert_eq!(take("not json"), ("not json".into(), false));
     }
 
     #[cfg(unix)]

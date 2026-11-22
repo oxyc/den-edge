@@ -5,6 +5,7 @@ import {
   ipifyAddress,
   ipv4Hint,
   lookupIpv4,
+  retryWide,
   retryWithoutHint,
   traceAddress,
 } from './ipv4';
@@ -121,5 +122,17 @@ describe('retryWithoutHint', () => {
     // den-edge used no hint for it: asking again without one would change nothing.
     expect(retryWithoutHint({}, false, false)).toBe(false);
     expect(retryWithoutHint({ hinted: false }, false, false)).toBe(false);
+  });
+});
+
+describe('retryWide', () => {
+  it('widens a narrow session that never played, once', () => {
+    expect(retryWide({ narrow: true }, false, false)).toBe(true);
+    // Already widened: what fails now is not the address.
+    expect(retryWide({ narrow: true }, false, true)).toBe(false);
+    // Something arrived, so the listener was open for the right address.
+    expect(retryWide({ narrow: true }, true, false)).toBe(false);
+    // Already wide, or a guest's (den-edge never says narrow to one): asking again would change nothing.
+    expect(retryWide({}, false, false)).toBe(false);
   });
 });

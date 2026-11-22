@@ -383,6 +383,61 @@ test('a bad playback-address hint explains its one retry instead of repeating ge
   }
 });
 
+test('a narrow listener that delivered nothing is asked again once for every address', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+  try {
+    const page = await browser.newPage();
+    await base(page);
+    await page.route(`${ORIGIN}/den/config/playback`, (route) =>
+      route.fulfill({ status: 404, json: { error: 'not_found' } }),
+    );
+    const operations = [];
+    await page.route(`${ORIGIN}/direct/session`, async (route) => {
+      operations.push(route.request().postDataJSON());
+      const id = operations.length === 1 ? 'narrow' : 'wide';
+      return route.fulfill({
+        status: 201,
+        json: {
+          sid: id,
+          playlist: `/direct/s/${id}/sig/master.m3u8`,
+          duration: 60,
+          release,
+          video: { codec: 'h264', transcoded: false },
+          audioTrack: 0,
+          audioTracks: [],
+          ...(id === 'narrow' ? { narrow: true } : {}),
+        },
+      });
+    });
+    // Nothing of the narrow session arrives. The real listener drops the packets of a fetch from an address it was not
+    // opened for; a 404 stands in for that here, as for the hinted session above, so hls.js fails at once.
+    await page.route(`${ORIGIN}/direct/s/narrow/**`, (route) =>
+      route.request().method() === 'DELETE'
+        ? route.fulfill({ status: 204 })
+        : route.fulfill({ status: 404 }),
+    );
+    await page.route(`${ORIGIN}/direct/s/wide/**`, (route) => media(route));
+
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect.poll(() => operations.length).toBe(2);
+    expect(operations[0].wideListener).toBeUndefined();
+    expect(operations[1].wideListener).toBe(true);
+    // The same release, not a verdict on it.
+    expect(operations[1].exclude).toBeUndefined();
+    await page.waitForFunction(
+      () => (document.querySelector('.player video')?.currentTime ?? 0) > 1,
+      undefined,
+      { timeout: 30_000 },
+    );
+    expect(operations).toHaveLength(2);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('native Safari HLS failure refreshes only TorBox without crossing to Remux', async () => {
   const browser = await webkit.launch();
   try {
