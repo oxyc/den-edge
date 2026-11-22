@@ -17,6 +17,7 @@
     ['mood', 'Moods'],
     ['recipe', 'Recipes'],
     ['genre', 'Genres'],
+    ['history', 'Viewing'],
     ['language', 'Languages'],
     ['country', 'Countries'],
     ['region', 'Regions'],
@@ -39,7 +40,7 @@
     ['animated', 'Animation'],
   ];
   /** The kinds the phone strip samples: the rest wait in the sheet. */
-  const STRIP_KINDS: ChipGroup[] = ['mood', 'recipe', 'genre'];
+  const STRIP_KINDS: ChipGroup[] = ['mood', 'recipe', 'genre', 'history'];
   /** How many of each a section shows unfiltered: the rail's and the sheet's, and the phone strip's. */
   const LIST_FIRST = 8;
   const STRIP_FIRST = 3;

@@ -15,6 +15,8 @@ import {
   filterChips,
   fold,
   FOR_YOU,
+  HISTORY_CHIPS,
+  historyFacet,
   KIND,
   matchChips,
   offered,
@@ -184,6 +186,14 @@ describe('matching typed text to chips', () => {
     expect(labels(matchChips('funny', chips))).toEqual(['Feel-Good', 'Dark Comedies', 'Comedy']);
     expect(labels(matchChips('scary', chips))).toContain('Horror');
     expect(labels(matchChips('space', chips))).toEqual(['Set in Space', 'Science Fiction']);
+  });
+
+  it('finds the personal viewing filters by seen and watched language', () => {
+    expect(labels(browseChips('seen', [...HISTORY_CHIPS]))).toEqual(['Seen', 'Not seen']);
+    expect(labels(browseChips('unwatched', [...HISTORY_CHIPS]))[0]).toBe('Not seen');
+    expect(historyFacet('seen')).toBe(true);
+    expect(historyFacet('not-seen')).toBe(false);
+    expect(historyFacet('genre-18')).toBeUndefined();
   });
 
   it('offers what a query names, from two letters, named ones before synonyms, uncapped', () => {
@@ -688,6 +698,17 @@ describe('the kinds only atlas’s filter knows', () => {
     expect(applyPick(['person-Q1'], 'recipe-nordic-noir', 'movie', true).removed).toEqual([
       'person-Q1',
     ]);
+  });
+
+  it('keeps one personal viewing state across media types and replaces it with the other', () => {
+    expect(slotOf('seen')).toBe('history');
+    expect(applyPick(['genre-18', 'seen'], 'not-seen', 'movie')).toEqual({
+      set: ['genre-18', 'not-seen'],
+      removed: ['seen'],
+    });
+    expect(
+      remapSet(['seen'], 'all', 'tv', [...exploreChips('tv', { atlas: true }), ...HISTORY_CHIPS]),
+    ).toEqual({ set: ['seen'], dropped: [] });
   });
 });
 
