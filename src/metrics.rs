@@ -941,7 +941,7 @@ impl Metrics {
              # TYPE den_edge_public_media_wide_total counter\n",
         );
         let wide = lock(&self.public_media_wide);
-        for reason in ["cast", "ipv6"] {
+        for reason in ["cast", "ipv6", "unreached"] {
             for who in ["member", "guest"] {
                 let n = wide.get(&(reason, who)).copied().unwrap_or(0);
                 out.push_str(&format!(

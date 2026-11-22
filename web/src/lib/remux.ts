@@ -63,6 +63,8 @@ export interface Session {
   castOrigin?: string;
   /** Set when den-edge opened the media listener for the `ipv4Hint` this page sent rather than the address it saw. */
   hinted?: boolean;
+  /** Set when den-edge opened a member's media listener for the one address it saw this page come from. */
+  narrow?: boolean;
   /** Hearth tried TorBox first and fell back to this Remux session: TorBox's closed reason (`PlaybackCause`). */
   directFailure?: string;
   /** Seconds. */
@@ -190,6 +192,8 @@ export interface Want {
   ipv4Hint?: string;
   /** Asked again after a hinted session never played, or when no address was found: den-edge uses no hint for it. */
   noHint?: boolean;
+  /** Asked again after a `narrow` session never played: den-edge opens a member's media listener to every address. */
+  wideListener?: boolean;
   /** Releases not to open: the ones this player switched away from. */
   exclude?: string[];
   /**
@@ -1263,8 +1267,8 @@ export function sendHeartbeat(session: Session, fetchImpl: typeof fetch = fetch)
  * address it has now: a viewer who moved from Wi-Fi to mobile mid-film arrives from one the listener never let in,
  * and its segments are dropped until it is. The session's signed playlist is what proves it is this browser's, and
  * `scout` names the install it was started with, so a guest's call carries that grant. Asked again with this
- * browser's IPv4 address when den-edge sees it over IPv6 and wants one, as a session start is. Whether it opened;
- * nothing to ask for a session with no public address.
+ * browser's IPv4 address when den-edge sees it over IPv6 and wants one, as a session start is. `wide` carries a
+ * session start's `wideListener`. Whether it opened; nothing to ask for a session with no public address.
  */
 export async function reassertGrant(
   session: Session,
@@ -1272,6 +1276,7 @@ export async function reassertGrant(
   fetchImpl: typeof fetch = relayFetch,
   base = '/remux',
   lookup: () => Promise<string | undefined> = () => ipv4Hint(),
+  wide: Pick<Want, 'wideListener'> = {},
 ): Promise<boolean> {
   if (!session.publicBase) return true;
   let playlist: string;
@@ -1284,7 +1289,7 @@ export async function reassertGrant(
     fetchImpl(`${base}/grant`, {
       method: 'POST',
       headers: browserHeaders(base),
-      body: JSON.stringify({ playlist, ...(scout ? { scout } : {}), ...extra }),
+      body: JSON.stringify({ playlist, ...(scout ? { scout } : {}), ...wide, ...extra }),
     });
   try {
     let res = await ask();

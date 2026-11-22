@@ -265,6 +265,7 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
     lanPlaylist: lanBase && relativePlaylist ? new URL(relativePlaylist, lanBase).href : undefined,
     castOrigin: origin(answer.castOrigin) ?? origin(nested.castOrigin),
     hinted: answer.hinted === true || nested.hinted === true || undefined,
+    narrow: answer.narrow === true || nested.narrow === true || undefined,
     directFailure: answer.degraded === true ? knownCause(text(answer.directFailure)) : undefined,
     release,
     duration: number(nested.duration) ?? 0,
