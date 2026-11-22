@@ -653,6 +653,11 @@ async function serveFilter(page, { titles = true, countsGate } = {}) {
           kinds: {
             genre: { mode: 'and', complete: true, values: { 18: 7, 53: 2 } },
             language: { mode: 'and', complete: false, values: { sv: 3 } },
+            country: {
+              mode: 'and',
+              complete: true,
+              values: { AR: 7, DE: 6, ES: 8, FR: 9, GB: 8, IT: 6, JP: 7, KR: 7, SE: 3, US: 10 },
+            },
             person: {
               mode: 'and',
               complete: false,
@@ -846,7 +851,7 @@ test('the search field finds people and characters through atlas, and a person p
   }
 });
 
-test('country Search uses each type’s strict TMDB origin discovery, interleaved', async () => {
+test('a country outside the rail restores and is searchable, using each type’s strict origin discovery', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   });
@@ -861,20 +866,48 @@ test('country Search uses each type’s strict TMDB origin discovery, interleave
     page.on('request', (r) => {
       if (r.url().includes('/discover/')) discovered.push(r.url());
     });
-    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-SE')}`);
+    await page.goto(`${FIXTURE}?at=${encodeURIComponent('/search?c=country-AR')}`);
     const cards = active(page).locator('.grid').getByRole('link');
+    const selected = active(page).getByRole('group', { name: 'Selected' });
+    await expect(selected.getByRole('button', { name: 'Remove Argentina' })).toBeVisible();
+    await expect(active(page).locator('p.status')).toHaveText('');
+    // The front-page rail stays short even though Atlas's complete country vocabulary can find Argentina.
+    await expect(
+      active(page)
+        .getByRole('navigation', { name: 'Browse by category' })
+        .getByRole('group', { name: 'Countries' })
+        .getByRole('link', { name: 'Argentina', exact: true }),
+    ).toHaveCount(0);
     await expect(cards.first()).toHaveAttribute('href', '/movie/100-film-100');
     // A film, then a series, then a film: each type's page in turn, each card opening its own type's page.
     await expect(cards.nth(1)).toHaveAttribute('href', '/tv/700-series-700');
     await expect(cards.nth(2)).toHaveAttribute('href', '/movie/101-film-101');
     // Country browsing never asks Atlas's broader co-production-country index.
-    expect(asked.some((path) => path.includes('/titles.json?sel=country:SE'))).toBe(false);
+    expect(asked.some((path) => path.includes('/titles.json?sel=country:AR'))).toBe(false);
     for (const type of ['movie', 'tv'])
       expect(
         discovered.some(
-          (url) => url.includes(`/discover/${type}?`) && url.includes('with_origin_country=SE'),
+          (url) => url.includes(`/discover/${type}?`) && url.includes('with_origin_country=AR'),
         ),
       ).toBe(true);
+
+    await selected.getByRole('button', { name: 'Remove Argentina' }).click();
+    await expect.poll(() => asked).toContain('/index/filter/all/counts.json');
+    const countries = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'Countries' });
+    const showAllCountries = countries.getByRole('button', { name: 'Show all 10 ›' });
+    await expect(showAllCountries).toBeVisible();
+    await showAllCountries.click();
+    await expect(countries.getByRole('link', { name: 'Argentina', exact: true })).toBeVisible();
+    await input(page).fill('argentina');
+    const argentina = active(page)
+      .getByRole('group', { name: 'Browse', exact: true })
+      .getByRole('link', { name: 'Argentina · country', exact: true });
+    await expect(argentina).toBeVisible();
+    await argentina.click();
+    await expect(page).toHaveURL(/\/search\?c=country-AR$/);
+    await expect(selected.getByRole('button', { name: 'Remove Argentina' })).toBeVisible();
   } finally {
     await browser.close();
   }

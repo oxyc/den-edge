@@ -191,6 +191,32 @@ const named = (type: 'language' | 'region', code: string) => {
   }
 };
 
+/**
+ * One country facet, named without requiring it to be in the deliberately short Explore rail. Atlas's country
+ * values are ISO 3166-1 alpha-2 codes; `Intl.DisplayNames` is the browser's locale data for their names.
+ */
+export function countryChip(code: string): Chip | undefined {
+  if (!/^[A-Z]{2}$/.test(code)) return undefined;
+  const curated = COUNTRIES.find(([candidate]) => candidate === code);
+  return {
+    id: `country-${code}`,
+    label: named('region', code),
+    group: 'country',
+    aliases: [...(curated ? [curated[1]] : []), ...(ALIASES[`country-${code}`] ?? [])],
+  };
+}
+
+/** Every country Atlas says this selection can contain, for typeahead and restoring linked facets — not the rail. */
+export function countryChips(answers: readonly FilterCounts[]): Chip[] {
+  const values: Record<string, number> = Object.assign(
+    {},
+    ...answers.map((answer) => answer.kinds.country?.values),
+  );
+  return Object.entries(values)
+    .flatMap(([code, count]) => (count > 0 ? (countryChip(code) ?? []) : []))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 /** A decade's other names: "90s", and "nineties" for the ones people say. */
 const DECADE_WORDS: Record<number, string> = {
   1950: 'fifties',
@@ -395,12 +421,7 @@ function vocabularyChips(type: MediaType, year: number, minYear?: number): Chip[
     label: named('language', code),
     group: 'language',
   }));
-  const countries = [...COUNTRIES, ['US', 'American'] as const].map(([code, demonym]): Chip => ({
-    id: `country-${code}`,
-    label: named('region', code),
-    group: 'country',
-    aliases: [demonym, ...(ALIASES[`country-${code}`] ?? [])],
-  }));
+  const countries = [...COUNTRIES, ['US', 'American'] as const].map(([code]) => countryChip(code)!);
   const regions = REGIONS.map(({ slug, label, aliases }): Chip => ({
     id: `region-${slug}`,
     label,
@@ -873,6 +894,9 @@ export function remapSet(
   // A person, a studio, a subject… is the same for either type; a network only a series has.
   for (const id of set)
     if (filterOnlyKind(id) && !(to === 'movie' && filterOnlyKind(id) === 'network')) known.add(id);
+  // The rail intentionally offers only a short country list. A country found through Atlas, restored from a URL,
+  // or already picked is nevertheless the same valid facet under All, Movies and Series.
+  for (const id of set) if (/^country-[A-Z]{2}$/.test(id)) known.add(id);
   const next: string[] = [];
   const dropped: string[] = [];
   for (const id of set) {
@@ -1510,6 +1534,8 @@ export function filterChips(counts: FilterCounts): Chip[] {
 
 /** A pick of a kind only atlas's filter knows, before its counts have named it: "Person…". */
 export function pendingChip(id: string): Chip | undefined {
+  const country = /^country-([A-Z]{2})$/.exec(id)?.[1];
+  if (country) return countryChip(country);
   const kind = filterOnlyKind(id);
   if (!kind) return undefined;
   const group =

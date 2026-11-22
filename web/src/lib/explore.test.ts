@@ -23,6 +23,8 @@ import {
   remapChip,
   remapSet,
   browseChips,
+  countryChip,
+  countryChips,
   namesExactly,
   slotOf,
 } from './explore';
@@ -128,6 +130,23 @@ describe('Explore chips', () => {
     expect(chipsOf(['genre-27', 'genre-999', 'country-SE'], chips).map((c) => c.label)).toEqual([
       'Horror',
       'Sweden',
+    ]);
+  });
+
+  it('keeps the rail curated but makes every country Atlas holds searchable', () => {
+    expect(exploreChips('movie').some((chip) => chip.id === 'country-AR')).toBe(false);
+    const atlas = {
+      total: 1517,
+      ignored: [],
+      kindsUnavailable: [],
+      kinds: {
+        country: { mode: 'and', complete: true, values: { AR: 705, SE: 812, ZZ: 0 } },
+      },
+    } as FilterCounts;
+    const countries = countryChips([atlas]);
+    expect(countries.map((chip) => chip.id)).toEqual(['country-AR', 'country-SE']);
+    expect(browseChips('argentina', countries)).toMatchObject([
+      { id: 'country-AR', label: 'Argentina', group: 'country' },
     ]);
   });
 });
@@ -298,6 +317,11 @@ describe('switching Movies and Series', () => {
     });
     // Two genres that fold into one are one.
     expect(remapSet(['genre-28', 'genre-12'], 'movie', 'tv', tv).set).toEqual(['genre-10759']);
+    // A country need not be in the compact rail to remain valid across type switches.
+    expect(remapSet(['country-AR'], 'all', 'tv', tv)).toEqual({
+      set: ['country-AR'],
+      dropped: [],
+    });
   });
 });
 
@@ -645,6 +669,8 @@ describe('the kinds only atlas’s filter knows', () => {
   });
 
   it('names a pick before the counts do', () => {
+    expect(countryChip('AR')).toMatchObject({ id: 'country-AR', label: 'Argentina' });
+    expect(pendingChip('country-AR')).toMatchObject({ label: 'Argentina', group: 'country' });
     expect(pendingChip('person-Q9')?.label).toBe('Person…');
     expect(pendingChip('runtime-over-150')?.label).toBe('Over 150 min');
     expect(pendingChip('genre-28')).toBeUndefined();
@@ -720,9 +746,21 @@ describe('Explore feeds', () => {
     };
     expect((await asked('lang-sv')).with_original_language).toBe('sv');
     expect((await asked('country-SE')).with_origin_country).toBe('SE');
+    expect((await asked('country-AR')).with_origin_country).toBe('AR');
     const decade = await asked('decade-1990');
     expect(decade['first_air_date.gte']).toBe('1990-01-01');
     expect(decade['first_air_date.lte']).toBe('1999-12-31');
+  });
+
+  it('keeps a linked country outside the rail in both sides of All', async () => {
+    calls.length = 0;
+    await exploreFeed(['country-AR'], 'all', sources()).load(1);
+    expect(calls.map((call) => [call.path, call.params.with_origin_country])).toEqual(
+      expect.arrayContaining([
+        ['/discover/movie', 'AR'],
+        ['/discover/tv', 'AR'],
+      ]),
+    );
   });
 
   it('browses a movie recipe as series under Series', async () => {

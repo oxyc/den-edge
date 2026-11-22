@@ -29,6 +29,7 @@
     slotOf,
     browseChips,
     countedEmptyAcross,
+    countryChips,
     pillOrder,
     type Chip,
   } from '../lib/explore';
@@ -164,10 +165,17 @@
       (chip, at, all) => all.findIndex((other) => other.id === chip.id) === at,
     ),
   );
+  // Atlas's complete country values are searchable and can name restored links, but do not turn the compact
+  // Explore rail/sheet into a list of every country.
+  const searchable = $derived(
+    [...listed, ...countryChips(filterAnswer?.answers ?? [])].filter(
+      (chip, at, all) => all.findIndex((other) => other.id === chip.id) === at,
+    ),
+  );
   const known = $derived.by(() => {
     // A pick's own name first: atlas's counts can list the same person with no label for them, which names them by
     // their bare id, and those arrive the moment the pick is made.
-    const all = [...Object.values(named), ...listed];
+    const all = [...Object.values(named), ...searchable];
     if (like) all.push(likeChip(like, likeNames[like]));
     if (fans) all.push(fansChip(fans, likeNames[fans]));
     for (const id of selection) {
@@ -421,7 +429,7 @@
     const type = exploreType;
     const key = `${type}|${selectionKey}`;
     const set = selectionKey ? selectionKey.split(',') : [];
-    if (!here || typing) return;
+    if (!here) return;
     // Country results use TMDB's strict origin-country query. Atlas counts use every Wikidata co-production
     // country, so showing them beside this selection would describe a different result set.
     if (set.some((id) => slotOf(id) === 'country' || slotOf(id) === 'region')) {
@@ -587,7 +595,7 @@
    */
   const browse = $derived(
     typing
-      ? [...browseChips(query, listed), ...found].filter(
+      ? [...browseChips(query, searchable), ...found].filter(
           (c, at, all) =>
             !selection.includes(c.id) &&
             !hidden(c.id) &&
@@ -611,6 +619,7 @@
     {/if}
     <ExploreChips
       chips={listed}
+      expandedChips={searchable}
       selected={shownSelection}
       {hidden}
       {typing}

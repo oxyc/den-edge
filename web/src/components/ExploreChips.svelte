@@ -59,6 +59,7 @@
 
   let {
     chips,
+    expandedChips = chips,
     selected,
     hidden = () => false,
     typing = false,
@@ -69,6 +70,8 @@
     limits = {},
   }: {
     chips: Chip[];
+    /** Additional values revealed only by Show all / All; the compact rail continues to use `chips`. */
+    expandedChips?: Chip[];
     /** The picked chips' ids, in the order picked. None is For You — unless a query is what's showing. */
     selected: string[];
     /** A query is typed: For You isn't open, though nothing is picked. */
@@ -96,13 +99,14 @@
   const sections = $derived(
     order.flatMap(([group, heading]) => {
       const inGroup = chips.filter((chip) => chip.group === group && open(chip));
-      return inGroup.length ? [{ group, heading, chips: inGroup }] : [];
+      const all = expandedChips.filter((chip) => chip.group === group && open(chip));
+      return inGroup.length || all.length ? [{ group, heading, chips: inGroup, all }] : [];
     }),
   );
   /** The sheet's sections: For You under a heading of its own, then the rail's. */
   const sheetSections = $derived([
     ...(forYou.length
-      ? [{ group: 'for-you' as ChipGroup, heading: 'For You', chips: forYou }]
+      ? [{ group: 'for-you' as ChipGroup, heading: 'For You', chips: forYou, all: forYou }]
       : []),
     ...sections,
   ]);
@@ -112,8 +116,8 @@
   const listed = () =>
     sections.map((section) => ({
       ...section,
-      shown: expanded[section.group] ? section.chips : section.chips.slice(0, first(section.group)),
-      more: section.chips.length > first(section.group),
+      shown: expanded[section.group] ? section.all : section.chips.slice(0, first(section.group)),
+      more: section.all.length > first(section.group),
     }));
 
   let sheet = $state<HTMLDialogElement>();
@@ -252,7 +256,7 @@
           class="toggle"
           aria-expanded={!!expanded[section.group]}
           onclick={() => (expanded = { ...expanded, [section.group]: !expanded[section.group] })}
-          >{expanded[section.group] ? 'Show fewer' : `Show all ${section.chips.length} ›`}</button
+          >{expanded[section.group] ? 'Show fewer' : `Show all ${section.all.length} ›`}</button
         >
       {/if}
     </div>
@@ -285,10 +289,10 @@
       <div class="sheet-section" role="group" aria-label={i18n.phrase(section.heading)}>
         <h3 class="heading">{i18n.phrase(section.heading)}</h3>
         <div class="row" class:spread={spread[section.group]}>
-          {#each spread[section.group] ? section.chips : section.chips.slice(0, first(section.group)) as item (item.id)}{@render chip(
+          {#each spread[section.group] ? section.all : section.chips.slice(0, first(section.group)) as item (item.id)}{@render chip(
               item,
             )}{/each}
-          {#if section.chips.length > first(section.group) && !spread[section.group]}
+          {#if section.all.length > first(section.group) && !spread[section.group]}
             <button
               type="button"
               class="chip all"
