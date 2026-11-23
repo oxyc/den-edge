@@ -436,7 +436,7 @@ async function main() {
     await fixture.context.close();
     fixture.context = await launch(fixture.browserDirectory);
     fixture.page = fixture.context.pages()[0] ?? (await fixture.context.newPage());
-    await fixture.page.goto(`${fixture.edge.origin}/movie/1002`);
+    await fixture.page.goto(`${fixture.browserOrigin}/movie/1002`);
     await fixture.page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor();
     const expectedFinalWatchlist = !ownerHeldWatchlisted;
     if (
@@ -504,6 +504,7 @@ async function main() {
     }
     await coordinator?.close().catch(() => {});
     await fixture?.context?.close().catch(() => {});
+    await fixture?.closeBrowserProxy?.().catch(() => {});
     if (fixture?.edge?.log)
       writeFileSync(join(work, 'den-edge.log'), `${fixture.edge.log.join('\n')}\n`);
     await fixture?.edge?.stop().catch(() => {});
