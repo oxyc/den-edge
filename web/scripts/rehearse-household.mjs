@@ -10,15 +10,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import {
-  cpSync,
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as listen } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -26,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { FILM_BASE, SERIES_BASE, localLibraryRows } from './rehearse-local-library.mjs';
 import { startRehearsalFixtureProxy } from './rehearse-fixture-proxy.mjs';
+import { ownRehearsalWire } from './rehearse-wire.mjs';
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(WEB, '..');
@@ -70,14 +63,7 @@ export async function loadWire() {
     server: { middlewareMode: true, ws: false },
     optimizeDeps: { noDiscovery: true },
   });
-  const core = await server.ssrLoadModule('/src/vendor/den-core/index.js');
-  await core.initialize(readFileSync(join(WEB, 'src/vendor/den-core/generated/den_core_bg.wasm')));
-  // Documents as the page reads them (den-core's `title_state`, `episode_state_v4`), for the accounting.
-  const { projectDocument, projectEpisode } = await server.ssrLoadModule('/src/lib/libraryV4.ts');
-  return {
-    wire: { ...(await server.ssrLoadModule('/src/lib/wire.ts')), projectDocument, projectEpisode },
-    close: () => server.close(),
-  };
+  return ownRehearsalWire(server, WEB);
 }
 
 /**
