@@ -17,6 +17,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { FILM_BASE, SERIES_BASE, localLibraryRows } from './rehearse-local-library.mjs';
+import {
+  rehearsalEdgeEnvironment,
+  requirePlaybackStartup,
+  settleFailedEdgeStartup,
+} from './rehearse-edge-env.mjs';
 import { startRehearsalFixtureProxy } from './rehearse-fixture-proxy.mjs';
 import { ownRehearsalWire } from './rehearse-wire.mjs';
 
@@ -104,20 +109,12 @@ const freePort = () =>
 export async function startEdge(
   dataDir,
   newLibraries = 'visitors',
-  { port: given, web = DIST } = {},
+  { denPlayback = false, port: given, web = DIST } = {},
 ) {
   const port = given ?? (await freePort());
   const log = [];
   const child = spawn(BINARY, [], {
-    env: {
-      PORT: String(port),
-      DATA_DIR: dataDir,
-      LOG_REQUESTS: '1',
-      WEB_DIR: web,
-      WEB_HOSTS: '127.0.0.1',
-      PROFILES_HOSTS: '127.0.0.1',
-      NEW_LIBRARIES: newLibraries,
-    },
+    env: rehearsalEdgeEnvironment({ dataDir, denPlayback, newLibraries, port, web }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let buffered = '';
@@ -131,14 +128,25 @@ export async function startEdge(
   const origin = `http://127.0.0.1:${port}`;
   let ready = false;
   for (let i = 0; i < 200 && !ready; i += 1) {
-    if (child.exitCode !== null) fail(`den-edge exited ${child.exitCode}:\n${log.join('\n')}`);
+    if (child.exitCode !== null || child.signalCode !== null)
+      await settleFailedEdgeStartup({
+        child,
+        exited,
+        message: `den-edge exited ${child.exitCode ?? child.signalCode}:\n${log.join('\n')}`,
+      });
     ready = await fetch(`${origin}/health`).then(
       (r) => r.ok,
       () => false,
     );
     if (!ready) await sleep(100);
   }
-  if (!ready) fail('den-edge did not answer /health');
+  if (!ready)
+    await settleFailedEdgeStartup({
+      child,
+      exited,
+      message: 'den-edge did not answer /health',
+    });
+  await requirePlaybackStartup({ child, denPlayback, exited, log });
   return {
     origin,
     port,
@@ -442,13 +450,13 @@ async function checkHousehold(label, edge, wire, kept, { title = true } = {}) {
  * implementation. Only TMDB/Atlas/artwork are fixtures (installed by `launch`); household/profile/activity rows go
  * through the built browser, its Wasm Worker and the loopback den-edge store. The caller owns every returned handle.
  */
-export async function prepareCrossHostFixture({ root = work } = {}) {
+export async function prepareCrossHostFixture({ denPlayback = false, root = work } = {}) {
   const loaded = await loadWire();
   let edge;
   let browserProxy;
   let context;
   try {
-    edge = await startEdge(join(root, 'edge-data-cross-host'));
+    edge = await startEdge(join(root, 'edge-data-cross-host'), 'visitors', { denPlayback });
     browserProxy = await startRehearsalFixtureProxy(
       () => edge.origin,
       (url) => {
