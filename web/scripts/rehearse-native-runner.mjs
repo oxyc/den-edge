@@ -4,6 +4,35 @@ const exitError = ({ code, error, signal }, phase) => {
   return new Error(`native xcodebuild exited ${code} ${phase}`);
 };
 
+const coordinatorEnvironment =
+  '<EnvironmentVariable key="DEN_CROSS_HOST_COORDINATOR" ' +
+  'value="$(DEN_CROSS_HOST_COORDINATOR)" isEnabled="YES" />';
+
+/** Build setting expanded by DenMobile's checked-in TestAction environment. */
+export function coordinatorBuildSetting(raw) {
+  const coordinator = new URL(raw);
+  if (
+    coordinator.protocol !== 'http:' ||
+    coordinator.hostname !== '127.0.0.1' ||
+    !coordinator.port ||
+    !/^\/run\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      coordinator.pathname,
+    ) ||
+    coordinator.username ||
+    coordinator.password ||
+    coordinator.search ||
+    coordinator.hash
+  )
+    throw new Error('native coordinator must be an uncredentialed loopback run URL');
+  return `DEN_CROSS_HOST_COORDINATOR=${coordinator.href}`;
+}
+
+/** Fail before spawning when the native checkout lacks the explicit TestAction transport. */
+export function verifyCoordinatorScheme(source) {
+  if (!source.includes(coordinatorEnvironment))
+    throw new Error('DenMobile scheme does not expand DEN_CROSS_HOST_COORDINATOR for tests');
+}
+
 /** Wait for sequence-zero readiness while retaining ownership of the timeout and exit observation. */
 export function waitForNativeReady(
   native,

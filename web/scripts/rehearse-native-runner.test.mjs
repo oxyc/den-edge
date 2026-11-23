@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cleanupNativeIfReady, waitForNativeReady } from './rehearse-native-runner.mjs';
+import {
+  cleanupNativeIfReady,
+  coordinatorBuildSetting,
+  verifyCoordinatorScheme,
+  waitForNativeReady,
+} from './rehearse-native-runner.mjs';
 
 const deferred = () => {
   let resolve;
@@ -41,6 +46,28 @@ const timers = () => {
     },
   };
 };
+
+test('coordinator transport accepts only the ephemeral loopback run URL and checked-in expansion', () => {
+  assert.equal(
+    coordinatorBuildSetting('http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef'),
+    'DEN_CROSS_HOST_COORDINATOR=http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+  );
+  for (const invalid of [
+    'https://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+    'http://localhost:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+    'http://127.0.0.1:43127/not-a-run',
+    'http://user@127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+  ])
+    assert.throws(() => coordinatorBuildSetting(invalid), /uncredentialed loopback run URL/);
+
+  assert.doesNotThrow(() =>
+    verifyCoordinatorScheme(
+      '<EnvironmentVariable key="DEN_CROSS_HOST_COORDINATOR" ' +
+        'value="$(DEN_CROSS_HOST_COORDINATOR)" isEnabled="YES" />',
+    ),
+  );
+  assert.throws(() => verifyCoordinatorScheme('<Scheme />'), /does not expand/);
+});
 
 test('native exit before readiness fails immediately without retaining its timer or listener', async () => {
   const exited = deferred();
