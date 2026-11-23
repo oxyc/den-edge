@@ -30,13 +30,15 @@
     browseChips,
     countedEmptyAcross,
     countryChips,
+    HISTORY_CHIPS,
+    historyFacet,
     pillOrder,
     type Chip,
   } from '../lib/explore';
   import { countItems, filterItems, groupKind } from '../lib/facetCounts';
   import { filterCountSplit, mergeFilterValues, type FilterCounts } from '../lib/filterRoutes';
   import { contentFilterCounts, contentFilterValues } from '../lib/contentAtlas';
-  import type { ExploreType, MediaType, Title } from '../lib/library';
+  import { titleKey, type ExploreType, type MediaType, type Title } from '../lib/library';
   import { navigate } from '../lib/navigation';
   import { Pager } from '../lib/pager.svelte';
   import { peopleFromExplore } from '../lib/people';
@@ -55,6 +57,7 @@
     shown = () => true,
     seeds = [],
     owned = new Set(),
+    watched,
     active = true,
   }: {
     query: string;
@@ -69,6 +72,8 @@
     seeds?: Title[];
     /** Every title the library holds, by `type:id`. */
     owned?: ReadonlySet<string>;
+    /** The active profile's authoritative watched-title keys; absent without library activity authority. */
+    watched?: ReadonlySet<string>;
     /** The page on screen, rather than one kept behind it. */
     active?: boolean;
   } = $props();
@@ -107,12 +112,14 @@
 
   // Explore and typed results both show every type until one is chosen: one `type` in the address for both.
   const exploreType = $derived<ExploreType>(explore.type ?? 'all');
-  const chipsFor = (type: ExploreType) =>
-    exploreChips(type, {
+  const chipsFor = (type: ExploreType) => [
+    ...exploreChips(type, {
       hiddenGenres: prefs.excludedGenres,
       atlas: atlas !== null,
       minYear: prefs.minReleaseYear,
-    });
+    }),
+    ...(__DEN_TV__ || watched === undefined ? [] : HISTORY_CHIPS),
+  ];
   /** The facets picked, as the address holds them; a string, so an identical list is not a new one. */
   const selectionKey = $derived((explore.chips ?? []).join(','));
   const selection = $derived(selectionKey ? selectionKey.split(',') : []);
@@ -175,7 +182,7 @@
   const known = $derived.by(() => {
     // A pick's own name first: atlas's counts can list the same person with no label for them, which names them by
     // their bare id, and those arrive the moment the pick is made.
-    const all = [...Object.values(named), ...searchable];
+    const all = [...Object.values(named), ...searchable, ...(__DEN_TV__ ? [] : HISTORY_CHIPS)];
     if (like) all.push(likeChip(like, likeNames[like]));
     if (fans) all.push(fansChip(fans, likeNames[fans]));
     for (const id of selection) {
@@ -228,20 +235,52 @@
       .join(' ');
   });
 
+  /** Personal facets stay local: catalog providers receive only the title facts they understand. */
+  const catalogSelection = $derived(selection.filter((id) => historyFacet(id) === undefined));
+  const history = $derived(
+    __DEN_TV__ ? undefined : selection.map(historyFacet).find((value) => value !== undefined),
+  );
+  const historyUnavailable = $derived(history !== undefined && watched === undefined);
+  const historyAdmits = (title: Title) =>
+    history === undefined || (watched !== undefined && watched.has(titleKey(title)) === history);
+  const watchedRefs = $derived.by(() =>
+    [...(watched ?? [])].flatMap((key): { type: MediaType; id: number }[] => {
+      const [type, raw] = key.split(':');
+      const id = Number(raw);
+      return (type === 'movie' || type === 'tv') && Number.isInteger(id) && id > 0
+        ? [{ type, id }]
+        : [];
+    }),
+  );
+
   // The selection's feed. Only the selection, and what reaches content and atlas, start it again: a new seed or a write
   // elsewhere must not empty a grid someone is scrolling. It waits while a query is typed, and is still where it
   // was once the query is cleared.
   const feed = $derived.by(() => {
-    const row = exploreFeed(selectionKey ? selectionKey.split(',') : [], exploreType, {
-      pages: contentPages(content),
-      atlas,
-      seeds: untrack(() => seeds),
-      owned: untrack(() => owned),
-      minYear,
-      title,
-      content,
-    });
-    const admitted = (title: Title) => shown(title) && (row.filter?.(title) ?? true);
+    const refs = watchedRefs.filter((ref) => exploreType === 'all' || ref.type === exploreType);
+    const row =
+      history === true && !catalogSelection.length
+        ? {
+            id: `seen-${exploreType}`,
+            title: 'Seen',
+            load: async (page: number, signal?: AbortSignal) => {
+              const batch = refs.slice((page - 1) * 20, page * 20);
+              return batch.length
+                ? (await content.query({ kind: 'titles', titles: batch }, signal)).titles
+                : [];
+            },
+          }
+        : exploreFeed(catalogSelection, exploreType, {
+            pages: contentPages(content),
+            atlas,
+            seeds: untrack(() => seeds),
+            owned: untrack(() => owned),
+            minYear,
+            title,
+            content,
+          });
+    const admitted = (title: Title) =>
+      !historyUnavailable && historyAdmits(title) && shown(title) && (row.filter?.(title) ?? true);
     return { pager: new Pager(row.load, admitted), admitted };
   });
   const feedHits = $derived(
@@ -365,9 +404,11 @@
   const typedHits = $derived(
     (hits ?? []).filter((hit) =>
       hit.kind === 'person'
-        ? explore.type === undefined && narrowing.length === 0
+        ? history === undefined && explore.type === undefined && narrowing.length === 0
         : (explore.type === undefined || hit.title.type === explore.type) &&
-          narrowing.every((genre) => inGenre(hit.title, genre)),
+          narrowing.every((genre) => inGenre(hit.title, genre)) &&
+          !historyUnavailable &&
+          historyAdmits(hit.title),
     ),
   );
 
@@ -377,13 +418,14 @@
    * stays: a rail genre narrows it, a pill taken out leaves it; anything else opens the selection's feed in the
    * query's place — a new entry, so Back returns to the search.
    */
-  function pick(id: string, keepQuery = typing && slotOf(id) === 'genre') {
+  const narrowsTyped = (id: string) => slotOf(id) === 'genre' || slotOf(id) === 'history';
+  function pick(id: string, keepQuery = typing && narrowsTyped(id)) {
     const { href, note } = picking(id, keepQuery);
     status = note;
     navigate(href);
   }
   /** Where picking `id` leads, and what the status line then says gave way to it. */
-  function picking(id: string, keepQuery = typing && slotOf(id) === 'genre') {
+  function picking(id: string, keepQuery = typing && narrowsTyped(id)) {
     const { set, removed } = applyPick(selection, id, exploreType, filtered);
     const label = known.find((c) => c.id === id)?.label ?? '';
     return {
@@ -393,9 +435,7 @@
   }
 
   /** What the rail treats as picked: everything, or while typing only the genres that narrow the results. */
-  const shownSelection = $derived(
-    typing ? selection.filter((id) => slotOf(id) === 'genre') : selection,
-  );
+  const shownSelection = $derived(typing ? selection.filter(narrowsTyped) : selection);
   /**
    * Every pick, over the grid, a kind's values side by side where atlas's filter takes them as either-or. While a
    * query is typed, all but the genres wait: shown, but paused.
@@ -406,7 +446,7 @@
         chipsOf([id], known).map((chip) => ({
           chip,
           or,
-          paused: typing && slotOf(chip.id) !== 'genre',
+          paused: typing && !narrowsTyped(chip.id),
         })),
     ),
   );
@@ -428,7 +468,7 @@
     const here = atlas;
     const type = exploreType;
     const key = `${type}|${selectionKey}`;
-    const set = selectionKey ? selectionKey.split(',') : [];
+    const set = catalogSelection;
     if (!here) return;
     // Country results use TMDB's strict origin-country query. Atlas counts use every Wikidata co-production
     // country, so showing them beside this selection would describe a different result set.
@@ -492,7 +532,7 @@
     const text = query.trim();
     const here = atlas;
     const type = exploreType;
-    const set = selectionKey ? selectionKey.split(',') : [];
+    const set = catalogSelection;
     found = [];
     if (!here || text.length < 2) return;
     const ask = new AbortController();
@@ -699,6 +739,8 @@
         />
         {#if hits === null}
           <Loading label="Searching" />
+        {:else if historyUnavailable}
+          <p class="note" role="status">Link a library to filter titles by what you’ve seen.</p>
         {:else if typedHits.length}
           <div class:stale={pending}>
             <SearchResults hits={typedHits} onopen={() => rememberSearch(query)} />
@@ -717,7 +759,9 @@
             {/each}
           </div>
         {/if}
-        {#if feedHits.length}
+        {#if historyUnavailable}
+          <p class="note" role="status">Link a library to filter titles by what you’ve seen.</p>
+        {:else if feedHits.length}
           <SearchResults hits={feedHits} onend={() => void feed.pager.more()} />
         {:else if feed.pager.done && !feed.pager.failed && culprit}
           <p class="note empty" role="status">

@@ -543,6 +543,80 @@ test('while typing, a genre narrows the results and a recipe opens in their plac
   }
 });
 
+test('Seen and Not seen filter typed title results from this profile only', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+      reducedMotion: 'reduce',
+    });
+    await setup(page);
+    await page.goto(`${FIXTURE}?fixtureWatched=100,102`);
+    await openSearch(page, 1280);
+    await input(page).fill('Neon');
+
+    const search = active(page);
+    const personal = search
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'For You' });
+    const selected = search.getByRole('group', { name: 'Selected' });
+    await personal.getByRole('link', { name: 'Seen', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=seen$/);
+    await expect(selected.getByRole('button', { name: 'Remove Seen' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 102 2026' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 101 2026' })).toHaveCount(0);
+
+    // With no text, Seen browses the profile's watched titles instead of relying on a public catalog feed.
+    await input(page).fill('');
+    await expect(page).toHaveURL(/\/search\?c=seen$/);
+    await expect(search.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 102 2026' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 101 2026' })).toHaveCount(0);
+    await input(page).fill('Neon');
+
+    // It is a title-only filter and stays selected while the media type changes.
+    await search.locator('.controls').getByRole('link', { name: 'Series', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&type=tv&c=seen$/);
+    await expect(search.getByText('No matches.', { exact: true })).toBeVisible();
+    await search.locator('.controls').getByRole('link', { name: 'All', exact: true }).click();
+
+    await selected.getByRole('button', { name: 'Remove Seen' }).click();
+    await personal.getByRole('link', { name: 'Not seen', exact: true }).click();
+    await expect(page).toHaveURL(/\/search\?q=Neon&c=not-seen$/);
+    await expect(selected.getByRole('button', { name: 'Remove Not seen' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 101 2026' })).toBeVisible();
+    await expect(search.getByRole('link', { name: 'Film 100 2026' })).toHaveCount(0);
+    await expect(search.getByRole('link', { name: 'Film 102 2026' })).toHaveCount(0);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('viewing filters are absent without profile activity authority', async () => {
+  const browser = await chromium.launch({
+    executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    await setup(page);
+    await page.goto(`${FIXTURE}?fixtureGuest`);
+    await openSearch(page, 1280);
+    await input(page).fill('Neon');
+    const personal = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'For You' });
+    await expect(personal.getByRole('link', { name: 'For You', exact: true })).toBeVisible();
+    await expect(personal.getByRole('link', { name: 'Seen', exact: true })).toHaveCount(0);
+    await expect(personal.getByRole('link', { name: 'Not seen', exact: true })).toHaveCount(0);
+    await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
+  } finally {
+    await browser.close();
+  }
+});
+
 test('facets stack: Sweden, then + Action, narrows the grid; Back takes Action out', async () => {
   const browser = await chromium.launch({
     executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,

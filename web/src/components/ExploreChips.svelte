@@ -1,4 +1,4 @@
-<!-- Search's Explore categories (the TV's Explore rail): For You, then atlas's moods, the recipes, the genres, and the
+<!-- Search's Explore categories (the TV's Explore rail): personal picks, then atlas's moods, the recipes, the genres, and the
      languages, countries, decades and rating floors — the first two say what a genre can't, so they lead. Each shows its strongest
      few, and "Show all" the rest, so every kind can be browsed without typing; typed into, the nav field finds them
      too (Search's Browse row).
@@ -93,9 +93,12 @@
     limits?: Partial<Record<ChipGroup, number>>;
   } = $props();
 
-  const forYou = $derived(chips.filter((chip) => chip.group === 'for-you'));
   /** What can still be added: not picked, not hidden. */
   const open = (chip: Chip) => !selected.includes(chip.id) && !hidden(chip.id);
+  /** Recommendations and profile history are one personal group, not one pick followed by a two-pick section. */
+  const personal = $derived(
+    chips.filter((chip) => (chip.group === 'for-you' || chip.group === 'history') && open(chip)),
+  );
   const sections = $derived(
     order.flatMap(([group, heading]) => {
       const inGroup = chips.filter((chip) => chip.group === group && open(chip));
@@ -103,10 +106,10 @@
       return inGroup.length || all.length ? [{ group, heading, chips: inGroup, all }] : [];
     }),
   );
-  /** The sheet's sections: For You under a heading of its own, then the rail's. */
+  /** The sheet's sections: the personal picks under For You, then the rail's. */
   const sheetSections = $derived([
-    ...(forYou.length
-      ? [{ group: 'for-you' as ChipGroup, heading: 'For You', chips: forYou, all: forYou }]
+    ...(personal.length
+      ? [{ group: 'for-you' as ChipGroup, heading: 'For You', chips: personal, all: personal }]
       : []),
     ...sections,
   ]);
@@ -233,7 +236,7 @@
 
 {#if !typing}
   <nav class="strip" aria-label="Browse by category">
-    {#each [...forYou, ...sections
+    {#each [...personal, ...sections
         .filter((s) => strip.includes(s.group))
         .flatMap((s) => s.chips.slice(0, STRIP_FIRST))] as item (item.id)}
       {@render chip(item)}
@@ -264,7 +267,15 @@
 {/snippet}
 
 <nav class="rail" aria-label="Browse by category">
-  {#each forYou as item (item.id)}{@render chip(item)}{/each}
+  {#if personal.length}
+    {#if __DEN_TV__}
+      {#each personal as item (item.id)}{@render chip(item)}{/each}
+    {:else}
+      <div class="personal" role="group" aria-label="For You">
+        {#each personal as item (item.id)}{@render chip(item)}{/each}
+      </div>
+    {/if}
+  {/if}
   {@render sectioned()}
 </nav>
 
@@ -419,6 +430,7 @@
     }
 
     .section,
+    .personal,
     .rail .list {
       display: flex;
       flex-direction: column;

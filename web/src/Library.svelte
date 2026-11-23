@@ -3096,9 +3096,10 @@
     content={session.content}
     {atlas}
     {prefs}
-    shown={browseShown}
+    shown={explore.chips?.includes('seen') ? shown : browseShown}
     seeds={[...seeds.watched, ...seeds.watchlisted]}
     owned={seeds.owned}
+    watched={!__DEN_TV__ && (model || profileActivity) ? watched : undefined}
     {active}
   />
 {:else if route.page === 'people' && !PeopleScreen.current}

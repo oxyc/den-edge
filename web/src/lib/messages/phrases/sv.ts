@@ -568,6 +568,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Library update required': 'Biblioteksuppdatering krävs',
   'Link “': 'Länk "',
   'Link a TV': 'Länka en TV',
+  'Link a library to filter titles by what you’ve seen.':
+    'Länka ett bibliotek för att filtrera titlar efter vad du har sett.',
   'Link another device': 'Länka en annan enhet',
   'Link code, twelve characters': 'Länkkod, tolv tecken',
   'Link this browser': 'Länka den här webbläsaren',

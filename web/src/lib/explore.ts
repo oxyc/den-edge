@@ -55,6 +55,7 @@ const genreType = (type: ExploreType): MediaType => (type === 'tv' ? 'tv' : 'mov
  */
 export type ChipGroup =
   | 'for-you'
+  | 'history'
   | 'genre'
   | 'recipe'
   | 'mood'
@@ -97,9 +98,20 @@ export interface Chip {
   kind?: string;
 }
 
+/** Personal title-state filters. Their verdict comes from the active profile, never Atlas or TMDB. */
+export const HISTORY_CHIPS: readonly Chip[] = [
+  { id: 'seen', label: 'Seen', group: 'history', aliases: ['watched'] },
+  { id: 'not-seen', label: 'Not seen', group: 'history', aliases: ['unseen', 'unwatched'] },
+];
+
+/** Whether a facet asks for titles the active profile has or has not seen. */
+export const historyFacet = (id: string): boolean | undefined =>
+  id === 'seen' ? true : id === 'not-seen' ? false : undefined;
+
 /** A chip's kind as a word, for the muted label beside a Browse-row chip: "Swedish · language". */
 export const KIND: Record<ChipGroup, string> = {
   'for-you': '',
+  history: 'viewing',
   mood: 'mood',
   recipe: 'recipe',
   genre: 'genre',
@@ -696,6 +708,7 @@ export const namesExactly = (text: string, chip: Chip) =>
  * studios, subjects…), but a runtime and whether it is animated, which a title has one of.
  */
 export type Slot =
+  | 'history'
   | 'genre'
   | 'language'
   | 'country'
@@ -712,6 +725,7 @@ export type Slot =
 
 /** The slots that hold one value: once it is picked, no other of its kind is offered until it is removed. */
 const SINGLE: ReadonlySet<Slot | undefined> = new Set<Slot>([
+  'history',
   'language',
   'country',
   'region',
@@ -740,6 +754,7 @@ const ONE_WHERE_FILTERED: ReadonlySet<Slot | undefined> = new Set<Slot>([
 
 export function slotOf(id: string): Slot | undefined {
   if (id === FOR_YOU) return undefined;
+  if (historyFacet(id) !== undefined) return 'history';
   if (likeOf(id)) return 'like';
   if (fansOf(id)) return 'fans';
   const only = filterOnlyKind(id);

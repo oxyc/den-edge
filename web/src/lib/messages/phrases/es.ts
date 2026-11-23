@@ -582,6 +582,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Library update required': 'Se requiere actualización de la biblioteca',
   'Link “': 'Enlace “',
   'Link a TV': 'Vincular un televisor',
+  'Link a library to filter titles by what you’ve seen.':
+    'Vincula una biblioteca para filtrar títulos según lo que hayas visto.',
   'Link another device': 'Vincular otro dispositivo',
   'Link code, twelve characters': 'Código de enlace, doce caracteres',
   'Link this browser': 'Vincular este navegador',
