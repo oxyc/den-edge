@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import {
   cleanupNativeIfReady,
@@ -10,6 +10,7 @@ import {
   generatedCoordinatorEnvironment,
   generatedXCTestRuns,
   injectCoordinatorEnvironment,
+  injectedXCTestRunPath,
   nativeBuildArguments,
   nativeTestArguments,
   prepareInjectedXCTestRun,
@@ -222,9 +223,11 @@ test('generated xctestrun discovery resolves cwd-relative Node glob matches', ()
 
 test('xctestrun injection round-trips a run-owned copy and leaves canonical output unchanged', () => {
   const root = mkdtempSync(join(tmpdir(), 'den-xctestrun-test-'));
-  const canonicalPath = join(root, 'Canonical.xctestrun');
-  const injectedPath = join(root, 'NativeCrossHost.xctestrun');
-  const temporaryJSONPath = join(root, 'NativeCrossHost.xctestrun.json');
+  const products = join(root, 'DerivedData', 'Build', 'Products');
+  mkdirSync(products, { recursive: true });
+  const canonicalPath = join(products, 'Canonical.xctestrun');
+  const injectedPath = injectedXCTestRunPath(canonicalPath);
+  const temporaryJSONPath = `${injectedPath}.json`;
   const origin = 'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef';
   try {
     writeFileSync(
@@ -236,15 +239,29 @@ test('xctestrun injection round-trips a run-owned copy and leaves canonical outp
         },
         DenMobileUITests: {
           BlueprintName: 'DenMobileUITests',
+          DependentProductPaths: [
+            '__TESTROOT__/Debug-iphonesimulator/Den.app',
+            '__TESTROOT__/Debug-iphonesimulator/DenMobileUITests-Runner.app',
+          ],
           EnvironmentVariables: { EXISTING: 'preserved' },
           IsUITestBundle: true,
+          TestBundlePath:
+            '__TESTROOT__/Debug-iphonesimulator/DenMobileUITests-Runner.app/PlugIns/DenMobileUITests.xctest',
+          TestingEnvironmentVariables: {
+            DYLD_FRAMEWORK_PATH:
+              '__TESTROOT__/Debug-iphonesimulator:__TESTROOT__/Debug-iphonesimulator/PackageFrameworks',
+          },
         },
         __xctestrun_metadata__: {
           FormatVersion: 2,
         },
       }),
     );
-    const before = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
+    const canonicalBefore = readFileSync(canonicalPath);
+    const before = createHash('sha256').update(canonicalBefore).digest('hex');
+    assert.equal(dirname(injectedPath), dirname(canonicalPath));
+    assert.notEqual(injectedPath, canonicalPath);
+    assert.notEqual(basename(injectedPath), basename(canonicalPath));
     const readDocument = (path) => JSON.parse(readFileSync(path, 'utf8'));
     const writeDocument = (document, output, temporary) => {
       writeFileSync(temporary, JSON.stringify(document));
@@ -260,11 +277,49 @@ test('xctestrun injection round-trips a run-owned copy and leaves canonical outp
     });
     const after = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
     assert.equal(after, before);
+    assert.deepEqual(readFileSync(canonicalPath), canonicalBefore);
     assert.equal(existsSync(temporaryJSONPath), false);
     const injected = readDocument(injectedPath);
     assert.equal(generatedCoordinatorEnvironment(injected), origin);
     assert.equal(injected.DenMobileUITests.EnvironmentVariables.EXISTING, 'preserved');
     assert.equal(injected.DenMobileTests.EnvironmentVariables.UNIT, 'preserved');
+    assert.deepEqual(injected.DenMobileUITests.DependentProductPaths, [
+      '__TESTROOT__/Debug-iphonesimulator/Den.app',
+      '__TESTROOT__/Debug-iphonesimulator/DenMobileUITests-Runner.app',
+    ]);
+    assert.equal(
+      injected.DenMobileUITests.TestBundlePath,
+      '__TESTROOT__/Debug-iphonesimulator/DenMobileUITests-Runner.app/PlugIns/DenMobileUITests.xctest',
+    );
+    assert.equal(
+      injected.DenMobileUITests.TestingEnvironmentVariables.DYLD_FRAMEWORK_PATH,
+      '__TESTROOT__/Debug-iphonesimulator:__TESTROOT__/Debug-iphonesimulator/PackageFrameworks',
+    );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+});
+
+test('xctestrun injection rejects an equal or non-sibling output path before copying', () => {
+  const root = mkdtempSync(join(tmpdir(), 'den-xctestrun-boundary-'));
+  const canonicalPath = join(root, 'Canonical.xctestrun');
+  const origin = 'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef';
+  try {
+    writeFileSync(canonicalPath, 'canonical');
+    for (const injectedPath of [canonicalPath, join(root, 'nested', 'Injected.xctestrun')]) {
+      assert.throws(
+        () =>
+          prepareInjectedXCTestRun({
+            canonicalPath,
+            injectedPath,
+            origin,
+            temporaryJSONPath: `${injectedPath}.json`,
+          }),
+        /paths must be distinct siblings/,
+      );
+      assert.equal(readFileSync(canonicalPath, 'utf8'), 'canonical');
+      assert.equal(existsSync(injectedPath), injectedPath === canonicalPath);
+    }
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
