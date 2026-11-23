@@ -25,6 +25,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { FILM_BASE, SERIES_BASE, localLibraryRows } from './rehearse-local-library.mjs';
+import { startRehearsalFixtureProxy } from './rehearse-fixture-proxy.mjs';
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(WEB, '..');
@@ -458,12 +459,24 @@ async function checkHousehold(label, edge, wire, kept, { title = true } = {}) {
 export async function prepareCrossHostFixture({ root = work } = {}) {
   const loaded = await loadWire();
   const edge = await startEdge(join(root, 'edge-data-cross-host'));
+  const browserProxy = await startRehearsalFixtureProxy(
+    () => edge.origin,
+    (url) => {
+      if (url.pathname.startsWith('/tmdb/3/')) return { body: metadataFixture(url.href) };
+      if (url.pathname === '/atlas/manifest.json')
+        return { body: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } };
+      if (url.pathname.startsWith('/atlas/index/title/movie/')) return { body: { minimumAge: 0 } };
+      if (url.pathname.startsWith('/atlas/')) return { status: 404, body: { error: 'not_found' } };
+      return undefined;
+    },
+  );
   const browserDirectory = join(root, 'browser-cross-host');
   let context = await launch(browserDirectory);
   let page = await firstPage(context);
   try {
-    await lookAround(page, edge);
-    await openTitle(page, edge);
+    const browserEdge = { origin: browserProxy.origin };
+    await lookAround(page, browserEdge);
+    await openTitle(page, browserEdge);
     const kept = await plan(page);
     if (!kept?.householdKey || !kept?.ownerKey)
       throw new Error('browser did not stage a household plan');
@@ -479,7 +492,7 @@ export async function prepareCrossHostFixture({ root = work } = {}) {
 
     context = await launch(browserDirectory);
     page = await firstPage(context);
-    await openTitle(page, edge);
+    await openTitle(page, browserEdge);
     if (!(await switcherShowsAll(page)))
       throw new Error('profile switcher did not expose Owner, Kid and Visitor');
     await page.getByRole('button', { name: 'Use Kids' }).click();
@@ -501,19 +514,23 @@ export async function prepareCrossHostFixture({ root = work } = {}) {
       context,
       page,
       browserDirectory,
+      browserOrigin: browserProxy.origin,
       kept,
       household,
       kid,
       pin: PIN,
       closeWire: loaded.close,
+      closeBrowserProxy: browserProxy.close,
       close: async () => {
         await context.close();
+        await browserProxy.close();
         await edge.stop();
         await loaded.close();
       },
     };
   } catch (error) {
     await context.close().catch(() => {});
+    await browserProxy.close().catch(() => {});
     await edge.stop().catch(() => {});
     await loaded.close().catch(() => {});
     throw error;
