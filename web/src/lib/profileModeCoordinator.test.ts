@@ -1197,6 +1197,182 @@ describe('ProfileModeCoordinator', () => {
     expect(models.handles[0]!.model.close).toHaveBeenCalledOnce();
   });
 
+  it('does not seed the initial Owner model after marker restoration replaces it', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    // A separate household control model makes the already-open Owner activity model require preference seeding.
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const rawPreferences = vi.fn(async () => ({}));
+    const seedPreferences = vi.fn(async () => {
+      throw new Error('library model is closed');
+    });
+    Object.assign(first.householdModel, { ready: Promise.resolve(), rawPreferences });
+    Object.assign(first.model, { ready: Promise.resolve(), seedPreferences });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(rawPreferences).not.toHaveBeenCalled();
+    expect(seedPreferences).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalledWith(
+      'den: profile preference seeding failed',
+      expect.anything(),
+    );
+    warning.mockRestore();
+    first.coordinator.dispose();
+  });
+
+  it('does not seed a profile retired while household preferences are being read', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const preferences = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const rawPreferences = vi.fn(() => preferences.promise);
+    const seedPreferences = vi.fn(async () => undefined);
+    Object.assign(first.householdModel, { ready: Promise.resolve(), rawPreferences });
+    Object.assign(models.handles[0]!.model, { seedPreferences });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    await vi.waitFor(() => expect(rawPreferences).toHaveBeenCalledOnce());
+    first.coordinator.dispose();
+    preferences.resolve({});
+    for (let turn = 0; turn < 4; turn++) await Promise.resolve();
+
+    expect(seedPreferences).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalledWith(
+      'den: profile preference seeding failed',
+      expect.anything(),
+    );
+    warning.mockRestore();
+  });
+
+  it('finishes seeding the active profile across an equal directory handover', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const preferences = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const rawPreferences = vi.fn(() => preferences.promise);
+    const seedPreferences = vi.fn(async () => undefined);
+    Object.assign(first.householdModel, { ready: Promise.resolve(), rawPreferences });
+    Object.assign(models.handles[0]!.model, { seedPreferences });
+
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    await vi.waitFor(() => expect(rawPreferences).toHaveBeenCalledOnce());
+    first.coordinator.updateDirectory(profileDirectoryChoices(view)!);
+    preferences.resolve({ watchRegion: 'fi' });
+    await vi.waitFor(() => expect(seedPreferences).toHaveBeenCalledWith({ watchRegion: 'fi' }));
+    expect(first.coordinator.mode).toBe('kid');
+    first.coordinator.dispose();
+  });
+
+  it('reports preference seeding failure for a profile that remains active', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const failure = new Error('seed refused');
+    Object.assign(first.householdModel, {
+      ready: Promise.resolve(),
+      rawPreferences: vi.fn(async () => ({})),
+    });
+    Object.assign(models.handles[0]!.model, {
+      seedPreferences: vi.fn(async () => {
+        throw failure;
+      }),
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    opening.resolve({});
+    await vi.waitFor(() => expect(first.coordinator.mode).toBe('kid'));
+    await vi.waitFor(() =>
+      expect(warning).toHaveBeenCalledWith('den: profile preference seeding failed', failure),
+    );
+    expect(first.coordinator.session?.model).toBe(models.handles[0]!.model);
+    warning.mockRestore();
+    first.coordinator.dispose();
+  });
+
+  it('tries preference seeding again when the active profile is reopened after a failure', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const failure = new Error('seed refused');
+    Object.assign(first.householdModel, {
+      ready: Promise.resolve(),
+      rawPreferences: vi.fn(async () => ({ 'den.watchRegion': { value: { string: 'FI' } } })),
+    });
+    Object.assign(models.handles[0]!.model, {
+      seedPreferences: vi.fn(async () => {
+        throw failure;
+      }),
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    opening.resolve({});
+    await vi.waitFor(() =>
+      expect(warning).toHaveBeenCalledWith('den: profile preference seeding failed', failure),
+    );
+    first.coordinator.dispose();
+
+    const second = owner(storage, true, null, undefined, directory, models.factory, true);
+    const household = { 'den.watchRegion': { value: { string: 'SE' } } };
+    const retry = vi.fn(async () => undefined);
+    Object.assign(second.householdModel, {
+      ready: Promise.resolve(),
+      rawPreferences: vi.fn(async () => household),
+    });
+    Object.assign(models.handles[1]!.model, { seedPreferences: retry });
+
+    await vi.waitFor(() => expect(second.coordinator.mode).toBe('kid'));
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledWith(household));
+    expect(warning).toHaveBeenCalledTimes(1);
+    warning.mockRestore();
+    second.coordinator.dispose();
+  });
+
   it('opens a remembered Kid once, however soon the page hands over the same directory again', async () => {
     const storage = memoryStorage();
     const view = realDirectoryView();

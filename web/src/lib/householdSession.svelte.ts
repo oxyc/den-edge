@@ -82,11 +82,18 @@ export class HouseholdSession {
    * Give a profile library the preferences an older household still holds that it has not decided (profiles-v1
    * §6.3). The household's values are read and handed over here, never lent to the profile.
    */
-  async seedProfilePreferences(profile: LibraryModel): Promise<void> {
+  async seedProfilePreferences(
+    profile: LibraryModel,
+    current: () => boolean = () => true,
+  ): Promise<void> {
     if (!this.#model || profile === this.#model) return;
     await this.#model.ready;
     await profile.ready;
-    await profile.seedPreferences(await this.#model.rawPreferences());
+    const preferences = await this.#model.rawPreferences();
+    // Reading household preferences can outlive the profile transition that requested it. Check immediately before
+    // the synchronous command handoff so a replacement/disposal never commands the model it just retired.
+    if (!current()) return;
+    await profile.seedPreferences(preferences);
   }
 
   /** Change a Kid's content policy; the household control model owns the directory, the Owner PIN authorizes it. */
