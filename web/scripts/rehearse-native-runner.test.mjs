@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -196,15 +195,24 @@ test('xctestrun injection round-trips a run-owned copy and leaves canonical outp
         ],
       }),
     );
-    execFileSync('plutil', ['-convert', 'binary1', canonicalPath]);
     const before = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
-    prepareInjectedXCTestRun({ canonicalPath, injectedPath, origin, temporaryJSONPath });
+    const readDocument = (path) => JSON.parse(readFileSync(path, 'utf8'));
+    const writeDocument = (document, output, temporary) => {
+      writeFileSync(temporary, JSON.stringify(document));
+      writeFileSync(output, readFileSync(temporary));
+    };
+    prepareInjectedXCTestRun({
+      canonicalPath,
+      injectedPath,
+      origin,
+      readDocument,
+      temporaryJSONPath,
+      writeDocument,
+    });
     const after = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
     assert.equal(after, before);
     assert.equal(existsSync(temporaryJSONPath), false);
-    const injected = JSON.parse(
-      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
-    );
+    const injected = readDocument(injectedPath);
     assert.equal(generatedCoordinatorEnvironment(injected), origin);
     assert.equal(
       injected.TestConfigurations[0].TestTargets[0].EnvironmentVariables.EXISTING,
