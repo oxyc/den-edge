@@ -10,21 +10,20 @@
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import {
-  cpSync,
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as listen } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { FILM_BASE, SERIES_BASE, localLibraryRows } from './rehearse-local-library.mjs';
+import {
+  rehearsalEdgeEnvironment,
+  requirePlaybackStartup,
+  settleFailedEdgeStartup,
+} from './rehearse-edge-env.mjs';
+import { startRehearsalFixtureProxy } from './rehearse-fixture-proxy.mjs';
+import { ownRehearsalWire } from './rehearse-wire.mjs';
 
 const WEB = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(WEB, '..');
@@ -32,6 +31,8 @@ const BINARY = process.env.DEN_EDGE_BIN ?? join(ROOT, 'target/debug/den-edge');
 const DIST = process.env.REHEARSE_DIST ?? join(WEB, 'dist');
 const KEEP = process.env.REHEARSE_KEEP === '1';
 const HEADED = process.argv.includes('--headed');
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 // `--only=<scenario>` runs one scenario (a function name below) instead of all of them.
 const ONLY = process.argv.find((arg) => arg.startsWith('--only='))?.slice('--only='.length);
 const PIN = '1234';
@@ -45,7 +46,9 @@ function fail(message) {
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-const work = mkdtempSync(join(tmpdir(), 'den-household-'));
+// Imported helpers always receive an explicit root. Allocate standalone scratch only for this script's own run,
+// so an importing rehearsal cannot leak an unused household directory on KEEP or an early failure.
+const work = invokedDirectly ? mkdtempSync(join(tmpdir(), 'den-household-')) : undefined;
 const results = [];
 const check = (name, ok, detail = '') => {
   results.push({ name, ok, detail });
@@ -55,7 +58,7 @@ const check = (name, ok, detail = '') => {
 const step = (message) => console.log(`\n== ${message}`);
 
 // --- the app's own wire code, through Vite, to open what den-edge holds ---
-async function loadWire() {
+export async function loadWire() {
   const { createServer } = await import('vite');
   const server = await createServer({
     root: WEB,
@@ -65,14 +68,7 @@ async function loadWire() {
     server: { middlewareMode: true, ws: false },
     optimizeDeps: { noDiscovery: true },
   });
-  const core = await server.ssrLoadModule('/src/vendor/den-core/index.js');
-  await core.initialize(readFileSync(join(WEB, 'src/vendor/den-core/generated/den_core_bg.wasm')));
-  // Documents as the page reads them (den-core's `title_state`, `episode_state_v4`), for the accounting.
-  const { projectDocument, projectEpisode } = await server.ssrLoadModule('/src/lib/libraryV4.ts');
-  return {
-    wire: { ...(await server.ssrLoadModule('/src/lib/wire.ts')), projectDocument, projectEpisode },
-    close: () => server.close(),
-  };
+  return ownRehearsalWire(server, WEB);
 }
 
 /**
@@ -110,19 +106,15 @@ const freePort = () =>
  * den-edge on its own data. `port` keeps the origin of an earlier run, so a browser finds what it kept there; `web` is
  * the app it serves.
  */
-async function startEdge(dataDir, newLibraries = 'visitors', { port: given, web = DIST } = {}) {
+export async function startEdge(
+  dataDir,
+  newLibraries = 'visitors',
+  { denPlayback = false, port: given, web = DIST } = {},
+) {
   const port = given ?? (await freePort());
   const log = [];
   const child = spawn(BINARY, [], {
-    env: {
-      PORT: String(port),
-      DATA_DIR: dataDir,
-      LOG_REQUESTS: '1',
-      WEB_DIR: web,
-      WEB_HOSTS: '127.0.0.1',
-      PROFILES_HOSTS: '127.0.0.1',
-      NEW_LIBRARIES: newLibraries,
-    },
+    env: rehearsalEdgeEnvironment({ dataDir, denPlayback, newLibraries, port, web }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let buffered = '';
@@ -136,14 +128,25 @@ async function startEdge(dataDir, newLibraries = 'visitors', { port: given, web 
   const origin = `http://127.0.0.1:${port}`;
   let ready = false;
   for (let i = 0; i < 200 && !ready; i += 1) {
-    if (child.exitCode !== null) fail(`den-edge exited ${child.exitCode}:\n${log.join('\n')}`);
+    if (child.exitCode !== null || child.signalCode !== null)
+      await settleFailedEdgeStartup({
+        child,
+        exited,
+        message: `den-edge exited ${child.exitCode ?? child.signalCode}:\n${log.join('\n')}`,
+      });
     ready = await fetch(`${origin}/health`).then(
       (r) => r.ok,
       () => false,
     );
     if (!ready) await sleep(100);
   }
-  if (!ready) fail('den-edge did not answer /health');
+  if (!ready)
+    await settleFailedEdgeStartup({
+      child,
+      exited,
+      message: 'den-edge did not answer /health',
+    });
+  await requirePlaybackStartup({ child, denPlayback, exited, log });
   return {
     origin,
     port,
@@ -161,7 +164,7 @@ const libraryWrites = (edge, from = 0) =>
   edge.log.slice(from).filter((line) => /^(POST|PUT|DELETE) \/lib\//.test(line));
 
 /** A library as den-edge holds it, opened with the app's code: rows, its directory and its wire minimum. */
-async function readLibrary(edge, wire, keyText) {
+export async function readLibrary(edge, wire, keyText) {
   const keys = await wire.deriveKeys(Buffer.from(keyText, 'base64'));
   const rows = [];
   let directory = null;
@@ -201,7 +204,7 @@ const movie = {
 };
 
 /** The TMDB answer for `url`: a film or a two-season series of ten episodes each, named by its id. */
-function fixture(url) {
+export function metadataFixture(url) {
   const path = new URL(url).pathname;
   const [, type, id, , season] = path.match(/\/tmdb\/3\/(movie|tv)\/(\d+)(\/season\/(\d+))?/) ?? [];
   if (type === 'tv' && season)
@@ -241,7 +244,7 @@ function executablePath() {
 
 const browserLog = [];
 
-async function launch(profileDir) {
+export async function launch(profileDir) {
   const ctx = await chromium.launchPersistentContext(profileDir, {
     headless: !HEADED,
     executablePath: executablePath(),
@@ -263,7 +266,7 @@ async function launch(profileDir) {
   // Title data is the fixture's, named by the id asked for; den-edge holds no TMDB key here. Library requests are not
   // routed.
   await ctx.route('**/tmdb/3/**', (route) =>
-    route.fulfill({ json: fixture(route.request().url()) }),
+    route.fulfill({ json: metadataFixture(route.request().url()) }),
   );
   // A Kid opens a title only with its age known (unrated titles are blocked): this origin's atlas answers that the
   // fixture film is for all ages, and nothing else.
@@ -440,6 +443,98 @@ async function checkHousehold(label, edge, wire, kept, { title = true } = {}) {
     );
   }
   return { household, kids };
+}
+
+/**
+ * Build the real browser/Edge side of the native↔browser qualification without replacing either host's storage
+ * implementation. Only TMDB/Atlas/artwork are fixtures (installed by `launch`); household/profile/activity rows go
+ * through the built browser, its Wasm Worker and the loopback den-edge store. The caller owns every returned handle.
+ */
+export async function prepareCrossHostFixture({ denPlayback = false, root = work } = {}) {
+  const loaded = await loadWire();
+  let edge;
+  let browserProxy;
+  let context;
+  try {
+    edge = await startEdge(join(root, 'edge-data-cross-host'), 'visitors', { denPlayback });
+    browserProxy = await startRehearsalFixtureProxy(
+      () => edge.origin,
+      (url) => {
+        if (url.pathname.startsWith('/tmdb/3/')) return { body: metadataFixture(url.href) };
+        if (url.pathname === '/atlas/manifest.json')
+          return { body: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } };
+        if (url.pathname.startsWith('/atlas/index/title/movie/'))
+          return { body: { minimumAge: 0 } };
+        if (url.pathname.startsWith('/atlas/'))
+          return { status: 404, body: { error: 'not_found' } };
+        return undefined;
+      },
+    );
+    const browserDirectory = join(root, 'browser-cross-host');
+    context = await launch(browserDirectory);
+    let page = await firstPage(context);
+    const browserEdge = { origin: browserProxy.origin };
+    await lookAround(page, browserEdge);
+    await openTitle(page, browserEdge);
+    const kept = await plan(page);
+    if (!kept?.householdKey || !kept?.ownerKey)
+      throw new Error('browser did not stage a household plan');
+    await page.getByRole('button', { name: 'Watchlist', exact: true }).click();
+    let pointerKey = null;
+    for (let i = 0; i < 60 && !pointerKey; i += 1) {
+      pointerKey = await pointer(page).catch(() => null);
+      if (!pointerKey) await sleep(500);
+    }
+    if (pointerKey !== kept.householdKey)
+      throw new Error('browser did not commit its planned household');
+    await context.close();
+
+    context = await launch(browserDirectory);
+    page = await firstPage(context);
+    await openTitle(page, browserEdge);
+    if (!(await switcherShowsAll(page)))
+      throw new Error('profile switcher did not expose Owner, Kid and Visitor');
+    await page.getByRole('button', { name: 'Use Kids' }).click();
+    await page.getByLabel('New Owner PIN').fill(PIN);
+    await page.getByLabel('Confirm Owner PIN').fill(PIN);
+    await page
+      .locator('button.profile-trigger[aria-label*="current Kids"]')
+      .first()
+      .waitFor({ timeout: 30_000 });
+    const household = await householdWithKid(edge, loaded.wire, kept.householdKey);
+    const kidEntry = Object.entries(household.directory?.profiles ?? {}).find(
+      ([, profile]) => profile.role === 'kid' && !profile.deleted.value,
+    );
+    const kid = kidEntry ? { id: kidEntry[0], ...kidEntry[1] } : null;
+    if (!kid) throw new Error('browser household did not persist a Kid');
+    return {
+      wire: loaded.wire,
+      edge,
+      context,
+      page,
+      browserDirectory,
+      browserOrigin: browserProxy.origin,
+      browserProxy,
+      kept,
+      household,
+      kid,
+      pin: PIN,
+      closeWire: loaded.close,
+      closeBrowserProxy: browserProxy.close,
+      close: async () => {
+        await context.close();
+        await browserProxy.close();
+        await edge.stop();
+        await loaded.close();
+      },
+    };
+  } catch (error) {
+    await context?.close().catch(() => {});
+    await browserProxy?.close().catch(() => {});
+    await edge?.stop().catch(() => {});
+    await loaded.close().catch(() => {});
+    throw error;
+  }
 }
 
 // Each on its own den-edge, after the first visit's run.
@@ -1256,17 +1351,19 @@ async function browsedOnlyStaysPut() {
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  check('the rehearsal ran to the end', false, String(error?.stack ?? error));
-}
+if (invokedDirectly) {
+  try {
+    await main();
+  } catch (error) {
+    check('the rehearsal ran to the end', false, String(error?.stack ?? error));
+  }
 
-const failed = results.filter((r) => !r.ok);
-console.log(
-  `\n${failed.length ? 'REHEARSAL FAILED' : 'REHEARSAL PASSED'}: ${results.length - failed.length}/${results.length} checks`,
-);
-for (const r of failed) console.log(`  FAIL ${r.name}${r.detail ? ` — ${r.detail}` : ''}`);
-if (failed.length || KEEP) console.log(`den-edge log and browser profiles kept in ${work}`);
-else rmSync(work, { recursive: true, force: true });
-process.exit(failed.length ? 1 : 0);
+  const failed = results.filter((r) => !r.ok);
+  console.log(
+    `\n${failed.length ? 'REHEARSAL FAILED' : 'REHEARSAL PASSED'}: ${results.length - failed.length}/${results.length} checks`,
+  );
+  for (const r of failed) console.log(`  FAIL ${r.name}${r.detail ? ` — ${r.detail}` : ''}`);
+  if (failed.length || KEEP) console.log(`den-edge log and browser profiles kept in ${work}`);
+  else rmSync(work, { recursive: true, force: true });
+  process.exit(failed.length ? 1 : 0);
+}
