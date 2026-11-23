@@ -30,11 +30,27 @@ export function coordinatorBuildSetting(raw) {
 
 const generatedUITestTarget = (document) => {
   const configurations = document.TestConfigurations;
-  if (!Array.isArray(configurations))
-    throw new Error('generated xctestrun has no TestConfigurations');
-  if (configurations.some((configuration) => !Array.isArray(configuration?.TestTargets)))
-    throw new Error('generated xctestrun has malformed TestTargets');
-  const targets = configurations.flatMap((configuration) => configuration.TestTargets);
+  let targets = [];
+  if (configurations !== undefined) {
+    if (!Array.isArray(configurations))
+      throw new Error('generated xctestrun has malformed TestConfigurations');
+    if (configurations.some((configuration) => !Array.isArray(configuration?.TestTargets)))
+      throw new Error('generated xctestrun has malformed TestTargets');
+    targets = configurations.flatMap((configuration) => configuration.TestTargets);
+  }
+  targets.push(
+    ...Object.entries(document)
+      .filter(
+        ([key, value]) =>
+          key !== 'TestConfigurations' &&
+          key !== '__xctestrun_metadata__' &&
+          value !== null &&
+          !Array.isArray(value) &&
+          typeof value === 'object' &&
+          typeof value.BlueprintName === 'string',
+      )
+      .map(([, value]) => value),
+  );
   const matching = targets.filter((target) => target.BlueprintName === 'DenMobileUITests');
   if (matching.length !== 1)
     throw new Error(`generated xctestrun has ${matching.length} DenMobileUITests targets`);
