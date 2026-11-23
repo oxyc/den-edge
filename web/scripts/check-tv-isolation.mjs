@@ -516,5 +516,10 @@ if (process.argv.includes('--capture')) {
   // Drafts measured +658 (five phrases) and +530 (a custom Stop button); reusing `Button` removed its CSS. It must sit
   // with the element's WebKit events it answers; another split would add a request mid-playback. The TorBox switch's
   // label reuses `player.switchTo`. Allow the smallest 128-byte boundary containing it, retaining 77.
-  if (coreTotalDelta > 128768) throw new Error('Browser total JS/CSS budget exceeded');
+  // Keeping a paired library request ahead of app evaluation (#1446) measured 128,815 against matched main's
+  // 128,746 (+69): one timer-task admission branch in the eager entry that gives Chromium a network turn after the
+  // routed graph's preload links are inserted. Moving it behind a lazy boundary would recreate the race it fixes.
+  // Startup measured +30 gzip; translations and file count are unchanged. Allow the next 128-byte boundary,
+  // retaining 81.
+  if (coreTotalDelta > 128896) throw new Error('Browser total JS/CSS budget exceeded');
 }

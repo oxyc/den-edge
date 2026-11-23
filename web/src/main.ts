@@ -43,15 +43,22 @@ if (!__DEN_TV__ && !import.meta.env.DEN_E2E) {
 const start = () => {
   const bootstrapFinished = beginStartupRenderPhase('bootstrap');
   const importFinished = beginStartupRenderPhase('app_import');
-  startupMark('app module requested');
   const finished = () => {
     importFinished();
     bootstrapFinished();
   };
+  const openApplication = () => {
+    startupMark('app module requested');
+    void import('./appMain').then(finished, finished);
+  };
   // A load that shows the library needs its chunk as well as the app module. Asking for both together keeps the
   // library off the app module's critical path; `App.svelte` still decides what is shown and asks for the same import.
-  if (opensLibrary()) void import('./RoutedLibrary.svelte').catch(() => undefined);
-  void import('./appMain').then(finished, finished);
+  // Vite inserts that graph's preload links synchronously, but a module already preloaded by the HTML can evaluate
+  // before the browser starts their requests. One task gives networking admission without waiting for the graph.
+  if (opensLibrary()) {
+    void import('./RoutedLibrary.svelte').catch(() => undefined);
+    setTimeout(openApplication, 0);
+  } else openApplication();
 };
 const retainedHero = document.querySelector(
   '[data-den-early-billboard]:not([hidden]) [data-den-early-backdrop][data-path]',
