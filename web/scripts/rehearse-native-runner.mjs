@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, globSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const exitError = ({ code, error, signal }, phase) => {
   if (error) return new Error(`native xcodebuild failed to start: ${error.message ?? error}`);
@@ -120,6 +120,10 @@ const writePlist = (document, injectedPath, temporaryJSONPath) => {
   execFileSync('plutil', ['-convert', 'binary1', '-o', injectedPath, temporaryJSONPath]);
 };
 
+/** Keep Xcode's __TESTROOT__ anchored to its isolated Products directory. */
+export const injectedXCTestRunPath = (canonicalPath) =>
+  join(dirname(canonicalPath), 'NativeCrossHost.injected.xctestrun');
+
 /** Copy, inject and round-trip a generated xctestrun without mutating Xcode's canonical output. */
 export function prepareInjectedXCTestRun({
   canonicalPath,
@@ -129,6 +133,13 @@ export function prepareInjectedXCTestRun({
   temporaryJSONPath,
   writeDocument = writePlist,
 }) {
+  const resolvedCanonical = resolve(canonicalPath);
+  const resolvedInjected = resolve(injectedPath);
+  if (
+    resolvedCanonical === resolvedInjected ||
+    dirname(resolvedCanonical) !== dirname(resolvedInjected)
+  )
+    throw new Error('canonical and injected xctestrun paths must be distinct siblings');
   const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
   const canonicalDigest = digest(canonicalPath);
   copyFileSync(canonicalPath, injectedPath);

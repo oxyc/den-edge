@@ -22,6 +22,7 @@ import {
 import {
   cleanupNativeIfReady,
   generatedXCTestRuns,
+  injectedXCTestRunPath,
   nativeBuildArguments,
   nativeTestArguments,
   prepareInjectedXCTestRun,
@@ -271,8 +272,8 @@ async function runNative(origin) {
   const runs = generatedXCTestRuns(join(derivedDataPath, 'Build/Products'));
   if (runs.length !== 1) throw new Error(`build produced ${runs.length} xctestrun files`);
   const canonicalPath = runs[0];
-  const injectedPath = join(work, 'NativeCrossHost.xctestrun');
-  const temporaryJSON = join(work, 'NativeCrossHost.xctestrun.json');
+  const injectedPath = injectedXCTestRunPath(canonicalPath);
+  const temporaryJSON = `${injectedPath}.json`;
   prepareInjectedXCTestRun({
     canonicalPath,
     injectedPath,
