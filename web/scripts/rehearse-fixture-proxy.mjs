@@ -4,7 +4,11 @@ import { createServer } from 'node:http';
  * A loopback-only rehearsal origin. Worker-owned same-origin requests do not cross Playwright's page routing seam,
  * so deterministic external-provider answers live here while every other request still reaches the real Edge host.
  */
-export function startRehearsalFixtureProxy(upstreamOrigin, fixture) {
+export function startRehearsalFixtureProxy(
+  upstreamOrigin,
+  fixture,
+  { listen = (server) => server.listen(0, '127.0.0.1') } = {},
+) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
     const answer = fixture(url);
@@ -37,12 +41,26 @@ export function startRehearsalFixtureProxy(upstreamOrigin, fixture) {
       response.end(JSON.stringify({ error: 'qualification_edge_unavailable' }));
     }
   });
-  return new Promise((resolve) =>
-    server.listen(0, '127.0.0.1', () =>
+  return new Promise((resolve, reject) => {
+    const failed = (error) => {
+      server.off('listening', listening);
+      server.off('error', failed);
+      if (server.listening) server.close(() => {});
+      reject(error);
+    };
+    const listening = () => {
+      server.off('error', failed);
       resolve({
         origin: `http://127.0.0.1:${server.address().port}`,
         close: () => new Promise((done) => server.close(done)),
-      }),
-    ),
-  );
+      });
+    };
+    server.once('error', failed);
+    server.once('listening', listening);
+    try {
+      listen(server);
+    } catch (error) {
+      failed(error);
+    }
+  });
 }
