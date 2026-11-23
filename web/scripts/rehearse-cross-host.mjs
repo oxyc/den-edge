@@ -333,6 +333,7 @@ async function main() {
   let nativeFinished = false;
   let semanticFailed = false;
   let primaryFailure;
+  const teardownErrors = [];
   let blockedStore;
   let rejectedStore;
   try {
@@ -648,7 +649,6 @@ async function main() {
     semanticFailed = true;
     primaryFailure = error;
   } finally {
-    const teardownErrors = [];
     if (rejectedStore) {
       await collectTeardownError(
         teardownErrors,
@@ -711,16 +711,16 @@ async function main() {
       console.error(`cross-host evidence retained under ${work}`);
       for (const error of teardownErrors) console.error(String(error));
     }
-    if (semanticFailed) throw primaryFailure;
-    if (teardownErrors.length)
-      throw new AggregateError(teardownErrors, 'cross-host qualification teardown failed');
-
-    console.log(
-      KEEP
-        ? `PASS native↔browser cross-host qualification; evidence retained under ${work}`
-        : 'PASS native↔browser cross-host qualification; isolated artifacts verified and removed',
-    );
   }
+  if (semanticFailed) throw primaryFailure;
+  if (teardownErrors.length)
+    throw new AggregateError(teardownErrors, 'cross-host qualification teardown failed');
+
+  console.log(
+    KEEP
+      ? `PASS native↔browser cross-host qualification; evidence retained under ${work}`
+      : 'PASS native↔browser cross-host qualification; isolated artifacts verified and removed',
+  );
 }
 
 await main();
