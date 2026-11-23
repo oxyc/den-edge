@@ -371,8 +371,10 @@ async function main() {
       wire: '5',
     };
     const dropped = fixture.browserProxy.dropNext(ownerBatchMatch);
-    await fixture.page.getByRole('button', { name: 'Watchlist', exact: true }).click();
-    await dropped.matched;
+    await Promise.all([
+      fixture.page.getByRole('button', { name: 'Watchlist', exact: true }).click(),
+      dropped.matched,
+    ]);
     await eventually('lost-response write read back', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
       return watchlisted(library.rows);
@@ -390,11 +392,15 @@ async function main() {
     const held = fixture.browserProxy.holdNext(ownerBatchMatch);
     const ownerMutation = fixture.page
       .getByRole('button', { name: 'Watchlist', exact: true })
-      .click();
+      .click()
+      .then(
+        () => ({ error: null }),
+        (error) => ({ error }),
+      );
     await held.matched;
     await switchBrowserTo(fixture.page, 'Kids');
     held.release();
-    await ownerMutation.catch(() => {});
+    await ownerMutation;
     const ownerAfterHeld = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
     const ownerHeldWatchlisted = watchlisted(ownerAfterHeld.rows);
     const kidLibrary = await readLibrary(fixture.edge, fixture.wire, fixture.kid.library.value.key);

@@ -89,26 +89,31 @@ export const nativeTestArguments = ({ destination, resultBundlePath, xctestrunPa
   resultBundlePath,
 ];
 
+const readPlist = (path) =>
+  JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-', path], { encoding: 'utf8' }));
+
+const writePlist = (document, injectedPath, temporaryJSONPath) => {
+  writeFileSync(temporaryJSONPath, JSON.stringify(document));
+  execFileSync('plutil', ['-convert', 'binary1', '-o', injectedPath, temporaryJSONPath]);
+};
+
 /** Copy, inject and round-trip a generated xctestrun without mutating Xcode's canonical output. */
 export function prepareInjectedXCTestRun({
   canonicalPath,
   injectedPath,
   origin,
+  readDocument = readPlist,
   temporaryJSONPath,
+  writeDocument = writePlist,
 }) {
   const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
   const canonicalDigest = digest(canonicalPath);
   copyFileSync(canonicalPath, injectedPath);
   try {
-    const document = JSON.parse(
-      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
-    );
+    const document = readDocument(injectedPath);
     injectCoordinatorEnvironment(document, origin);
-    writeFileSync(temporaryJSONPath, JSON.stringify(document));
-    execFileSync('plutil', ['-convert', 'binary1', '-o', injectedPath, temporaryJSONPath]);
-    const verified = JSON.parse(
-      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
-    );
+    writeDocument(document, injectedPath, temporaryJSONPath);
+    const verified = readDocument(injectedPath);
     if (generatedCoordinatorEnvironment(verified) !== origin)
       throw new Error('generated xctestrun did not retain the coordinator environment');
   } finally {
