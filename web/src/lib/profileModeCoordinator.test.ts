@@ -1327,6 +1327,52 @@ describe('ProfileModeCoordinator', () => {
     first.coordinator.dispose();
   });
 
+  it('tries preference seeding again when the active profile is reopened after a failure', async () => {
+    const storage = memoryStorage();
+    const view = realDirectoryView();
+    const directory = profileDirectoryChoices(view)!;
+    const kid = view.profiles.find((profile) => profile.role === 'kid')!;
+    storage.setItem(
+      'den.profile.active.v1',
+      JSON.stringify({ version: 1, mode: 'persistent', profileId: kid.id }),
+    );
+    const opening = deferred<unknown>();
+    const models = profileModels(new Map([[kid.libraryKey, opening]]));
+    const first = owner(storage, true, null, undefined, directory, models.factory, true);
+    const failure = new Error('seed refused');
+    Object.assign(first.householdModel, {
+      ready: Promise.resolve(),
+      rawPreferences: vi.fn(async () => ({ 'den.watchRegion': { value: { string: 'FI' } } })),
+    });
+    Object.assign(models.handles[0]!.model, {
+      seedPreferences: vi.fn(async () => {
+        throw failure;
+      }),
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    opening.resolve({});
+    await vi.waitFor(() =>
+      expect(warning).toHaveBeenCalledWith('den: profile preference seeding failed', failure),
+    );
+    first.coordinator.dispose();
+
+    const second = owner(storage, true, null, undefined, directory, models.factory, true);
+    const household = { 'den.watchRegion': { value: { string: 'SE' } } };
+    const retry = vi.fn(async () => undefined);
+    Object.assign(second.householdModel, {
+      ready: Promise.resolve(),
+      rawPreferences: vi.fn(async () => household),
+    });
+    Object.assign(models.handles[1]!.model, { seedPreferences: retry });
+
+    await vi.waitFor(() => expect(second.coordinator.mode).toBe('kid'));
+    await vi.waitFor(() => expect(retry).toHaveBeenCalledWith(household));
+    expect(warning).toHaveBeenCalledTimes(1);
+    warning.mockRestore();
+    second.coordinator.dispose();
+  });
+
   it('opens a remembered Kid once, however soon the page hands over the same directory again', async () => {
     const storage = memoryStorage();
     const view = realDirectoryView();
