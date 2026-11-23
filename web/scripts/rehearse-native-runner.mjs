@@ -25,7 +25,7 @@ export function waitForNativeReady(
       timeoutMs,
     );
     unsubscribe = coordinator.subscribeReady((result) => {
-      if (result.status === 'passed') finish(resolve, result);
+      if (result.status === 'ready') finish(resolve, result);
       else finish(reject, new Error(`native readiness failed: ${result.detail ?? 'no detail'}`));
     });
     native.exited.then((result) => finish(reject, exitError(result, 'before ready')));
@@ -34,7 +34,14 @@ export function waitForNativeReady(
 
 /** Request mounted native cleanup only from a confirmed, still-running qualification runner. */
 export async function cleanupNativeIfReady({ coordinator, native, ready, cleaned }) {
-  if (!coordinator || !ready || cleaned || native?.child.exitCode !== null) return cleaned;
+  if (
+    !coordinator ||
+    !ready ||
+    cleaned ||
+    native?.child.exitCode !== null ||
+    native?.child.signalCode !== null
+  )
+    return cleaned;
   await coordinator.command('cleanup', { timeoutSeconds: 45 });
   return true;
 }

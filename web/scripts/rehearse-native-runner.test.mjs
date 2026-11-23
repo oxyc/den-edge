@@ -61,13 +61,26 @@ test('confirmed readiness cancels exit observation effects and preserves normal 
   const timer = timers();
   const waiting = waitForNativeReady({ exited: exited.promise }, ready.coordinator, timer);
 
-  ready.report({ sequence: 0, status: 'passed', detail: null });
+  ready.report({ sequence: 0, status: 'ready', detail: null });
 
   assert.equal((await waiting).sequence, 0);
   assert.equal(timer.count, 0);
   assert.equal(ready.listenerCount, 0);
   exited.resolve({ code: 1, error: null, signal: null });
   await Promise.resolve();
+});
+
+test('sequence zero must carry the native ready status literal', async () => {
+  const exited = deferred();
+  const ready = readiness();
+  const timer = timers();
+  const waiting = waitForNativeReady({ exited: exited.promise }, ready.coordinator, timer);
+
+  ready.report({ sequence: 0, status: 'passed', detail: 'wrong readiness status' });
+
+  await assert.rejects(waiting, /native readiness failed: wrong readiness status/);
+  assert.equal(timer.count, 0);
+  assert.equal(ready.listenerCount, 0);
 });
 
 test('spawn failure retains the exact child error and cancels readiness resources', async () => {
@@ -86,15 +99,42 @@ test('spawn failure retains the exact child error and cancels readiness resource
 test('cleanup is gated on a confirmed, still-running native runner', async () => {
   const commands = [];
   const coordinator = { command: async (...command) => commands.push(command) };
-  const native = { child: { exitCode: null } };
+  const live = { child: { exitCode: null, signalCode: null } };
 
   assert.equal(
-    await cleanupNativeIfReady({ coordinator, native, ready: false, cleaned: false }),
+    await cleanupNativeIfReady({ coordinator, native: live, ready: false, cleaned: false }),
     false,
   );
   assert.deepEqual(commands, []);
   assert.equal(
-    await cleanupNativeIfReady({ coordinator, native, ready: true, cleaned: false }),
+    await cleanupNativeIfReady({ coordinator: null, native: live, ready: true, cleaned: false }),
+    false,
+  );
+  assert.equal(
+    await cleanupNativeIfReady({ coordinator, native: live, ready: true, cleaned: true }),
+    true,
+  );
+  assert.equal(
+    await cleanupNativeIfReady({
+      coordinator,
+      native: { child: { exitCode: 65, signalCode: null } },
+      ready: true,
+      cleaned: false,
+    }),
+    false,
+  );
+  assert.equal(
+    await cleanupNativeIfReady({
+      coordinator,
+      native: { child: { exitCode: null, signalCode: 'SIGTERM' } },
+      ready: true,
+      cleaned: false,
+    }),
+    false,
+  );
+  assert.deepEqual(commands, []);
+  assert.equal(
+    await cleanupNativeIfReady({ coordinator, native: live, ready: true, cleaned: false }),
     true,
   );
   assert.deepEqual(commands, [['cleanup', { timeoutSeconds: 45 }]]);
