@@ -123,3 +123,139 @@ test('returns a bounded failure and closes its listener when Edge is unavailable
   await proxy.close();
   await assert.rejects(fetch(`${proxy.origin}/health`));
 });
+
+test('drops exactly one worker-origin response after forwarding the committed request', async () => {
+  let requests = 0;
+  const received = [];
+  const upstream = await listen(async (request, response) => {
+    requests += 1;
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    received.push({
+      body: Buffer.concat(chunks).toString('utf8'),
+      method: request.method,
+      token: request.headers['x-den-library-token'],
+      url: request.url,
+      wire: request.headers['x-den-wire'],
+    });
+    response.end('committed');
+  });
+  const proxy = await startRehearsalFixtureProxy(
+    () => upstream.origin,
+    () => undefined,
+  );
+  try {
+    const match = {
+      method: 'POST',
+      pathname: '/lib/owner/batch',
+      token: 'owner-token',
+      wire: '5',
+    };
+    const dropped = proxy.dropNext(match);
+    for (const request of [
+      ['/lib/other/batch', 'POST', 'owner-token', '5'],
+      ['/lib/owner/batch', 'GET', 'owner-token', '5'],
+      ['/lib/owner/batch', 'POST', 'other-token', '5'],
+      ['/lib/owner/batch', 'POST', 'owner-token', '4'],
+    ]) {
+      assert.equal(
+        await fetch(`${proxy.origin}${request[0]}`, {
+          method: request[1],
+          headers: { 'x-den-library-token': request[2], 'x-den-wire': request[3] },
+          ...(request[1] === 'POST' ? { body: 'unrelated' } : {}),
+        }).then((response) => response.text()),
+        'committed',
+      );
+    }
+    await assert.rejects(
+      fetch(`${proxy.origin}/lib/owner/batch?query=1`, {
+        method: 'POST',
+        headers: { 'x-den-library-token': 'owner-token', 'x-den-wire': '5' },
+        body: 'sealed',
+      }),
+    );
+    await dropped.matched;
+    assert.equal(requests, 5);
+    assert.deepEqual(received.at(-1), {
+      body: 'sealed',
+      method: 'POST',
+      token: 'owner-token',
+      url: '/lib/owner/batch?query=1',
+      wire: '5',
+    });
+    assert.equal(
+      await fetch(`${proxy.origin}/lib/owner/batch`, { method: 'POST', body: 'next' }).then((r) =>
+        r.text(),
+      ),
+      'committed',
+    );
+    assert.equal(requests, 6);
+  } finally {
+    await proxy.close().catch(() => {});
+    await upstream.close();
+  }
+});
+
+test('holds exactly one worker-origin request until release and close cannot strand a hold', async () => {
+  let requests = 0;
+  const upstream = await listen((_request, response) => {
+    requests += 1;
+    response.end('committed');
+  });
+  const proxy = await startRehearsalFixtureProxy(
+    () => upstream.origin,
+    () => undefined,
+  );
+  try {
+    const match = {
+      method: 'POST',
+      pathname: '/lib/owner/batch',
+      token: 'owner-token',
+      wire: '5',
+    };
+    const held = proxy.holdNext(match);
+    const request = fetch(`${proxy.origin}/lib/owner/batch`, {
+      method: 'POST',
+      headers: { 'x-den-library-token': 'owner-token', 'x-den-wire': '5' },
+      body: 'sealed',
+    });
+    await held.matched;
+    assert.equal(requests, 0);
+    held.release();
+    assert.equal(await request.then((response) => response.text()), 'committed');
+    assert.equal(requests, 1);
+
+    const closeHeld = proxy.holdNext(match);
+    const closingRequest = fetch(`${proxy.origin}/lib/owner/batch`, {
+      method: 'POST',
+      headers: { 'x-den-library-token': 'owner-token', 'x-den-wire': '5' },
+      body: 'closing',
+    });
+    await closeHeld.matched;
+    const closing = proxy.close();
+    assert.equal(await closingRequest.then((response) => response.text()), 'committed');
+    await closing;
+    assert.equal(requests, 2);
+  } finally {
+    await proxy.close().catch(() => {});
+    await upstream.close();
+  }
+});
+
+test('close rejects an unmatched one-shot barrier instead of stranding its waiter', async () => {
+  const upstream = await listen((_request, response) => response.end('ok'));
+  const proxy = await startRehearsalFixtureProxy(
+    () => upstream.origin,
+    () => undefined,
+  );
+  const pending = proxy.holdNext({
+    method: 'POST',
+    pathname: '/lib/owner/batch',
+    token: 'owner-token',
+    wire: '5',
+  });
+  const rejection = assert.rejects(pending.matched, /closed before the exact request matched/);
+  await proxy.close();
+  await rejection;
+  await upstream.close();
+});

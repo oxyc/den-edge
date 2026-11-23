@@ -8,7 +8,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, globSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,8 +21,9 @@ import {
 } from './rehearse-household.mjs';
 import {
   cleanupNativeIfReady,
-  coordinatorBuildSetting,
-  verifyCoordinatorScheme,
+  nativeBuildArguments,
+  nativeTestArguments,
+  prepareInjectedXCTestRun,
   waitForNativeReady,
 } from './rehearse-native-runner.mjs';
 
@@ -229,55 +230,65 @@ function nativeCoordinator(configuration, edgeOrigin) {
   };
 }
 
-function runNative(origin) {
-  verifyCoordinatorScheme(
-    readFileSync(
-      join(NATIVE, 'App/Den.xcodeproj/xcshareddata/xcschemes/DenMobile.xcscheme'),
-      'utf8',
-    ),
-  );
-  const child = spawn(
-    'xcodebuild',
-    [
-      'test',
-      '-project',
-      'App/Den.xcodeproj',
-      '-scheme',
-      'DenMobile',
-      '-destination',
-      DESTINATION,
-      '-only-testing:DenMobileUITests/MobileCrossHostQualificationUITests/' +
-        'testRealNativeAndBrowserHostsConvergeAcrossProfilesAndRestart',
-      '-derivedDataPath',
-      join(work, 'DerivedData'),
-      '-resultBundlePath',
-      join(work, 'NativeCrossHost.xcresult'),
-      '-clonedSourcePackagesDirPath',
-      process.env.DEN_SOURCE_PACKAGES ?? join(homedir(), '.cache/den/SourcePackages/c3401eef9198'),
-      '-disableAutomaticPackageResolution',
-      '-skipPackageUpdates',
-      coordinatorBuildSetting(origin),
-    ],
-    {
+async function runNative(origin) {
+  const spawnRun = (arguments_) => {
+    const child = spawn('xcodebuild', arguments_, {
       cwd: NATIVE,
       env: process.env,
       stdio: ['ignore', 'inherit', 'inherit'],
-    },
-  );
-  const exited = new Promise((done) => {
-    let settled = false;
-    const settle = (result) => {
-      if (settled) return;
-      settled = true;
-      done(result);
-    };
-    child.once('error', (error) => settle({ code: null, error }));
-    child.once('exit', (code, signal) => settle({ code, error: null, signal }));
-  });
-  return {
-    child,
-    exited,
+    });
+    const exited = new Promise((done) => {
+      let settled = false;
+      const settle = (result) => {
+        if (settled) return;
+        settled = true;
+        done(result);
+      };
+      child.once('error', (error) => settle({ code: null, error, signal: null }));
+      child.once('exit', (code, signal) => settle({ code, error: null, signal }));
+    });
+    return { child, exited };
   };
+  const derivedDataPath = join(work, 'DerivedData');
+  const build = spawnRun(
+    nativeBuildArguments({
+      derivedDataPath,
+      destination: DESTINATION,
+      sourcePackagesPath:
+        process.env.DEN_SOURCE_PACKAGES ??
+        join(homedir(), '.cache/den/SourcePackages/c3401eef9198'),
+    }),
+  );
+  const buildResult = await build.exited;
+  if (buildResult.error)
+    throw new Error(`native build-for-testing failed to start: ${buildResult.error.message}`);
+  if (buildResult.signal)
+    throw new Error(`native build-for-testing exited via ${buildResult.signal}`);
+  if (buildResult.code !== 0)
+    throw new Error(`native build-for-testing exited ${buildResult.code}`);
+
+  const runs = globSync('**/*.xctestrun', {
+    cwd: join(derivedDataPath, 'Build/Products'),
+    absolute: true,
+  });
+  if (runs.length !== 1) throw new Error(`build produced ${runs.length} xctestrun files`);
+  const canonicalPath = runs[0];
+  const injectedPath = join(work, 'NativeCrossHost.xctestrun');
+  const temporaryJSON = join(work, 'NativeCrossHost.xctestrun.json');
+  prepareInjectedXCTestRun({
+    canonicalPath,
+    injectedPath,
+    origin,
+    temporaryJSONPath: temporaryJSON,
+  });
+
+  return spawnRun(
+    nativeTestArguments({
+      destination: DESTINATION,
+      resultBundlePath: join(work, 'NativeCrossHost.xcresult'),
+      xctestrunPath: injectedPath,
+    }),
+  );
 }
 
 async function switchBrowserTo(page, name, pin) {
@@ -319,7 +330,7 @@ async function main() {
       () => fixture.edge.origin,
     );
     const coordinatorOrigin = await coordinator.start();
-    native = runNative(coordinatorOrigin);
+    native = await runNative(coordinatorOrigin);
     await waitForNativeReady(native, coordinator);
     nativeReady = true;
 
@@ -352,20 +363,20 @@ async function main() {
 
     // Lost response: Edge commits a browser write, the browser observes a transport failure, then readback converges.
     const ownerKeys = await fixture.wire.deriveKeys(Buffer.from(owner.library.value.key, 'base64'));
-    const ownerBatch = `**/lib/${ownerKeys.id}/batch`;
-    let dropped = false;
-    await fixture.context.route(ownerBatch, async (route) => {
-      if (dropped) return route.continue();
-      dropped = true;
-      await route.fetch();
-      return route.abort('failed');
-    });
+    const ownerBatch = `/lib/${ownerKeys.id}/batch`;
+    const ownerBatchMatch = {
+      method: 'POST',
+      pathname: ownerBatch,
+      token: ownerKeys.token,
+      wire: '5',
+    };
+    const dropped = fixture.browserProxy.dropNext(ownerBatchMatch);
     await fixture.page.getByRole('button', { name: 'Watchlist', exact: true }).click();
+    await dropped.matched;
     await eventually('lost-response write read back', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
       return watchlisted(library.rows);
     });
-    await fixture.context.unroute(ownerBatch);
     await fixture.page.reload();
     await fixture.page.getByRole('button', { name: 'Watchlist', exact: true }).waitFor();
     if (
@@ -376,26 +387,14 @@ async function main() {
       throw new Error('browser did not render the committed lost-response readback');
 
     // Profile isolation and held replacement: an Owner write held at transport cannot become Kid activity.
-    let releaseHeld;
-    let heldStarted;
-    const held = new Promise((done) => (heldStarted = done));
-    const release = new Promise((done) => (releaseHeld = done));
-    let intercepted = false;
-    await fixture.context.route(ownerBatch, async (route) => {
-      if (intercepted) return route.continue();
-      intercepted = true;
-      heldStarted();
-      await release;
-      return route.continue();
-    });
+    const held = fixture.browserProxy.holdNext(ownerBatchMatch);
     const ownerMutation = fixture.page
       .getByRole('button', { name: 'Watchlist', exact: true })
       .click();
-    await held;
+    await held.matched;
     await switchBrowserTo(fixture.page, 'Kids');
-    releaseHeld();
+    held.release();
     await ownerMutation.catch(() => {});
-    await fixture.context.unroute(ownerBatch);
     const ownerAfterHeld = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
     const ownerHeldWatchlisted = watchlisted(ownerAfterHeld.rows);
     const kidLibrary = await readLibrary(fixture.edge, fixture.wire, fixture.kid.library.value.key);

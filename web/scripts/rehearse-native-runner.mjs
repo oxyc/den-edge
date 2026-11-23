@@ -1,14 +1,14 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+
 const exitError = ({ code, error, signal }, phase) => {
   if (error) return new Error(`native xcodebuild failed to start: ${error.message ?? error}`);
   if (signal) return new Error(`native xcodebuild exited via ${signal} ${phase}`);
   return new Error(`native xcodebuild exited ${code} ${phase}`);
 };
 
-const coordinatorEnvironment =
-  '<EnvironmentVariable key="DEN_CROSS_HOST_COORDINATOR" ' +
-  'value="$(DEN_CROSS_HOST_COORDINATOR)" isEnabled="YES" />';
-
-/** Build setting expanded by DenMobile's checked-in TestAction environment. */
+/** Validate and normalize the ephemeral coordinator transported in a generated xctestrun. */
 export function coordinatorBuildSetting(raw) {
   const coordinator = new URL(raw);
   if (
@@ -27,10 +27,96 @@ export function coordinatorBuildSetting(raw) {
   return `DEN_CROSS_HOST_COORDINATOR=${coordinator.href}`;
 }
 
-/** Fail before spawning when the native checkout lacks the explicit TestAction transport. */
-export function verifyCoordinatorScheme(source) {
-  if (!source.includes(coordinatorEnvironment))
-    throw new Error('DenMobile scheme does not expand DEN_CROSS_HOST_COORDINATOR for tests');
+const generatedUITestTarget = (document) => {
+  const configurations = document.TestConfigurations;
+  if (!Array.isArray(configurations))
+    throw new Error('generated xctestrun has no TestConfigurations');
+  if (configurations.some((configuration) => !Array.isArray(configuration?.TestTargets)))
+    throw new Error('generated xctestrun has malformed TestTargets');
+  const targets = configurations.flatMap((configuration) => configuration.TestTargets);
+  const matching = targets.filter((target) => target.BlueprintName === 'DenMobileUITests');
+  if (matching.length !== 1)
+    throw new Error(`generated xctestrun has ${matching.length} DenMobileUITests targets`);
+  return matching[0];
+};
+
+/** Inject one ephemeral coordinator into exactly one generated DenMobile UI-test target. */
+export function injectCoordinatorEnvironment(document, raw) {
+  const target = generatedUITestTarget(document);
+  if (
+    target.EnvironmentVariables !== undefined &&
+    (target.EnvironmentVariables === null ||
+      Array.isArray(target.EnvironmentVariables) ||
+      typeof target.EnvironmentVariables !== 'object')
+  )
+    throw new Error('generated DenMobileUITests environment is malformed');
+  const coordinator = coordinatorBuildSetting(raw).slice('DEN_CROSS_HOST_COORDINATOR='.length);
+  target.EnvironmentVariables = {
+    ...(target.EnvironmentVariables ?? {}),
+    DEN_CROSS_HOST_COORDINATOR: coordinator,
+  };
+  return document;
+}
+
+export const generatedCoordinatorEnvironment = (document) =>
+  generatedUITestTarget(document).EnvironmentVariables?.DEN_CROSS_HOST_COORDINATOR;
+
+export const nativeBuildArguments = ({ derivedDataPath, destination, sourcePackagesPath }) => [
+  'build-for-testing',
+  '-project',
+  'App/Den.xcodeproj',
+  '-scheme',
+  'DenMobile',
+  '-destination',
+  destination,
+  '-derivedDataPath',
+  derivedDataPath,
+  '-clonedSourcePackagesDirPath',
+  sourcePackagesPath,
+  '-disableAutomaticPackageResolution',
+  '-skipPackageUpdates',
+];
+
+export const nativeTestArguments = ({ destination, resultBundlePath, xctestrunPath }) => [
+  'test-without-building',
+  '-xctestrun',
+  xctestrunPath,
+  '-destination',
+  destination,
+  '-only-testing:DenMobileUITests/MobileCrossHostQualificationUITests/' +
+    'testRealNativeAndBrowserHostsConvergeAcrossProfilesAndRestart',
+  '-resultBundlePath',
+  resultBundlePath,
+];
+
+/** Copy, inject and round-trip a generated xctestrun without mutating Xcode's canonical output. */
+export function prepareInjectedXCTestRun({
+  canonicalPath,
+  injectedPath,
+  origin,
+  temporaryJSONPath,
+}) {
+  const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
+  const canonicalDigest = digest(canonicalPath);
+  copyFileSync(canonicalPath, injectedPath);
+  try {
+    const document = JSON.parse(
+      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
+    );
+    injectCoordinatorEnvironment(document, origin);
+    writeFileSync(temporaryJSONPath, JSON.stringify(document));
+    execFileSync('plutil', ['-convert', 'binary1', '-o', injectedPath, temporaryJSONPath]);
+    const verified = JSON.parse(
+      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
+    );
+    if (generatedCoordinatorEnvironment(verified) !== origin)
+      throw new Error('generated xctestrun did not retain the coordinator environment');
+  } finally {
+    rmSync(temporaryJSONPath, { force: true });
+  }
+  if (digest(canonicalPath) !== canonicalDigest)
+    throw new Error('canonical generated xctestrun changed during coordinator injection');
+  return injectedPath;
 }
 
 /** Wait for sequence-zero readiness while retaining ownership of the timeout and exit observation. */

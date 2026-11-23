@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import {
   cleanupNativeIfReady,
   coordinatorBuildSetting,
-  verifyCoordinatorScheme,
+  generatedCoordinatorEnvironment,
+  injectCoordinatorEnvironment,
+  nativeBuildArguments,
+  nativeTestArguments,
+  prepareInjectedXCTestRun,
   waitForNativeReady,
 } from './rehearse-native-runner.mjs';
 
@@ -47,7 +56,7 @@ const timers = () => {
   };
 };
 
-test('coordinator transport accepts only the ephemeral loopback run URL and checked-in expansion', () => {
+test('coordinator transport accepts only the ephemeral loopback run URL', () => {
   assert.equal(
     coordinatorBuildSetting('http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef'),
     'DEN_CROSS_HOST_COORDINATOR=http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
@@ -59,14 +68,151 @@ test('coordinator transport accepts only the ephemeral loopback run URL and chec
     'http://user@127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
   ])
     assert.throws(() => coordinatorBuildSetting(invalid), /uncredentialed loopback run URL/);
+});
 
-  assert.doesNotThrow(() =>
-    verifyCoordinatorScheme(
-      '<EnvironmentVariable key="DEN_CROSS_HOST_COORDINATOR" ' +
-        'value="$(DEN_CROSS_HOST_COORDINATOR)" isEnabled="YES" />',
-    ),
+test('injects one ephemeral environment into exactly one generated UI-test target', () => {
+  const document = {
+    TestConfigurations: [
+      {
+        TestTargets: [
+          { BlueprintName: 'DenMobileTests', EnvironmentVariables: { KEEP: 'yes' } },
+          { BlueprintName: 'DenMobileUITests', EnvironmentVariables: { EXISTING: 'yes' } },
+        ],
+      },
+    ],
+  };
+  injectCoordinatorEnvironment(
+    document,
+    'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
   );
-  assert.throws(() => verifyCoordinatorScheme('<Scheme />'), /does not expand/);
+  assert.deepEqual(document.TestConfigurations[0].TestTargets[0].EnvironmentVariables, {
+    KEEP: 'yes',
+  });
+  assert.deepEqual(document.TestConfigurations[0].TestTargets[1].EnvironmentVariables, {
+    EXISTING: 'yes',
+    DEN_CROSS_HOST_COORDINATOR: 'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+  });
+  assert.equal(
+    generatedCoordinatorEnvironment(document),
+    'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+  );
+  assert.throws(
+    () =>
+      injectCoordinatorEnvironment(
+        { TestConfigurations: [] },
+        'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+      ),
+    /0 DenMobileUITests targets/,
+  );
+  assert.throws(
+    () =>
+      injectCoordinatorEnvironment(
+        {
+          TestConfigurations: [
+            {
+              TestTargets: [
+                { BlueprintName: 'DenMobileUITests' },
+                { BlueprintName: 'DenMobileUITests' },
+              ],
+            },
+          ],
+        },
+        'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+      ),
+    /2 DenMobileUITests targets/,
+  );
+  assert.throws(
+    () =>
+      injectCoordinatorEnvironment(
+        { TestConfigurations: [{}] },
+        'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
+      ),
+    /malformed TestTargets/,
+  );
+});
+
+test('native qualification builds once then runs only the generated injected xctestrun', () => {
+  assert.deepEqual(
+    nativeBuildArguments({
+      derivedDataPath: '/evidence/DerivedData',
+      destination: 'platform=iOS Simulator,id=DEVICE',
+      sourcePackagesPath: '/cache/SourcePackages',
+    }),
+    [
+      'build-for-testing',
+      '-project',
+      'App/Den.xcodeproj',
+      '-scheme',
+      'DenMobile',
+      '-destination',
+      'platform=iOS Simulator,id=DEVICE',
+      '-derivedDataPath',
+      '/evidence/DerivedData',
+      '-clonedSourcePackagesDirPath',
+      '/cache/SourcePackages',
+      '-disableAutomaticPackageResolution',
+      '-skipPackageUpdates',
+    ],
+  );
+  assert.deepEqual(
+    nativeTestArguments({
+      destination: 'platform=iOS Simulator,id=DEVICE',
+      resultBundlePath: '/evidence/NativeCrossHost.xcresult',
+      xctestrunPath: '/evidence/NativeCrossHost.xctestrun',
+    }),
+    [
+      'test-without-building',
+      '-xctestrun',
+      '/evidence/NativeCrossHost.xctestrun',
+      '-destination',
+      'platform=iOS Simulator,id=DEVICE',
+      '-only-testing:DenMobileUITests/MobileCrossHostQualificationUITests/' +
+        'testRealNativeAndBrowserHostsConvergeAcrossProfilesAndRestart',
+      '-resultBundlePath',
+      '/evidence/NativeCrossHost.xcresult',
+    ],
+  );
+});
+
+test('xctestrun injection round-trips a run-owned copy and leaves canonical output unchanged', () => {
+  const root = mkdtempSync(join(tmpdir(), 'den-xctestrun-test-'));
+  const canonicalPath = join(root, 'Canonical.xctestrun');
+  const injectedPath = join(root, 'NativeCrossHost.xctestrun');
+  const temporaryJSONPath = join(root, 'NativeCrossHost.xctestrun.json');
+  const origin = 'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef';
+  try {
+    writeFileSync(
+      canonicalPath,
+      JSON.stringify({
+        TestConfigurations: [
+          {
+            TestTargets: [
+              {
+                BlueprintName: 'DenMobileUITests',
+                EnvironmentVariables: { EXISTING: 'preserved' },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    execFileSync('plutil', ['-convert', 'binary1', canonicalPath]);
+    const before = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
+    prepareInjectedXCTestRun({ canonicalPath, injectedPath, origin, temporaryJSONPath });
+    const after = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
+    assert.equal(after, before);
+    assert.equal(existsSync(temporaryJSONPath), false);
+    const injected = JSON.parse(
+      execFileSync('plutil', ['-convert', 'json', '-o', '-', injectedPath], { encoding: 'utf8' }),
+    );
+    assert.equal(generatedCoordinatorEnvironment(injected), origin);
+    assert.equal(
+      injected.TestConfigurations[0].TestTargets[0].EnvironmentVariables.EXISTING,
+      'preserved',
+    );
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
 });
 
 test('native exit before readiness fails immediately without retaining its timer or listener', async () => {

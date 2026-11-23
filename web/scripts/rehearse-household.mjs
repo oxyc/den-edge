@@ -506,6 +506,7 @@ export async function prepareCrossHostFixture({ root = work } = {}) {
       page,
       browserDirectory,
       browserOrigin: browserProxy.origin,
+      browserProxy,
       kept,
       household,
       kid,
