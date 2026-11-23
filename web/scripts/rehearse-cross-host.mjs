@@ -8,7 +8,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -513,7 +513,7 @@ async function main() {
       ['simctl', 'get_app_container', SIMULATOR_ID, MOBILE_BUNDLE_ID, 'data'],
       { encoding: 'utf8' },
     ).trim();
-    const blockedStorePath = join(
+    const pairedRoot = join(
       container,
       'Library',
       'Application Support',
@@ -521,6 +521,14 @@ async function main() {
       runID,
       'Paired',
     );
+    const householdNamespaces = readdirSync(pairedRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== 'Retired')
+      .map((entry) => entry.name);
+    if (householdNamespaces.length !== 1)
+      throw new Error(
+        `expected one isolated native household namespace, found ${householdNamespaces.length}`,
+      );
+    const blockedStorePath = join(pairedRoot, householdNamespaces[0]);
 
     // Refuse the production profile store's next records commit. Unlike an Edge outage, this makes the requested
     // local state non-durable, so the title action must keep the current state and expose its exact Retry operation.
