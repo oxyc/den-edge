@@ -127,6 +127,11 @@ test('injects one ephemeral environment into exactly one generated UI-test targe
       ),
     /malformed TestTargets/,
   );
+  for (const malformed of [null, [], 'not a plist dictionary'])
+    assert.throws(
+      () => injectCoordinatorEnvironment(malformed, coordinator),
+      /xctestrun root is malformed/,
+    );
 
   const topLevel = {
     DenMobileTests: { BlueprintName: 'DenMobileTests', EnvironmentVariables: { KEEP: 'yes' } },
@@ -135,12 +140,28 @@ test('injects one ephemeral environment into exactly one generated UI-test targe
       EnvironmentVariables: { EXISTING: 'yes' },
       IsUITestBundle: true,
     },
-    __xctestrun_metadata__: { FormatVersion: 2 },
+    __xctestrun_metadata__: { BlueprintName: 'DenMobileUITests', FormatVersion: 2 },
   };
   injectCoordinatorEnvironment(topLevel, coordinator);
   assert.equal(generatedCoordinatorEnvironment(topLevel), coordinator);
   assert.deepEqual(topLevel.DenMobileTests.EnvironmentVariables, { KEEP: 'yes' });
   assert.equal(topLevel.DenMobileUITests.EnvironmentVariables.EXISTING, 'yes');
+  assert.deepEqual(topLevel.__xctestrun_metadata__, {
+    BlueprintName: 'DenMobileUITests',
+    FormatVersion: 2,
+  });
+  assert.throws(
+    () =>
+      injectCoordinatorEnvironment(
+        {
+          DenMobileUITests: { BlueprintName: 'DenMobileUITests' },
+          AnotherUITestTarget: { BlueprintName: 'DenMobileUITests' },
+          __xctestrun_metadata__: { FormatVersion: 2 },
+        },
+        coordinator,
+      ),
+    /2 DenMobileUITests targets/,
+  );
 });
 
 test('native qualification builds once then runs only the generated injected xctestrun', () => {
