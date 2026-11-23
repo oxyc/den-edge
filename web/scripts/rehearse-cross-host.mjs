@@ -8,7 +8,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, globSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ import {
 } from './rehearse-household.mjs';
 import {
   cleanupNativeIfReady,
+  generatedXCTestRuns,
   nativeBuildArguments,
   nativeTestArguments,
   prepareInjectedXCTestRun,
@@ -267,10 +268,7 @@ async function runNative(origin) {
   if (buildResult.code !== 0)
     throw new Error(`native build-for-testing exited ${buildResult.code}`);
 
-  const runs = globSync('**/*.xctestrun', {
-    cwd: join(derivedDataPath, 'Build/Products'),
-    absolute: true,
-  });
+  const runs = generatedXCTestRuns(join(derivedDataPath, 'Build/Products'));
   if (runs.length !== 1) throw new Error(`build produced ${runs.length} xctestrun files`);
   const canonicalPath = runs[0];
   const injectedPath = join(work, 'NativeCrossHost.xctestrun');
