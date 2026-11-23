@@ -21,7 +21,6 @@
   import Billboard from './Billboard.svelte';
   import Browse from './Browse.svelte';
   import Button from './Button.svelte';
-  import JustWatchCredit from './JustWatchCredit.svelte';
   import Loading from './Loading.svelte';
   import ServerUnreachable from './ServerUnreachable.svelte';
   import TypeFilter from './TypeFilter.svelte';

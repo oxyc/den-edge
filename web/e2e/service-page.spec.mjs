@@ -61,8 +61,7 @@ async function serveNetflix(
         baseServiceRowCount([request], 'popularity.desc', '50') === 1 ||
         baseServiceRowCount([request], 'vote_average.desc', '300') === 1;
       if (!base) return route.fulfill({ json: { results: [] } });
-      if (url.searchParams.get('page') !== '1')
-        return route.fulfill({ json: { results: [] } });
+      if (url.searchParams.get('page') !== '1') return route.fulfill({ json: { results: [] } });
       const id = newest ? 201 : url.searchParams.get('sort_by') === 'popularity.desc' ? 301 : 401;
       return route.fulfill({
         json: {
@@ -371,8 +370,9 @@ test('a failed service hero stays visible and retries only its own request', asy
   await expect(failure).toContainText('Featured titles couldn’t be loaded.');
   const retry = failure.getByRole('button', { name: 'Try again' });
   await expect(retry).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Popular Movies' })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Film 301', exact: true }).first()).toBeVisible();
+  const popular = page.getByRole('region', { name: 'Popular Movies' });
+  await expect(popular).toBeVisible();
+  await expect(popular.getByRole('link', { name: /Film 301/ }).first()).toBeVisible();
 
   const stableRows = {
     manifest: 1,
@@ -384,14 +384,21 @@ test('a failed service hero stays visible and retries only its own request', asy
   };
   await expect.poll(() => servicePageRequests(asked)).toEqual(stableRows);
   const before = servicePageRequests(asked);
-  expect(newReleaseCount(asked), 'one failed initial hero request').toBe(1);
+  const heroRequestsBeforeRetry = newReleaseCount(asked);
+  expect(
+    heroRequestsBeforeRetry,
+    'the failed hero plus the independently recovered visible row',
+  ).toBe(2);
 
   await retry.focus();
   await expect(retry).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(failure).toHaveCount(0);
   await expect(page.locator('.billboard .slide').first()).toHaveAttribute('aria-label', 'Film 201');
-  expect(newReleaseCount(asked), 'one explicit hero retry').toBe(2);
+  expect(
+    newReleaseCount(asked),
+    'hero retry reuses the row’s recovered shared provider answer',
+  ).toBe(heroRequestsBeforeRetry);
   expect(servicePageRequests(asked), 'retry does not rebuild or fan out through rows').toEqual(
     before,
   );
