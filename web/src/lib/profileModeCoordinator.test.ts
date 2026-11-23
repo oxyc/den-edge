@@ -2154,11 +2154,12 @@ describe('additional Kid creation authority', () => {
       JSON.stringify({ version: 1, mode: 'persistent', profileId: ownerProfile.id }),
     );
     const opening = deferred<unknown>();
-    const models = profileModels(new Map([[ownerProfile.libraryKey, opening]]));
+    const openings = new Map([[ownerProfile.libraryKey, opening]]);
+    const models = profileModels(openings);
     const harness = owner(storage, true, null, undefined, directory, models.factory, true);
     opening.resolve({});
     await vi.waitFor(() => expect(harness.coordinator.mode).toBe('owner'));
-    return { ...harness, storage, view, directory, models };
+    return { ...harness, storage, view, directory, models, openings };
   }
 
   it.each(['session', 'id', 'libraryKey', 'keyVersion'] as const)(
@@ -2315,18 +2316,71 @@ describe('additional Kid creation authority', () => {
     const original = harness.coordinator.kidTitleApprovalAuthority(kid.id);
     expect(original).not.toBeNull();
 
+    expect(harness.coordinator.kidTitleApprovalAuthority('missing-kid')).toBeNull();
+    const afterInvalidRequest = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    expect(afterInvalidRequest).not.toBe(original);
+
     const replacement = structuredClone(harness.view);
     replacement.profiles.find((entry) => entry.id === kid.id)!.keyVersion += 1;
     harness.coordinator.updateDirectory(profileDirectoryChoices(replacement)!);
-    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).not.toBe(original);
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).not.toBe(afterInvalidRequest);
+
+    const rekeyed = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    const keyReplacement = structuredClone(replacement);
+    keyReplacement.profiles.find((entry) => entry.id === kid.id)!.libraryKey = 'rotated-kid-key';
+    harness.coordinator.updateDirectory(profileDirectoryChoices(keyReplacement)!);
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).not.toBe(rekeyed);
 
     harness.coordinator.updateDirectory(
       profileDirectoryChoices({
-        ...replacement,
-        profiles: replacement.profiles.filter((entry) => entry.id !== kid.id),
+        ...keyReplacement,
+        profiles: keyReplacement.profiles.filter((entry) => entry.id !== kid.id),
       })!,
     );
     expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBeNull();
+
+    harness.coordinator.updateDirectory(profileDirectoryChoices(keyReplacement)!);
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).not.toBe(rekeyed);
+    harness.coordinator.dispose();
+  });
+
+  it('retires title-access presentation authority across a profile switch and disposal', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const original = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    expect(original).not.toBeNull();
+
+    const switching = harness.coordinator.switchToPersistent(kid.id);
+    await vi.waitFor(() => expect(harness.openings.has(kid.libraryKey)).toBe(true));
+    harness.openings.get(kid.libraryKey)!.resolve({});
+    await expect(switching).resolves.toEqual({ outcome: 'success' });
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBeNull();
+
+    await expect(harness.coordinator.switchToOwner('1234')).resolves.toEqual({
+      outcome: 'success',
+    });
+    const restored = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    expect(restored).not.toBe(original);
+
+    harness.coordinator.dispose();
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBeNull();
+  });
+
+  it('retires title-access presentation authority when parental-control authority is lost', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const original = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    expect(original).not.toBeNull();
+    const lease = vi.mocked(harness.householdModel.connections).mock.results[0]!.value as {
+      snapshot:
+        | { connection: 'failed' }
+        | { connection: 'ready'; value: { parentalPinConfigured: boolean } };
+    };
+
+    lease.snapshot = { connection: 'failed' };
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBeNull();
+    lease.snapshot = { connection: 'ready', value: { parentalPinConfigured: true } };
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).not.toBe(original);
     harness.coordinator.dispose();
   });
 

@@ -242,11 +242,10 @@ export class ProfileModeCoordinator {
   #kidCreationActive = false;
   #kidTitleApproval = 0;
   #kidTitleApprovalActive = false;
+  #kidTitleApprovalPresentationGeneration = 0;
   #kidTitleApprovalPresentationAuthority: {
     profile: string;
-    owner: ProfileSession;
-    libraryKey: string | null;
-    keyVersion: number | null;
+    generation: number;
     token: object;
   } | null = null;
   /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
@@ -452,24 +451,28 @@ export class ProfileModeCoordinator {
 
   /** Security-relevant Owner-session or Kid-key replacement returns a new title-edit presentation token. */
   kidTitleApprovalAuthority(profile: string): object | null {
-    if (__DEN_TV__ || this.mode !== 'owner' || this.parentalPinConfigured !== true) return null;
+    if (
+      this.#disposed ||
+      __DEN_TV__ ||
+      this.mode !== 'owner' ||
+      this.parentalPinConfigured !== true
+    ) {
+      this.#retireKidTitleApprovalPresentationAuthority();
+      return null;
+    }
     const kid = this.#choice(profile);
-    const owner = this.#session;
-    if (!kid?.id || kid.role !== 'kid' || !owner) return null;
-    const libraryKey = kid.libraryKey ?? null;
-    const keyVersion = kid.keyVersion ?? null;
+    if (!kid?.id || kid.role !== 'kid' || !this.#session) {
+      this.#retireKidTitleApprovalPresentationAuthority();
+      return null;
+    }
     const current = this.#kidTitleApprovalPresentationAuthority;
     if (
       current?.profile !== kid.id ||
-      current.owner !== owner ||
-      current.libraryKey !== libraryKey ||
-      current.keyVersion !== keyVersion
+      current.generation !== this.#kidTitleApprovalPresentationGeneration
     )
       this.#kidTitleApprovalPresentationAuthority = {
         profile: kid.id,
-        owner,
-        libraryKey,
-        keyVersion,
+        generation: this.#kidTitleApprovalPresentationGeneration,
         token: {},
       };
     return this.#kidTitleApprovalPresentationAuthority.token;
@@ -703,7 +706,7 @@ export class ProfileModeCoordinator {
               : { mode: 'visitor', visitId: visitor.identity.id },
           );
           this.#settingsPin = null;
-          this.#session = visitor;
+          this.#replaceSession(visitor);
           previous!.close();
         });
         return TRANSITION_SUCCESS;
@@ -741,7 +744,7 @@ export class ProfileModeCoordinator {
         (owner ? (this.#pendingOwner ?? this.#newOwner()) : this.#newKid(choice!));
       this.#releasePendingOwner(next);
       this.#settingsPin = null;
-      this.#session = next;
+      this.#replaceSession(next);
       if (nextPersistent) this.#seedPreferences(nextPersistent.model!);
       previous?.close();
       return TRANSITION_SUCCESS;
@@ -777,7 +780,7 @@ export class ProfileModeCoordinator {
     }
     const next = this.#pendingOwner ?? this.#newOwner();
     this.#pendingOwner = null;
-    this.#session = next;
+    this.#replaceSession(next);
     return true;
   }
 
@@ -785,6 +788,7 @@ export class ProfileModeCoordinator {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
+    this.#retireKidTitleApprovalPresentationAuthority();
     this.#cancelOpenings();
     this.#events?.removeEventListener('storage', this.#storageChanged);
     this.#connections.release();
@@ -809,7 +813,18 @@ export class ProfileModeCoordinator {
     const previousChoice =
       current?.identity.kind === 'profile' ? this.#choice(current.identity.id) : undefined;
     const previousOwner = this.#directory ? this.#choice(this.#directory.owner) : undefined;
+    const approvalProfile = this.#kidTitleApprovalPresentationAuthority?.profile;
+    const previousApprovalChoice = approvalProfile ? this.#choice(approvalProfile) : undefined;
     this.#directory = directory;
+    const nextApprovalChoice = approvalProfile ? this.#choice(approvalProfile) : undefined;
+    if (
+      approvalProfile &&
+      (nextApprovalChoice?.id !== previousApprovalChoice?.id ||
+        nextApprovalChoice?.role !== 'kid' ||
+        nextApprovalChoice.libraryKey !== previousApprovalChoice?.libraryKey ||
+        nextApprovalChoice.keyVersion !== previousApprovalChoice?.keyVersion)
+    )
+      this.#retireKidTitleApprovalPresentationAuthority();
     this.#cancelOpenings();
     if (!this.#profileModels) return;
     if (!current) {
@@ -825,14 +840,14 @@ export class ProfileModeCoordinator {
       if (directory && this.#sameContentPolicy(previousOwner?.policy, nextOwner?.policy)) return;
       const visit = current.identity.id;
       current.close();
-      this.#session = directory ? this.#newVisitor(visitorVisitId(visit)) : null;
+      this.#replaceSession(directory ? this.#newVisitor(visitorVisitId(visit)) : null);
       return;
     }
     if (current?.identity.kind !== 'profile') return;
     const nextChoice = this.#choice(current.identity.id);
     if (this.#samePersistentChoice(previousChoice, nextChoice)) return;
     current.close();
-    this.#session = null;
+    this.#replaceSession(null);
     if (nextChoice) void this.#restorePersistent(nextChoice);
   }
 
@@ -909,7 +924,7 @@ export class ProfileModeCoordinator {
       if (visitId) {
         const next = this.#newVisitor(visitorVisitId(visitId));
         this.#releasePendingOwner(next);
-        this.#session = next;
+        this.#replaceSession(next);
       } else if (this.#profileModels) {
         const pending = this.#pendingOwner;
         this.#pendingOwner = null;
@@ -918,10 +933,10 @@ export class ProfileModeCoordinator {
           pending.identity.id === selected?.id &&
           pending.identity.libraryKey === selected.libraryKey
         ) {
-          this.#session = pending;
+          this.#replaceSession(pending);
         } else {
           pending?.close();
-          this.#session = null;
+          this.#replaceSession(null);
           if (selected?.id) void this.#restorePersistent(selected, saved?.mode === 'owner');
         }
       } else {
@@ -930,7 +945,7 @@ export class ProfileModeCoordinator {
             ? this.#newKid(selected)
             : (this.#pendingOwner ?? this.#newOwner());
         this.#releasePendingOwner(next);
-        this.#session = next;
+        this.#replaceSession(next);
       }
     };
     if (visitor)
@@ -1043,7 +1058,7 @@ export class ProfileModeCoordinator {
       }
       if (saved?.mode === 'owner') keepActiveProfile(this.#storage, this.#ownerMarker());
       this.#releasePendingOwner(next);
-      this.#session = next;
+      this.#replaceSession(next);
       this.#seedPreferences(next.model!);
     } catch (error) {
       // No one waits on a restore: the page stays at the profile gate, and the reason is logged. A failed legacy
@@ -1085,7 +1100,18 @@ export class ProfileModeCoordinator {
 
   #neutralize(current: ProfileSession | null): void {
     current?.close();
-    this.#session = null;
+    this.#replaceSession(null);
+  }
+
+  #replaceSession(next: ProfileSession | null): void {
+    if (this.#session !== next) this.#retireKidTitleApprovalPresentationAuthority();
+    this.#session = next;
+  }
+
+  #retireKidTitleApprovalPresentationAuthority(): void {
+    if (!this.#kidTitleApprovalPresentationAuthority) return;
+    this.#kidTitleApprovalPresentationAuthority = null;
+    ++this.#kidTitleApprovalPresentationGeneration;
   }
 
   #transitionCurrent(token: number, previous: ProfileSession | null): boolean {
