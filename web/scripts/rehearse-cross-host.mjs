@@ -559,7 +559,9 @@ async function main() {
       'DROP TRIGGER reject_cross_host_title;',
     ]);
     rejectedStore = null;
-    await coordinator.command('tap', { target: 'mobile_title_mutation_retry' });
+    // SwiftUI exposes this alert action as a nested pair of accessibility nodes. Activate the first concrete match;
+    // the preceding wait still proves that the exact localized Retry identifier is mounted.
+    await coordinator.command('tap-first', { target: 'mobile_title_mutation_retry' });
     await eventually('native commit Retry synchronized after store recovery', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
       return watchlisted(library.rows) === ownerHeldWatchlisted;
