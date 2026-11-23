@@ -17,10 +17,25 @@ const listen = (handler) => {
 
 test('answers worker-origin fixtures locally and forwards every other request', async () => {
   let upstreamRequests = 0;
+  let received;
   const upstream = await listen((request, response) => {
     upstreamRequests += 1;
-    response.writeHead(200, { 'content-type': 'text/plain' });
-    response.end(`upstream:${request.url}`);
+    const chunks = [];
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('end', () => {
+      received = {
+        method: request.method,
+        url: request.url,
+        token: request.headers['x-den-library-token'],
+        wire: request.headers['x-den-wire'],
+        body: Buffer.concat(chunks).toString('utf8'),
+      };
+      response.writeHead(207, {
+        'content-type': 'application/octet-stream',
+        'x-upstream-proof': 'preserved',
+      });
+      response.end('committed');
+    });
   });
   const proxy = await startRehearsalFixtureProxy(
     () => upstream.origin,
@@ -36,13 +51,46 @@ test('answers worker-origin fixtures locally and forwards every other request', 
     assert.deepEqual(fixture, { id: 1002, title: 'Fixture' });
     assert.equal(upstreamRequests, 0);
 
-    const forwarded = await fetch(`${proxy.origin}/lib/abc/changes?since=4`).then((response) =>
-      response.text(),
-    );
-    assert.equal(forwarded, 'upstream:/lib/abc/changes?since=4');
+    const forwarded = await fetch(`${proxy.origin}/lib/abc/batch?mode=commit`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'x-den-library-token': 'owner-token',
+        'x-den-wire': '5',
+      },
+      body: 'sealed-batch',
+    });
+    assert.equal(forwarded.status, 207);
+    assert.equal(forwarded.headers.get('x-upstream-proof'), 'preserved');
+    assert.equal(await forwarded.text(), 'committed');
     assert.equal(upstreamRequests, 1);
-  } finally {
+    assert.deepEqual(received, {
+      method: 'POST',
+      url: '/lib/abc/batch?mode=commit',
+      token: 'owner-token',
+      wire: '5',
+      body: 'sealed-batch',
+    });
+
     await proxy.close();
+    await assert.rejects(fetch(`${proxy.origin}/health`));
+  } finally {
+    await proxy.close().catch(() => {});
     await upstream.close();
   }
+});
+
+test('returns a bounded failure and closes its listener when Edge is unavailable', async () => {
+  const upstream = await listen((_request, response) => response.end());
+  await upstream.close();
+  const proxy = await startRehearsalFixtureProxy(
+    () => upstream.origin,
+    () => undefined,
+  );
+  const response = await fetch(`${proxy.origin}/lib/abc/changes?since=0`);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: 'qualification_edge_unavailable' });
+
+  await proxy.close();
+  await assert.rejects(fetch(`${proxy.origin}/health`));
 });

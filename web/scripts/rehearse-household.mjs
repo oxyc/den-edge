@@ -458,22 +458,27 @@ async function checkHousehold(label, edge, wire, kept, { title = true } = {}) {
  */
 export async function prepareCrossHostFixture({ root = work } = {}) {
   const loaded = await loadWire();
-  const edge = await startEdge(join(root, 'edge-data-cross-host'));
-  const browserProxy = await startRehearsalFixtureProxy(
-    () => edge.origin,
-    (url) => {
-      if (url.pathname.startsWith('/tmdb/3/')) return { body: metadataFixture(url.href) };
-      if (url.pathname === '/atlas/manifest.json')
-        return { body: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } };
-      if (url.pathname.startsWith('/atlas/index/title/movie/')) return { body: { minimumAge: 0 } };
-      if (url.pathname.startsWith('/atlas/')) return { status: 404, body: { error: 'not_found' } };
-      return undefined;
-    },
-  );
-  const browserDirectory = join(root, 'browser-cross-host');
-  let context = await launch(browserDirectory);
-  let page = await firstPage(context);
+  let edge;
+  let browserProxy;
+  let context;
   try {
+    edge = await startEdge(join(root, 'edge-data-cross-host'));
+    browserProxy = await startRehearsalFixtureProxy(
+      () => edge.origin,
+      (url) => {
+        if (url.pathname.startsWith('/tmdb/3/')) return { body: metadataFixture(url.href) };
+        if (url.pathname === '/atlas/manifest.json')
+          return { body: { id: 'com.den.atlas', name: 'atlas', version: '0.0.0' } };
+        if (url.pathname.startsWith('/atlas/index/title/movie/'))
+          return { body: { minimumAge: 0 } };
+        if (url.pathname.startsWith('/atlas/'))
+          return { status: 404, body: { error: 'not_found' } };
+        return undefined;
+      },
+    );
+    const browserDirectory = join(root, 'browser-cross-host');
+    context = await launch(browserDirectory);
+    let page = await firstPage(context);
     const browserEdge = { origin: browserProxy.origin };
     await lookAround(page, browserEdge);
     await openTitle(page, browserEdge);
@@ -529,9 +534,9 @@ export async function prepareCrossHostFixture({ root = work } = {}) {
       },
     };
   } catch (error) {
-    await context.close().catch(() => {});
-    await browserProxy.close().catch(() => {});
-    await edge.stop().catch(() => {});
+    await context?.close().catch(() => {});
+    await browserProxy?.close().catch(() => {});
+    await edge?.stop().catch(() => {});
     await loaded.close().catch(() => {});
     throw error;
   }
