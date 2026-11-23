@@ -458,7 +458,10 @@ async function main() {
     if (!kidState.detail?.includes('label=Add to Watchlist'))
       throw new Error('native Kid rendered Owner Watchlist state');
 
-    // Remote/store outage and explicit Retry: no helper writes; the production native action owns recovery/readback.
+    // A remote outage must not turn a locally durable, offline-first native mutation into an invented failure.
+    // The production action writes SQLite first and queues Edge synchronization, so prove the new state renders
+    // while Edge is unavailable and reaches the remote document after the service returns. The separate protected-
+    // SQLite case below exercises the mutation's visible Retry for an actual local commit failure.
     await coordinator.command('switch-profile', {
       target: `profile_card_${directory.owner}`,
       value: fixture.pin,
@@ -479,17 +482,19 @@ async function main() {
     const oldEdge = fixture.edge;
     await oldEdge.stop();
     await coordinator.command('tap', { target: 'mobile_detail_watchlist' });
-    await coordinator.command('wait', {
-      target: 'mobile_title_mutation_retry',
-      timeoutSeconds: 30,
+    const offlineExpectedLabel = ownerHeldWatchlisted
+      ? 'Add to Watchlist'
+      : 'Remove from Watchlist';
+    await eventually('native rendered its locally durable offline mutation', async () => {
+      const state = await coordinator.command('snapshot', { target: 'mobile_detail_watchlist' });
+      return state.detail?.includes(`label=${offlineExpectedLabel}`) || undefined;
     });
     fixture.edge = await startEdge(
       oldEdge.dataDir,
       'visitors',
       crossHostPlaybackEdgeOptions({ port: oldEdge.port }),
     );
-    await coordinator.command('tap', { target: 'mobile_title_mutation_retry' });
-    await eventually('native Retry persisted after service restart', async () => {
+    await eventually('native offline mutation synchronized after service restart', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
       return watchlisted(library.rows) === !ownerHeldWatchlisted;
     });
