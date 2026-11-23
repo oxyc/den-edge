@@ -28,6 +28,7 @@ test('answers worker-origin fixtures locally and forwards every other request', 
         url: request.url,
         token: request.headers['x-den-library-token'],
         wire: request.headers['x-den-wire'],
+        contentType: request.headers['content-type'],
         body: Buffer.concat(chunks).toString('utf8'),
       };
       response.writeHead(207, {
@@ -62,6 +63,7 @@ test('answers worker-origin fixtures locally and forwards every other request', 
     });
     assert.equal(forwarded.status, 207);
     assert.equal(forwarded.headers.get('x-upstream-proof'), 'preserved');
+    assert.equal(forwarded.headers.get('content-type'), 'application/octet-stream');
     assert.equal(await forwarded.text(), 'committed');
     assert.equal(upstreamRequests, 1);
     assert.deepEqual(received, {
@@ -69,6 +71,7 @@ test('answers worker-origin fixtures locally and forwards every other request', 
       url: '/lib/abc/batch?mode=commit',
       token: 'owner-token',
       wire: '5',
+      contentType: 'application/octet-stream',
       body: 'sealed-batch',
     });
 
@@ -78,6 +81,32 @@ test('answers worker-origin fixtures locally and forwards every other request', 
     await proxy.close().catch(() => {});
     await upstream.close();
   }
+});
+
+test('rejects a listener bind error without leaving listeners or a server behind', async () => {
+  const expected = new Error('injected bind failure');
+  let rejectedServer;
+  await assert.rejects(
+    startRehearsalFixtureProxy(
+      () => 'http://127.0.0.1:1',
+      () => undefined,
+      {
+        listen: (server) => {
+          rejectedServer = server;
+          server.emit('error', expected);
+        },
+      },
+    ),
+    expected,
+  );
+  assert.equal(rejectedServer.listening, false);
+  assert.equal(rejectedServer.listenerCount('error'), 0);
+  assert.equal(
+    rejectedServer
+      .rawListeners('listening')
+      .some((listener) => listener.name === 'listening' || listener.listener?.name === 'listening'),
+    false,
+  );
 });
 
 test('returns a bounded failure and closes its listener when Edge is unavailable', async () => {
