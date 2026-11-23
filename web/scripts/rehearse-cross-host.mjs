@@ -8,7 +8,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +19,12 @@ import {
   readLibrary,
   startEdge,
 } from './rehearse-household.mjs';
-import { cleanupNativeIfReady, waitForNativeReady } from './rehearse-native-runner.mjs';
+import {
+  cleanupNativeIfReady,
+  coordinatorBuildSetting,
+  verifyCoordinatorScheme,
+  waitForNativeReady,
+} from './rehearse-native-runner.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const NATIVE = resolve(process.env.DEN_NATIVE_ROOT ?? join(ROOT, '../den'));
@@ -225,6 +230,12 @@ function nativeCoordinator(configuration, edgeOrigin) {
 }
 
 function runNative(origin) {
+  verifyCoordinatorScheme(
+    readFileSync(
+      join(NATIVE, 'App/Den.xcodeproj/xcshareddata/xcschemes/DenMobile.xcscheme'),
+      'utf8',
+    ),
+  );
   const child = spawn(
     'xcodebuild',
     [
@@ -245,10 +256,11 @@ function runNative(origin) {
       process.env.DEN_SOURCE_PACKAGES ?? join(homedir(), '.cache/den/SourcePackages/c3401eef9198'),
       '-disableAutomaticPackageResolution',
       '-skipPackageUpdates',
+      coordinatorBuildSetting(origin),
     ],
     {
       cwd: NATIVE,
-      env: { ...process.env, DEN_CROSS_HOST_COORDINATOR: origin },
+      env: process.env,
       stdio: ['ignore', 'inherit', 'inherit'],
     },
   );
