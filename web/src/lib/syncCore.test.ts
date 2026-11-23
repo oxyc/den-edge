@@ -64,6 +64,9 @@ describe('shared Rust WASM sync policy', () => {
   // The assistant ops are a module of their own, which the main one refuses as `assistant_module`.
   const assistantOp = (request: Record<string, unknown>) =>
     String(request.op).startsWith('assistant_');
+  // Native and Hearth carry audio_pick. Browser modules deliberately do not: Web sends wanted languages to Remux,
+  // which owns the pick. Keep running its shared fixtures, but prove this smaller binding refuses the operation.
+  const browserRefusedOps = new Set(['audio_pick']);
   // recovery_derive is the one case that is not a few microseconds of policy: the den-spec vector is a real
   // Argon2id at 64 MiB (the cost is the point of the code, and a weaker vector would not be the contract), about
   // 0.3 s on an idle machine and memory-bandwidth bound, so it slows far more than the rest when runners share a
@@ -85,7 +88,9 @@ describe('shared Rust WASM sync policy', () => {
             : syncPolicy;
         if (assistantOp(test.request)) await ensureAssistantPolicy();
         if (recoveryOp) await ensureRecoveryPolicy();
-        if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
+        if (browserRefusedOps.has(String(test.request.op)))
+          expect(() => policy(test.request)).toThrow('invalid_request');
+        else if ('error' in test) expect(() => policy(test.request)).toThrow(test.error);
         else expect(policy(test.request)).toEqual(test.ok);
       },
       kdfOps.has(String(test.request.op)) ? 30_000 : undefined,
@@ -102,5 +107,9 @@ describe('shared Rust WASM sync policy', () => {
     expect(() => syncPolicy({ op: 'recovery_derive', data: 'A'.repeat(22) })).toThrow(
       'invalid_request',
     );
+  });
+
+  it('the browser modules leave audio-track picking to Remux', () => {
+    expect(() => syncPolicy({ op: 'audio_pick', tracks: [] })).toThrow('invalid_request');
   });
 });
