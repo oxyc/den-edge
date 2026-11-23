@@ -12,6 +12,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { crossHostPlaybackEdgeOptions } from './rehearse-edge-env.mjs';
 import {
   launch,
   metadataFixture,
@@ -313,7 +314,7 @@ async function main() {
   let succeeded = false;
   let blockedStore;
   try {
-    fixture = await prepareCrossHostFixture({ root: work });
+    fixture = await prepareCrossHostFixture({ ...crossHostPlaybackEdgeOptions(), root: work });
     await switchBrowserTo(fixture.page, 'Owner', fixture.pin);
     const directory = fixture.household.directory;
     const owner = directory.profiles[directory.owner];
@@ -338,6 +339,13 @@ async function main() {
     await coordinator.command('switch-profile', {
       target: `profile_card_${directory.owner}`,
       value: fixture.pin,
+    });
+    // The external discovery/provider gap stays visible in this isolated fixture; do not invent a production
+    // fallback. Managed playback is enabled only to prove receipt recovery does not surface a false warning.
+    await sleep(500);
+    await coordinator.command('absent', {
+      target: 'playback_receipt_recovery_message',
+      timeoutSeconds: 2,
     });
     await coordinator.command('open-url', { value: 'den://media/movie/1002' });
     await coordinator.command('wait', { target: 'mobile_detail_watchlist' });
@@ -431,7 +439,11 @@ async function main() {
       target: 'mobile_title_mutation_retry',
       timeoutSeconds: 30,
     });
-    fixture.edge = await startEdge(oldEdge.dataDir, 'visitors', { port: oldEdge.port });
+    fixture.edge = await startEdge(
+      oldEdge.dataDir,
+      'visitors',
+      crossHostPlaybackEdgeOptions({ port: oldEdge.port }),
+    );
     await coordinator.command('tap', { target: 'mobile_title_mutation_retry' });
     await eventually('native Retry persisted after service restart', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
