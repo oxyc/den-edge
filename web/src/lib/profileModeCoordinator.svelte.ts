@@ -467,15 +467,17 @@ export class ProfileModeCoordinator {
     }
     const current = this.#kidTitleApprovalPresentationAuthority;
     if (
-      current?.profile !== kid.id ||
-      current.generation !== this.#kidTitleApprovalPresentationGeneration
+      current?.profile === kid.id &&
+      current.generation === this.#kidTitleApprovalPresentationGeneration
     )
-      this.#kidTitleApprovalPresentationAuthority = {
-        profile: kid.id,
-        generation: this.#kidTitleApprovalPresentationGeneration,
-        token: {},
-      };
-    return this.#kidTitleApprovalPresentationAuthority.token;
+      return current.token;
+    const token = {};
+    this.#kidTitleApprovalPresentationAuthority = {
+      profile: kid.id,
+      generation: this.#kidTitleApprovalPresentationGeneration,
+      token,
+    };
+    return token;
   }
 
   /** Reacquire only the failed household security selection; the ready service and its other views stay intact. */

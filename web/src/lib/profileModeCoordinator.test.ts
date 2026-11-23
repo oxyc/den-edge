@@ -2350,7 +2350,7 @@ describe('additional Kid creation authority', () => {
     const original = harness.coordinator.kidTitleApprovalAuthority(kid.id);
     expect(original).not.toBeNull();
 
-    const switching = harness.coordinator.switchToPersistent(kid.id);
+    const switching = switchToKid(harness.coordinator);
     await vi.waitFor(() => expect(harness.openings.has(kid.libraryKey)).toBe(true));
     harness.openings.get(kid.libraryKey)!.resolve({});
     await expect(switching).resolves.toEqual({ outcome: 'success' });
