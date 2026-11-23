@@ -242,6 +242,13 @@ export class ProfileModeCoordinator {
   #kidCreationActive = false;
   #kidTitleApproval = 0;
   #kidTitleApprovalActive = false;
+  #kidTitleApprovalPresentationAuthority: {
+    profile: string;
+    owner: ProfileSession;
+    libraryKey: string | null;
+    keyVersion: number | null;
+    token: object;
+  } | null = null;
   /** Newest-wins ownership for Settings PIN checks that share an unchanged active Kid session. */
   #settingsUnlockAttempt = 0;
   #restoring = $state(0);
@@ -443,11 +450,29 @@ export class ProfileModeCoordinator {
     return this.parentalControls ?? undefined;
   }
 
-  /** Exact in-memory authority for presenting one Owner-only Kid title edit; replacement returns a new token. */
+  /** Security-relevant Owner-session or Kid-key replacement returns a new title-edit presentation token. */
   kidTitleApprovalAuthority(profile: string): object | null {
     if (__DEN_TV__ || this.mode !== 'owner' || this.parentalPinConfigured !== true) return null;
     const kid = this.#choice(profile);
-    return kid?.id && kid.role === 'kid' ? kid : null;
+    const owner = this.#session;
+    if (!kid?.id || kid.role !== 'kid' || !owner) return null;
+    const libraryKey = kid.libraryKey ?? null;
+    const keyVersion = kid.keyVersion ?? null;
+    const current = this.#kidTitleApprovalPresentationAuthority;
+    if (
+      current?.profile !== kid.id ||
+      current.owner !== owner ||
+      current.libraryKey !== libraryKey ||
+      current.keyVersion !== keyVersion
+    )
+      this.#kidTitleApprovalPresentationAuthority = {
+        profile: kid.id,
+        owner,
+        libraryKey,
+        keyVersion,
+        token: {},
+      };
+    return this.#kidTitleApprovalPresentationAuthority.token;
   }
 
   /** Reacquire only the failed household security selection; the ready service and its other views stay intact. */

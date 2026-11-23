@@ -2330,6 +2330,24 @@ describe('additional Kid creation authority', () => {
     harness.coordinator.dispose();
   });
 
+  it('keeps title-access presentation authority across equivalent directory publication', async () => {
+    const harness = await activeOwner();
+    const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
+    const original = harness.coordinator.kidTitleApprovalAuthority(kid.id);
+    expect(original).not.toBeNull();
+
+    harness.coordinator.updateDirectory(profileDirectoryChoices(structuredClone(harness.view))!);
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBe(original);
+
+    const approval = structuredClone(harness.view);
+    approval.profiles.find((entry) => entry.id === kid.id)!.approvals = [
+      { type: 'movie', id: 550 },
+    ];
+    harness.coordinator.updateDirectory(profileDirectoryChoices(approval)!);
+    expect(harness.coordinator.kidTitleApprovalAuthority(kid.id)).toBe(original);
+    harness.coordinator.dispose();
+  });
+
   it('admits only one Kid title-access mutation while membership or storage is held', async () => {
     const harness = await activeOwner();
     const kid = harness.view.profiles.find((entry) => entry.role === 'kid')!;
