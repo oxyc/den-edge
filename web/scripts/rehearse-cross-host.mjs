@@ -420,8 +420,7 @@ async function main() {
     await fixture.page.getByRole('button', { name: 'Actions for Movie 1002' }).click();
     await fixture.page.getByRole('menuitem', { name: `Allow for ${kidName}` }).click();
     const approvalPIN = fixture.page.getByLabel('Owner PIN');
-    await approvalPIN.fill(fixture.pin.slice(0, 3));
-    await approvalPIN.press(fixture.pin.slice(3));
+    await approvalPIN.pressSequentially(fixture.pin);
     await fixture.page
       .getByText(`Allowed “Movie 1002” for ${kidName}`, { exact: true })
       .waitFor({ timeout: 30_000 });
