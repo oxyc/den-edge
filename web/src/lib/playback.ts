@@ -54,6 +54,8 @@ interface PlaybackDiagnostics {
   code?: PlaybackErrorCode;
   cause?: PlaybackCause;
   httpStatus?: number;
+  /** Scout refused only the requested release; another cached release may be asked for immediately. */
+  releaseUnavailable?: true;
   /** On `none`: the containers (`.ts`, `.avi`, …) of cached releases Remux left out because it can't open them. */
   formats?: string[];
 }
@@ -282,14 +284,21 @@ function sessionOf(body: unknown, timing: string | null): Session | null {
   };
 }
 
-async function errorBody(
-  response: Response,
-): Promise<{ error?: string; cause?: PlaybackCause; formats?: string[] }> {
+async function errorBody(response: Response): Promise<{
+  error?: string;
+  cause?: PlaybackCause;
+  formats?: string[];
+  releaseUnavailable?: true;
+}> {
   const body = record(await response.json().catch(() => null));
+  const error = text(body?.error);
   const formats: unknown = body?.formats;
   return {
-    error: text(body?.error),
+    error,
     cause: knownCause(text(body?.cause)) ?? debridPlayCodeOf(response, body),
+    ...(error === 'store_unavailable' && body?.scope === 'release'
+      ? { releaseUnavailable: true as const }
+      : {}),
     formats: Array.isArray(formats)
       ? formats
           .filter(
@@ -452,7 +461,7 @@ export async function startPlayback(
         httpStatus: response.status,
       };
     }
-    const { error, cause, formats } = await errorBody(response);
+    const { error, cause, formats, releaseUnavailable } = await errorBody(response);
     const failure = failureOf(response.status, error, cause);
     const retryMs =
       response.status === 429 ||
@@ -468,6 +477,7 @@ export async function startPlayback(
       ...(cause ? { cause } : {}),
       ...(failure === 'none' && formats?.length ? { formats } : {}),
       httpStatus: response.status,
+      ...(releaseUnavailable ? { releaseUnavailable } : {}),
       ...(retryMs ? { retryMs } : {}),
     };
   }

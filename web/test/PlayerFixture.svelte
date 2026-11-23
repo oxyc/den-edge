@@ -118,6 +118,7 @@
     {title}
     season={playingAt.season}
     episode={playingAt.episode}
+    filename={query.get('filename') ?? undefined}
     {content}
     region="US"
     scout={{ install: scoutInstall, base: '/scout/config' }}

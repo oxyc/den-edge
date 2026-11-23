@@ -478,6 +478,33 @@ describe('startPlayback', () => {
     },
   );
 
+  it.each([
+    ['release', true],
+    ['account', false],
+    [undefined, false],
+  ] as const)(
+    'only a release-scoped store refusal permits an immediate next-release attempt (%s)',
+    async (scope, permitsNextRelease) => {
+      const result = await startPlayback('/den/config/playback', want, async () =>
+        json(
+          {
+            error: 'store_unavailable',
+            service: 'torbox',
+            ...(scope ? { scope } : {}),
+          },
+          503,
+          { 'retry-after': '60' },
+        ),
+      );
+
+      expect(result).toMatchObject({
+        failure: 'temporarilyUnavailable',
+        retryMs: 60_000,
+      });
+      expect('releaseUnavailable' in result).toBe(permitsNextRelease);
+    },
+  );
+
   it('honours a TorBox rate-limit wait attached to a final source failure', async () => {
     await expect(
       startPlayback('/den/config/playback', want, async () =>
