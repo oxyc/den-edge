@@ -414,7 +414,9 @@ async function main() {
     // unrated title. Use the real Owner action and PIN gate to grant this one title instead of weakening policy or
     // seeding test-only authority; the following native step can then prove that activity still belongs to the Kid.
     const kidName = fixture.kid.display.value.name;
-    await fixture.page.goto(`${fixture.browserOrigin}/watchlist`);
+    await fixture.page.goto(fixture.browserOrigin);
+    const ownerWatchlist = fixture.page.getByRole('heading', { name: 'Watchlist', level: 2 });
+    await ownerWatchlist.scrollIntoViewIfNeeded();
     await fixture.page.getByRole('button', { name: 'Actions for Movie 1002' }).click();
     await fixture.page.getByRole('menuitem', { name: `Allow for ${kidName}` }).click();
     const approvalPIN = fixture.page.getByLabel('Owner PIN');
