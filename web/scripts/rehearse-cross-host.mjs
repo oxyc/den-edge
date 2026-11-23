@@ -388,7 +388,7 @@ async function main() {
       method: 'POST',
       pathname: ownerBatch,
       token: ownerKeys.token,
-      wire: '5',
+      wire: '4',
     };
     const dropped = fixture.browserProxy.dropNext(ownerBatchMatch);
     await Promise.all([
