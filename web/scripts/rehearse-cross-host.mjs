@@ -445,9 +445,10 @@ async function main() {
     await held.matched;
     await switchBrowserTo(fixture.page, 'Kids');
     held.release();
+    const heldCompletion = await held.completed;
+    if (!heldCompletion.ok)
+      throw new Error(`held Owner mutation returned HTTP ${heldCompletion.status}`);
     await ownerMutation;
-    const ownerAfterHeld = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
-    const ownerHeldWatchlisted = watchlisted(ownerAfterHeld.rows);
     const kidLibrary = await readLibrary(fixture.edge, fixture.wire, fixture.kid.library.value.key);
     if (watchlisted(kidLibrary.rows))
       throw new Error('held Owner mutation crossed into Kid activity');
@@ -463,11 +464,18 @@ async function main() {
       value: fixture.pin,
     });
     await coordinator.command('open-url', { value: 'den://media/movie/1002' });
-    const expectedHeldLabel = ownerHeldWatchlisted ? 'Remove from Watchlist' : 'Add to Watchlist';
-    await eventually('native Owner rendered the held mutation durable outcome', async () => {
-      const state = await coordinator.command('snapshot', { target: 'mobile_detail_watchlist' });
-      return state.detail?.includes(`label=${expectedHeldLabel}`);
-    });
+    const { watchlisted: ownerHeldWatchlisted } = await eventually(
+      'native Owner rendered the held mutation durable outcome',
+      async () => {
+        const durable = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
+        const durableWatchlisted = watchlisted(durable.rows);
+        const expectedHeldLabel = durableWatchlisted ? 'Remove from Watchlist' : 'Add to Watchlist';
+        const state = await coordinator.command('snapshot', { target: 'mobile_detail_watchlist' });
+        return state.detail?.includes(`label=${expectedHeldLabel}`)
+          ? { watchlisted: durableWatchlisted }
+          : undefined;
+      },
+    );
     const oldEdge = fixture.edge;
     await oldEdge.stop();
     await coordinator.command('tap', { target: 'mobile_detail_watchlist' });

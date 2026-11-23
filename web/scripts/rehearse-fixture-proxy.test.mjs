@@ -116,7 +116,12 @@ test('returns a bounded failure and closes its listener when Edge is unavailable
     () => upstream.origin,
     () => undefined,
   );
-  const response = await fetch(`${proxy.origin}/lib/abc/changes?since=0`);
+  const held = proxy.holdNext({ method: 'GET', pathname: '/lib/abc/changes' });
+  const responsePromise = fetch(`${proxy.origin}/lib/abc/changes?since=0`);
+  await held.matched;
+  held.release();
+  await assert.rejects(held.completed);
+  const response = await responsePromise;
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: 'qualification_edge_unavailable' });
 
@@ -198,8 +203,16 @@ test('drops exactly one worker-origin response after forwarding the committed re
 
 test('holds exactly one worker-origin request until release and close cannot strand a hold', async () => {
   let requests = 0;
-  const upstream = await listen((_request, response) => {
+  let allowFirstResponse;
+  const firstResponseAllowed = new Promise((done) => (allowFirstResponse = done));
+  let firstRequestStarted;
+  const firstRequest = new Promise((done) => (firstRequestStarted = done));
+  const upstream = await listen(async (_request, response) => {
     requests += 1;
+    if (requests === 1) {
+      firstRequestStarted();
+      await firstResponseAllowed;
+    }
     response.end('committed');
   });
   const proxy = await startRehearsalFixtureProxy(
@@ -222,6 +235,13 @@ test('holds exactly one worker-origin request until release and close cannot str
     await held.matched;
     assert.equal(requests, 0);
     held.release();
+    await firstRequest;
+    let completedBeforeUpstream = false;
+    held.completed.then(() => (completedBeforeUpstream = true));
+    await Promise.resolve();
+    assert.equal(completedBeforeUpstream, false);
+    allowFirstResponse();
+    assert.deepEqual(await held.completed, { ok: true, status: 200 });
     assert.equal(await request.then((response) => response.text()), 'committed');
     assert.equal(requests, 1);
 
@@ -233,6 +253,7 @@ test('holds exactly one worker-origin request until release and close cannot str
     });
     await closeHeld.matched;
     const closing = proxy.close();
+    assert.deepEqual(await closeHeld.completed, { ok: true, status: 200 });
     assert.equal(await closingRequest.then((response) => response.text()), 'committed');
     await closing;
     assert.equal(requests, 2);
@@ -255,7 +276,12 @@ test('close rejects an unmatched one-shot barrier instead of stranding its waite
     wire: '5',
   });
   const rejection = assert.rejects(pending.matched, /closed before the exact request matched/);
+  const completionRejection = assert.rejects(
+    pending.completed,
+    /closed before the exact request matched/,
+  );
   await proxy.close();
   await rejection;
+  await completionRejection;
   await upstream.close();
 });

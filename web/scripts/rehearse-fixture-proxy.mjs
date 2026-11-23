@@ -15,11 +15,19 @@ export function startRehearsalFixtureProxy(
     let matched;
     let rejected;
     let release;
+    let completed;
+    let completionRejected;
     const matchedPromise = new Promise((done, reject) => {
       matched = done;
       rejected = reject;
     });
     const releasePromise = new Promise((done) => (release = done));
+    const completionPromise = new Promise((done, reject) => {
+      completed = done;
+      completionRejected = reject;
+    });
+    // A caller may only need `matched`; keep a later forwarding failure from becoming an unhandled rejection.
+    completionPromise.catch(() => {});
     const entry = {
       method,
       pathname,
@@ -30,17 +38,21 @@ export function startRehearsalFixtureProxy(
       rejected,
       release,
       releasePromise,
+      completed,
+      completionRejected,
     };
     entry.timer = setTimeout(() => {
       const index = barriers.indexOf(entry);
       if (index !== -1) barriers.splice(index, 1);
-      rejected(new Error(`fixture proxy ${mode} barrier timed out before an exact request`));
+      const error = new Error(`fixture proxy ${mode} barrier timed out before an exact request`);
+      rejected(error);
+      completionRejected(error);
     }, 45_000);
     entry.timer.unref();
     barriers.push(entry);
     return {
       matched: matchedPromise,
-      ...(mode === 'hold' ? { release } : {}),
+      ...(mode === 'hold' ? { release, completed: completionPromise } : {}),
     };
   };
   const server = createServer(async (request, response) => {
@@ -54,6 +66,7 @@ export function startRehearsalFixtureProxy(
       response.end(JSON.stringify(answer.body));
       return;
     }
+    let activeBarrier;
     try {
       const barrierIndex = barriers.findIndex(
         (candidate) =>
@@ -62,7 +75,7 @@ export function startRehearsalFixtureProxy(
           candidate.token === request.headers['x-den-library-token'] &&
           candidate.wire === request.headers['x-den-wire'],
       );
-      const activeBarrier = barrierIndex === -1 ? undefined : barriers.splice(barrierIndex, 1)[0];
+      activeBarrier = barrierIndex === -1 ? undefined : barriers.splice(barrierIndex, 1)[0];
       if (activeBarrier) clearTimeout(activeBarrier.timer);
       activeBarrier?.matched();
       if (activeBarrier?.mode === 'hold') {
@@ -80,6 +93,7 @@ export function startRehearsalFixtureProxy(
         body: ['GET', 'HEAD'].includes(request.method) ? undefined : Buffer.concat(chunks),
       });
       const body = Buffer.from(await upstream.arrayBuffer());
+      activeBarrier?.completed({ ok: upstream.ok, status: upstream.status });
       if (activeBarrier?.mode === 'drop') {
         response.destroy();
         return;
@@ -90,7 +104,8 @@ export function startRehearsalFixtureProxy(
       delete responseHeaders['content-length'];
       response.writeHead(upstream.status, responseHeaders);
       response.end(body);
-    } catch {
+    } catch (error) {
+      activeBarrier?.completionRejected(error);
       if (response.destroyed) return;
       response.writeHead(503, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: 'qualification_edge_unavailable' }));
@@ -112,7 +127,9 @@ export function startRehearsalFixtureProxy(
         close: () => {
           for (const pending of barriers.splice(0)) {
             clearTimeout(pending.timer);
-            pending.rejected(new Error('fixture proxy closed before the exact request matched'));
+            const error = new Error('fixture proxy closed before the exact request matched');
+            pending.rejected(error);
+            pending.completionRejected(error);
             pending.release();
           }
           for (const active of activeHolds) active.release();
