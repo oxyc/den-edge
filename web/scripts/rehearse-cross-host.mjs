@@ -169,7 +169,9 @@ function nativeCoordinator(configuration, edgeOrigin) {
     }
     if (path.startsWith('/atlas/index/title/movie/')) {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ minimumAge: 0 }));
+      // Native decodes the complete Atlas maturity contract. Keep this fixture explicitly eligible for a Kid so
+      // the profile-isolation step exercises the separate Kid library instead of correctly stopping at policy UI.
+      response.end(JSON.stringify({ minimumAge: 0, maturityRatings: [], eligible: true }));
       return;
     }
     if (path.startsWith('/atlas/')) {
@@ -407,6 +409,28 @@ async function main() {
         .getAttribute('aria-pressed')) !== 'true'
     )
       throw new Error('browser did not render the committed lost-response readback');
+
+    // The isolated native host has no approved dataset plugin, so a Kid correctly fails closed on an otherwise
+    // unrated title. Use the real Owner action and PIN gate to grant this one title instead of weakening policy or
+    // seeding test-only authority; the following native step can then prove that activity still belongs to the Kid.
+    const kidName = fixture.kid.display.value.name;
+    await fixture.page.goto(`${fixture.browserOrigin}/watchlist`);
+    await fixture.page.getByRole('button', { name: 'Actions for Movie 1002' }).click();
+    await fixture.page.getByRole('menuitem', { name: `Allow for ${kidName}` }).click();
+    const approvalPIN = fixture.page.getByLabel('Owner PIN');
+    await approvalPIN.fill(fixture.pin.slice(0, 3));
+    await approvalPIN.press(fixture.pin.slice(3));
+    await fixture.page
+      .getByText(`Allowed “Movie 1002” for ${kidName}`, { exact: true })
+      .waitFor({ timeout: 30_000 });
+    await fixture.page.reload();
+    await fixture.page.getByRole('button', { name: 'Actions for Movie 1002' }).click();
+    await fixture.page
+      .getByRole('menuitem', { name: `Remove for ${kidName}` })
+      .waitFor({ timeout: 30_000 });
+    await fixture.page.goto(`${fixture.browserOrigin}/movie/1002`);
+    await fixture.page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor();
+    await fixture.page.getByRole('button', { name: 'Watchlist', exact: true }).waitFor();
 
     // Profile isolation and held replacement: an Owner write held at transport cannot become Kid activity.
     const held = fixture.browserProxy.holdNext(ownerBatchMatch);
