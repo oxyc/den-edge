@@ -304,6 +304,16 @@ async function switchBrowserTo(page, name, pin) {
     .waitFor({ timeout: 30_000 });
 }
 
+async function waitForNativeProfile(coordinator, authority) {
+  await coordinator.command('wait', { target: 'mobile_tab_settings', timeoutSeconds: 45 });
+  await coordinator.command('tap', { target: 'mobile_tab_settings' });
+  await coordinator.command('wait', { target: 'mobile_settings', timeoutSeconds: 30 });
+  await coordinator.command('wait', {
+    target: `settings_active_profile_${authority}`,
+    timeoutSeconds: 30,
+  });
+}
+
 async function main() {
   let fixture;
   let coordinator;
@@ -472,7 +482,7 @@ async function main() {
     chmodSync(blockedStore.path, blockedStore.mode);
     blockedStore = null;
     await coordinator.command('tap-button', { target: 'Retry' });
-    await coordinator.command('wait', { target: 'active_profile_button', timeoutSeconds: 45 });
+    await waitForNativeProfile(coordinator, directory.owner);
 
     // Both host processes restart against the same stores. Keychain/SQLite and IndexedDB must render the readback.
     await switchBrowserTo(fixture.page, 'Owner', fixture.pin);
@@ -489,7 +499,7 @@ async function main() {
     )
       throw new Error('restarted browser did not render the durable Owner outcome');
     await coordinator.command('relaunch');
-    await coordinator.command('wait', { target: 'active_profile_button', timeoutSeconds: 45 });
+    await waitForNativeProfile(coordinator, directory.owner);
     await coordinator.command('open-url', { value: 'den://media/movie/1002' });
     const restartedNative = await coordinator.command('snapshot', {
       target: 'mobile_detail_watchlist',
