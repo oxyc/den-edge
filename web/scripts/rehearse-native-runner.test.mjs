@@ -71,6 +71,7 @@ test('coordinator transport accepts only the ephemeral loopback run URL', () => 
 });
 
 test('injects one ephemeral environment into exactly one generated UI-test target', () => {
+  const coordinator = 'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef';
   const document = {
     TestConfigurations: [
       {
@@ -81,10 +82,7 @@ test('injects one ephemeral environment into exactly one generated UI-test targe
       },
     ],
   };
-  injectCoordinatorEnvironment(
-    document,
-    'http://127.0.0.1:43127/run/01234567-89ab-cdef-0123-456789abcdef',
-  );
+  injectCoordinatorEnvironment(document, coordinator);
   assert.deepEqual(document.TestConfigurations[0].TestTargets[0].EnvironmentVariables, {
     KEEP: 'yes',
   });
@@ -129,6 +127,20 @@ test('injects one ephemeral environment into exactly one generated UI-test targe
       ),
     /malformed TestTargets/,
   );
+
+  const topLevel = {
+    DenMobileTests: { BlueprintName: 'DenMobileTests', EnvironmentVariables: { KEEP: 'yes' } },
+    DenMobileUITests: {
+      BlueprintName: 'DenMobileUITests',
+      EnvironmentVariables: { EXISTING: 'yes' },
+      IsUITestBundle: true,
+    },
+    __xctestrun_metadata__: { FormatVersion: 2 },
+  };
+  injectCoordinatorEnvironment(topLevel, coordinator);
+  assert.equal(generatedCoordinatorEnvironment(topLevel), coordinator);
+  assert.deepEqual(topLevel.DenMobileTests.EnvironmentVariables, { KEEP: 'yes' });
+  assert.equal(topLevel.DenMobileUITests.EnvironmentVariables.EXISTING, 'yes');
 });
 
 test('native qualification builds once then runs only the generated injected xctestrun', () => {
@@ -197,16 +209,18 @@ test('xctestrun injection round-trips a run-owned copy and leaves canonical outp
     writeFileSync(
       canonicalPath,
       JSON.stringify({
-        TestConfigurations: [
-          {
-            TestTargets: [
-              {
-                BlueprintName: 'DenMobileUITests',
-                EnvironmentVariables: { EXISTING: 'preserved' },
-              },
-            ],
-          },
-        ],
+        DenMobileTests: {
+          BlueprintName: 'DenMobileTests',
+          EnvironmentVariables: { UNIT: 'preserved' },
+        },
+        DenMobileUITests: {
+          BlueprintName: 'DenMobileUITests',
+          EnvironmentVariables: { EXISTING: 'preserved' },
+          IsUITestBundle: true,
+        },
+        __xctestrun_metadata__: {
+          FormatVersion: 2,
+        },
       }),
     );
     const before = createHash('sha256').update(readFileSync(canonicalPath)).digest('hex');
@@ -228,10 +242,8 @@ test('xctestrun injection round-trips a run-owned copy and leaves canonical outp
     assert.equal(existsSync(temporaryJSONPath), false);
     const injected = readDocument(injectedPath);
     assert.equal(generatedCoordinatorEnvironment(injected), origin);
-    assert.equal(
-      injected.TestConfigurations[0].TestTargets[0].EnvironmentVariables.EXISTING,
-      'preserved',
-    );
+    assert.equal(injected.DenMobileUITests.EnvironmentVariables.EXISTING, 'preserved');
+    assert.equal(injected.DenMobileTests.EnvironmentVariables.UNIT, 'preserved');
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
