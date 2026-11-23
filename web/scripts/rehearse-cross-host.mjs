@@ -372,12 +372,14 @@ async function main() {
     });
     await fixture.page.goto(`${fixture.browserOrigin}/movie/1002`);
     await fixture.page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor();
-    if (
-      (await fixture.page
-        .getByRole('button', { name: 'Watchlist', exact: true })
-        .getAttribute('aria-pressed')) !== 'false'
-    )
-      throw new Error('browser did not render native removal');
+    const browserWatchlist = fixture.page.getByRole('button', {
+      name: 'Watchlist',
+      exact: true,
+    });
+    await eventually(
+      'browser rendered native removal after production sync',
+      async () => (await browserWatchlist.getAttribute('aria-pressed')) === 'false',
+    );
 
     // Lost response: Edge commits a browser write, the browser observes a transport failure, then readback converges.
     const ownerKeys = await fixture.wire.deriveKeys(Buffer.from(owner.library.value.key, 'base64'));
