@@ -20,7 +20,7 @@ import {
   startEdge,
 } from './rehearse-household.mjs';
 import {
-  cleanupNativeIfReady,
+  finalizeNativeRunner,
   generatedXCTestRuns,
   injectedXCTestRunPath,
   nativeBuildArguments,
@@ -309,6 +309,7 @@ async function main() {
   let native;
   let nativeReady = false;
   let nativeCleaned = false;
+  let nativeFinished = false;
   let succeeded = false;
   let blockedStore;
   try {
@@ -503,6 +504,7 @@ async function main() {
     await coordinator.command('cleanup', { timeoutSeconds: 45 });
     nativeCleaned = true;
     await coordinator.command('finish');
+    nativeFinished = true;
     const nativeExit = await native.exited;
     if (nativeExit.error) throw new Error(`native xcodebuild failed to start: ${nativeExit.error}`);
     if (nativeExit.code !== 0) throw new Error(`native xcodebuild exited ${nativeExit.code}`);
@@ -520,22 +522,14 @@ async function main() {
         console.error(`failed to restore blocked native store permissions: ${String(error)}`);
       }
     }
-    if (coordinator && !nativeCleaned) {
-      try {
-        nativeCleaned = await cleanupNativeIfReady({
-          coordinator,
-          native,
-          ready: nativeReady,
-          cleaned: nativeCleaned,
-        });
-      } catch (error) {
-        console.error(`bounded native cleanup failed: ${String(error)}`);
-      }
-    }
-    if (native?.child.exitCode === null) {
-      native.child.kill('SIGTERM');
-      await native.exited;
-    }
+    const finalized = await finalizeNativeRunner({
+      coordinator,
+      native,
+      ready: nativeReady,
+      cleaned: nativeCleaned,
+      finished: nativeFinished,
+    });
+    for (const error of finalized.errors) console.error(String(error));
     await coordinator?.close().catch(() => {});
     await fixture?.context?.close().catch(() => {});
     await fixture?.closeBrowserProxy?.().catch(() => {});
