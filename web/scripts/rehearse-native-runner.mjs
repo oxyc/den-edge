@@ -199,3 +199,61 @@ export async function cleanupNativeIfReady({ coordinator, native, ready, cleaned
   await coordinator.command('cleanup', { timeoutSeconds: 45 });
   return true;
 }
+
+const nativeIsLive = (native) =>
+  native?.child.exitCode === null && native?.child.signalCode === null;
+
+/** Finalize a ready UI runner without replacing the rehearsal's primary failure. */
+export async function finalizeNativeRunner({
+  coordinator,
+  native,
+  ready,
+  cleaned,
+  finished,
+  timeoutMs = 180_000,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+}) {
+  const errors = [];
+  let nextCleaned = cleaned;
+  let nextFinished = finished;
+  if (!native || !nativeIsLive(native))
+    return { cleaned: nextCleaned, errors, finished: nextFinished, timedOut: false };
+  if (!coordinator || !ready) {
+    native.child.kill('SIGTERM');
+    await native.exited;
+    return { cleaned: nextCleaned, errors, finished: nextFinished, timedOut: false };
+  }
+
+  if (!nextCleaned) {
+    try {
+      await coordinator.command('cleanup', { timeoutSeconds: 45 });
+      nextCleaned = true;
+    } catch (error) {
+      errors.push(new Error(`bounded native cleanup failed: ${String(error)}`));
+    }
+  }
+  if (!nextFinished && nativeIsLive(native)) {
+    try {
+      await coordinator.command('finish');
+      nextFinished = true;
+    } catch (error) {
+      errors.push(new Error(`bounded native finish failed: ${String(error)}`));
+    }
+  }
+
+  let timer;
+  const timedOut = await Promise.race([
+    native.exited.then(() => false),
+    new Promise((resolveTimeout) => {
+      timer = setTimer(() => resolveTimeout(true), timeoutMs);
+    }),
+  ]);
+  clearTimer(timer);
+  if (timedOut && nativeIsLive(native)) {
+    errors.push(new Error('native xcodebuild finalization timed out'));
+    native.child.kill('SIGTERM');
+    await native.exited;
+  }
+  return { cleaned: nextCleaned, errors, finished: nextFinished, timedOut };
+}

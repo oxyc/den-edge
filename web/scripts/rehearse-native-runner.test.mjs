@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   cleanupNativeIfReady,
   coordinatorBuildSetting,
+  finalizeNativeRunner,
   generatedCoordinatorEnvironment,
   generatedXCTestRuns,
   injectCoordinatorEnvironment,
@@ -50,6 +51,9 @@ const timers = () => {
     },
     clearTimer(callback) {
       active.delete(callback);
+    },
+    fireAll() {
+      for (const callback of [...active]) callback();
     },
     get count() {
       return active.size;
@@ -421,4 +425,151 @@ test('cleanup is gated on a confirmed, still-running native runner', async () =>
     true,
   );
   assert.deepEqual(commands, [['cleanup', { timeoutSeconds: 45 }]]);
+});
+
+const nativeRunner = () => {
+  const exit = deferred();
+  const signals = [];
+  const child = {
+    exitCode: null,
+    signalCode: null,
+    kill(signal) {
+      signals.push(signal);
+      child.signalCode = signal;
+      exit.resolve({ code: null, error: null, signal });
+    },
+  };
+  return { child, exited: exit.promise, resolveExit: exit.resolve, signals };
+};
+
+test('failed journey finalization requests cleanup then finish and awaits natural exit', async () => {
+  const native = nativeRunner();
+  const commands = [];
+  const coordinator = {
+    async command(...command) {
+      commands.push(command);
+      if (command[0] === 'finish') {
+        native.child.exitCode = 65;
+        native.resolveExit({ code: 65, error: null, signal: null });
+      }
+    },
+  };
+
+  const result = await finalizeNativeRunner({
+    coordinator,
+    native,
+    ready: true,
+    cleaned: false,
+    finished: false,
+  });
+
+  assert.deepEqual(commands, [['cleanup', { timeoutSeconds: 45 }], ['finish']]);
+  assert.deepEqual(result, { cleaned: true, errors: [], finished: true, timedOut: false });
+  assert.deepEqual(native.signals, []);
+});
+
+test('failed journey finalization retains cleanup error and still finishes naturally', async () => {
+  const native = nativeRunner();
+  const commands = [];
+  const coordinator = {
+    async command(...command) {
+      commands.push(command);
+      if (command[0] === 'cleanup') throw new Error('cleanup detail');
+      native.child.exitCode = 65;
+      native.resolveExit({ code: 65, error: null, signal: null });
+    },
+  };
+
+  const result = await finalizeNativeRunner({
+    coordinator,
+    native,
+    ready: true,
+    cleaned: false,
+    finished: false,
+  });
+
+  assert.deepEqual(commands, [['cleanup', { timeoutSeconds: 45 }], ['finish']]);
+  assert.equal(result.cleaned, false);
+  assert.equal(result.finished, true);
+  assert.match(result.errors[0].message, /cleanup detail/);
+  assert.equal(result.timedOut, false);
+});
+
+test('native finalization timeout sends exactly one SIGTERM', async () => {
+  const native = nativeRunner();
+  const timer = timers();
+  const finalizing = finalizeNativeRunner({
+    coordinator: { command: async () => {} },
+    native,
+    ready: true,
+    cleaned: false,
+    finished: false,
+    ...timer,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  timer.fireAll();
+
+  const result = await finalizing;
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(native.signals, ['SIGTERM']);
+  assert.match(result.errors.at(-1).message, /finalization timed out/);
+  assert.equal(timer.count, 0);
+});
+
+test('completed success does not duplicate cleanup or finish', async () => {
+  const commands = [];
+  const result = await finalizeNativeRunner({
+    coordinator: { command: async (...command) => commands.push(command) },
+    native: {
+      child: { exitCode: 0, signalCode: null },
+      exited: Promise.resolve({ code: 0, error: null, signal: null }),
+    },
+    ready: true,
+    cleaned: true,
+    finished: true,
+  });
+  assert.deepEqual(commands, []);
+  assert.deepEqual(result, { cleaned: true, errors: [], finished: true, timedOut: false });
+});
+
+test('early native exit sends neither cleanup nor finish', async () => {
+  const commands = [];
+  await finalizeNativeRunner({
+    coordinator: { command: async (...command) => commands.push(command) },
+    native: {
+      child: { exitCode: 65, signalCode: null },
+      exited: Promise.resolve({ code: 65, error: null, signal: null }),
+    },
+    ready: true,
+    cleaned: false,
+    finished: false,
+  });
+  assert.deepEqual(commands, []);
+});
+
+test('live unready native runner receives no commands and is terminated exactly once', async () => {
+  const native = nativeRunner();
+  const commands = [];
+  await finalizeNativeRunner({
+    coordinator: { command: async (...command) => commands.push(command) },
+    native,
+    ready: false,
+    cleaned: false,
+    finished: false,
+  });
+  assert.deepEqual(commands, []);
+  assert.deepEqual(native.signals, ['SIGTERM']);
+});
+
+test('live native runner without a coordinator is terminated exactly once', async () => {
+  const native = nativeRunner();
+  await finalizeNativeRunner({
+    coordinator: null,
+    native,
+    ready: true,
+    cleaned: false,
+    finished: false,
+  });
+  assert.deepEqual(native.signals, ['SIGTERM']);
 });
