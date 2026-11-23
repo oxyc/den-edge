@@ -10,6 +10,7 @@ import {
   radarRows as radarRowsImpl,
   resolvePicks,
   serviceHero,
+  servicePage,
   serviceRows,
   withBackdrops,
   type AtlasCatalog,
@@ -641,6 +642,88 @@ describe('serviceHero', () => {
   ])('falls back to the leading TMDB row when the chart is %s', async (_, listed) => {
     const hero = await serviceHero([chart({ type: 'movie', replaces: 'new', listed })], [lead]);
     expect(hero.map((t) => t.id)).toEqual([90]);
+  });
+});
+
+describe('servicePage hero recovery', () => {
+  it('keeps an authoritative empty hero as a successful answer', async () => {
+    const content: ContentServiceClientPort = {
+      query: async (request) => {
+        if (request.kind !== 'catalog.page')
+          throw new Error(`unexpected content request ${request.kind}`);
+        return { kind: 'catalog.page', titles: [] } as never;
+      },
+      onStatus: () => () => {},
+    };
+    const page = servicePage(
+      content,
+      service({ id: 8, name: 'Netflix', movies: true, series: false }),
+      'US',
+      null,
+    );
+
+    expect(await page.hero).toEqual({ state: 'ready', titles: [] });
+  });
+
+  it('keeps a failed hero distinct from empty and retries it without rebuilding rows', async () => {
+    let requests = 0;
+    const content: ContentServiceClientPort = {
+      query: async (request) => {
+        if (request.kind !== 'catalog.page')
+          throw new Error(`unexpected content request ${request.kind}`);
+        requests++;
+        if (requests === 1) throw new Error('provider unavailable');
+        return {
+          kind: 'catalog.page',
+          titles: [title(91, { type: 'movie', backdropPath: '/hero.jpg' })],
+        } as never;
+      },
+      onStatus: () => () => {},
+    };
+    const page = servicePage(
+      content,
+      service({ id: 8, name: 'Netflix', movies: true, series: false }),
+      'US',
+      null,
+    );
+    const rows = await page.rows;
+
+    expect(await page.hero).toEqual({ state: 'failed', reason: 'unreachable' });
+    expect(await page.retryHero()).toEqual({
+      state: 'ready',
+      titles: [title(91, { type: 'movie', backdropPath: '/hero.jpg' })],
+    });
+    expect(await page.rows, 'retry keeps the published row definitions').toBe(rows);
+    expect(requests, 'one initial hero request and one explicit retry').toBe(2);
+  });
+
+  it('reports a cancelled initial hero separately from a visible failure', async () => {
+    const controller = new AbortController();
+    const content: ContentServiceClientPort = {
+      query: (_request, signal) =>
+        new Promise((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+            return;
+          }
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        }) as never,
+      onStatus: () => () => {},
+    };
+    const page = servicePage(
+      content,
+      service({ id: 8, name: 'Netflix', movies: true, series: false }),
+      'US',
+      null,
+      { signal: controller.signal },
+    );
+
+    controller.abort();
+    expect(await page.hero).toEqual({ state: 'cancelled' });
   });
 });
 

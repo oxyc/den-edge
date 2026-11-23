@@ -2012,6 +2012,21 @@
   const watched = $derived(
     profileActivity ? new Set(profileActivity.watchedKeys) : overviewPresentation.watched,
   );
+  /** The small value rules a service hero reads; watched history stays an O(1) identity below, never a sorted copy. */
+  const serviceHeroRules = $derived(
+    JSON.stringify([
+      [...prefs.excludedGenres].sort((left, right) => left - right),
+      [...prefs.excludedLanguages].sort(),
+      prefs.hideAnime,
+      prefs.minReleaseYear ?? null,
+    ]),
+  );
+  /** Every authority read by a service hero; changing one retires its old titles and in-flight answer. */
+  const serviceHeroAuthority = $derived({
+    policy: session.policyKey ?? '',
+    rules: serviceHeroRules,
+    watched: prefs.hideWatched ? watched : null,
+  });
   const browseShown = (title: Title) =>
     shown(title) && !(prefs.hideWatched && watched.has(titleKey(title)));
   /**
@@ -3087,6 +3102,7 @@
     {reel}
     {routes}
     shown={browseShown}
+    authority={serviceHeroAuthority}
     {active}
   />
 {:else if route.page === 'search'}
