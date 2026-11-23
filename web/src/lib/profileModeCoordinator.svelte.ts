@@ -278,10 +278,15 @@ export class ProfileModeCoordinator {
     this.#profileModels = profileModels;
     this.#preview = directory !== null && profileModels === null;
     this.#pendingOwner = owner;
-    // The Owner library the page already opened is a profile library too.
-    if (profileModels) this.#seedPreferences(owner.model);
 
     this.#storageChanged({ key: ACTIVE_PROFILE_KEY, storageArea: storage });
+    // The Owner library the page already opened is a profile library too. Marker restoration above can replace and
+    // close it synchronously, in which case it no longer owns a preference seed.
+    if (
+      profileModels &&
+      (this.#pendingOwner?.model === owner.model || this.#session?.model === owner.model)
+    )
+      this.#seedPreferences(owner.model);
     this.#events?.addEventListener('storage', this.#storageChanged);
     // Reads no reactive state: the committed-household constructor runs inside a tracked effect.
     startupMark(
@@ -712,6 +717,7 @@ export class ProfileModeCoordinator {
       this.#releasePendingOwner(next);
       this.#settingsPin = null;
       this.#session = next;
+      if (nextPersistent) this.#seedPreferences(nextPersistent.model!);
       previous?.close();
       return TRANSITION_SUCCESS;
     } catch (cause) {
@@ -938,9 +944,18 @@ export class ProfileModeCoordinator {
    * household's, once. Writes carry the household's stamps, so repeating this on every open changes nothing.
    */
   #seedPreferences(profile: LibraryModel): void {
+    const current = () =>
+      !this.#disposed &&
+      (this.#session?.model === profile || this.#pendingOwner?.model === profile);
     void Promise.resolve()
-      .then(() => this.#household.seedProfilePreferences(profile))
-      .catch((error: unknown) => console.warn('den: profile preference seeding failed', error));
+      .then(() => {
+        if (!current()) return;
+        return this.#household.seedProfilePreferences(profile, current);
+      })
+      .catch((error: unknown) => {
+        // A replacement closes the retired model. That cancellation is expected; a current session's failure is not.
+        if (current()) console.warn('den: profile preference seeding failed', error);
+      });
   }
 
   async #preparePersistent(
@@ -975,7 +990,6 @@ export class ProfileModeCoordinator {
       handle.close();
       return null;
     }
-    this.#seedPreferences(handle.model);
     return activeProfileSession(
       persistentProfileIdentity(choice.id, key),
       this.#household,
@@ -1005,6 +1019,7 @@ export class ProfileModeCoordinator {
       if (saved?.mode === 'owner') keepActiveProfile(this.#storage, this.#ownerMarker());
       this.#releasePendingOwner(next);
       this.#session = next;
+      this.#seedPreferences(next.model!);
     } catch (error) {
       // No one waits on a restore: the page stays at the profile gate, and the reason is logged. A failed legacy
       // marker convergence also discards the session prepared above.
