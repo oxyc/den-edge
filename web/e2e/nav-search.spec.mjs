@@ -558,11 +558,11 @@ test('Seen and Not seen filter typed title results from this profile only', asyn
     await input(page).fill('Neon');
 
     const search = active(page);
-    const viewing = search
+    const personal = search
       .getByRole('navigation', { name: 'Browse by category' })
-      .getByRole('group', { name: 'Viewing' });
+      .getByRole('group', { name: 'For You' });
     const selected = search.getByRole('group', { name: 'Selected' });
-    await viewing.getByRole('link', { name: 'Seen', exact: true }).click();
+    await personal.getByRole('link', { name: 'Seen', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?q=Neon&c=seen$/);
     await expect(selected.getByRole('button', { name: 'Remove Seen' })).toBeVisible();
     await expect(search.getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
@@ -584,7 +584,7 @@ test('Seen and Not seen filter typed title results from this profile only', asyn
     await search.locator('.controls').getByRole('link', { name: 'All', exact: true }).click();
 
     await selected.getByRole('button', { name: 'Remove Seen' }).click();
-    await viewing.getByRole('link', { name: 'Not seen', exact: true }).click();
+    await personal.getByRole('link', { name: 'Not seen', exact: true }).click();
     await expect(page).toHaveURL(/\/search\?q=Neon&c=not-seen$/);
     await expect(selected.getByRole('button', { name: 'Remove Not seen' })).toBeVisible();
     await expect(search.getByRole('link', { name: 'Film 101 2026' })).toBeVisible();
@@ -605,11 +605,12 @@ test('viewing filters are absent without profile activity authority', async () =
     await page.goto(`${FIXTURE}?fixtureGuest`);
     await openSearch(page, 1280);
     await input(page).fill('Neon');
-    await expect(
-      active(page)
-        .getByRole('navigation', { name: 'Browse by category' })
-        .getByRole('group', { name: 'Viewing' }),
-    ).toHaveCount(0);
+    const personal = active(page)
+      .getByRole('navigation', { name: 'Browse by category' })
+      .getByRole('group', { name: 'For You' });
+    await expect(personal.getByRole('link', { name: 'For You', exact: true })).toBeVisible();
+    await expect(personal.getByRole('link', { name: 'Seen', exact: true })).toHaveCount(0);
+    await expect(personal.getByRole('link', { name: 'Not seen', exact: true })).toHaveCount(0);
     await expect(active(page).getByRole('link', { name: 'Film 100 2026' })).toBeVisible();
   } finally {
     await browser.close();
