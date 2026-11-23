@@ -29,6 +29,8 @@ export function coordinatorBuildSetting(raw) {
 }
 
 const generatedUITestTarget = (document) => {
+  if (document === null || Array.isArray(document) || typeof document !== 'object')
+    throw new Error('generated xctestrun root is malformed');
   const configurations = document.TestConfigurations;
   let targets = [];
   if (configurations !== undefined) {
