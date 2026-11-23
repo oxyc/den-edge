@@ -364,13 +364,13 @@ async function main() {
       throw new Error(`native did not render browser Watchlist state: ${initial.detail}`);
     }
 
-    // Native → browser: the native control writes through UniFFI/SQLite/Edge; the browser reload reads the same row.
+    // Native → browser: the native control writes through UniFFI/SQLite/Edge; browser navigation reads the same row.
     await coordinator.command('tap', { target: 'mobile_detail_watchlist' });
     await eventually('native removal persisted', async () => {
       const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
       return !watchlisted(library.rows);
     });
-    await fixture.page.reload();
+    await fixture.page.goto(`${fixture.browserOrigin}/movie/1002`);
     await fixture.page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor();
     if (
       (await fixture.page
