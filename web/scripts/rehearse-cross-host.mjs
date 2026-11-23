@@ -463,12 +463,11 @@ async function main() {
       value: fixture.pin,
     });
     await coordinator.command('open-url', { value: 'den://media/movie/1002' });
-    const heldOwnerState = await coordinator.command('snapshot', {
-      target: 'mobile_detail_watchlist',
-    });
     const expectedHeldLabel = ownerHeldWatchlisted ? 'Remove from Watchlist' : 'Add to Watchlist';
-    if (!heldOwnerState.detail?.includes(`label=${expectedHeldLabel}`))
-      throw new Error('native Owner did not render the held mutation durable outcome');
+    await eventually('native Owner rendered the held mutation durable outcome', async () => {
+      const state = await coordinator.command('snapshot', { target: 'mobile_detail_watchlist' });
+      return state.detail?.includes(`label=${expectedHeldLabel}`);
+    });
     const oldEdge = fixture.edge;
     await oldEdge.stop();
     await coordinator.command('tap', { target: 'mobile_detail_watchlist' });
