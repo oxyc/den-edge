@@ -117,6 +117,125 @@ test('a TorBox rate limit waits out Retry-After before a new operation', async (
   }
 });
 
+test('a release-scoped store refusal immediately moves to the next cached release', async () => {
+  const requests = [];
+  const askedAt = [];
+  let releaseRecovery;
+  const recoveryGate = new Promise((resolve) => (releaseRecovery = resolve));
+  const { browser, page } = await playerPage(async (route) => {
+    requests.push(route.request().postDataJSON());
+    askedAt.push(Date.now());
+    if (requests.length === 1)
+      return route.fulfill({
+        status: 503,
+        headers: { 'retry-after': '60' },
+        json: { error: 'store_unavailable', scope: 'release', service: 'torbox' },
+      });
+    await recoveryGate;
+    return route.fulfill({
+      json: {
+        url: '/release-recovery/master.m3u8',
+        release: { label: 'Working 1080p', filename: 'working.mkv', size: 1 },
+        session: {
+          id: 'release-recovery',
+          duration: 60,
+          audioTrack: 0,
+          audioTracks: [],
+          endUrl: '/release-recovery/end',
+          heartbeatUrl: '/release-recovery/heartbeat',
+          reportUrl: '/release-recovery/report',
+        },
+      },
+    });
+  });
+  try {
+    await page.route(`${ORIGIN}/release-recovery/**`, async (route) => {
+      if (route.request().method() !== 'GET') return route.fulfill({ status: 204 });
+      const name = new URL(route.request().url()).pathname.split('/').pop();
+      const file = name === 'master.m3u8' ? 'media.m3u8' : name;
+      await route.fulfill({
+        contentType: file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4',
+        body: await readFile(new URL(file, hls)),
+      });
+    });
+    await page.goto(
+      `${ORIGIN}/test/player.html?playback=managed&filename=blocked.mkv&interfaceLanguage=es`,
+    );
+
+    await expect.poll(() => requests.length, { timeout: 5_000 }).toBe(2);
+    expect(askedAt[1] - askedAt[0], 'does not wait out the 60-second Retry-After').toBeLessThan(
+      5_000,
+    );
+    expect(requests[0]).toMatchObject({ filename: 'blocked.mkv' });
+    expect(requests[1]).toMatchObject({ exclude: ['blocked.mkv'] });
+    expect(requests[1]).not.toHaveProperty('filename');
+    await expect(page.getByRole('status')).toHaveText('Cambiando…');
+    releaseRecovery();
+    await expect(page.getByTestId('playback-source')).toHaveText('Den Remux');
+    await expect(page.getByText(/Waiting as requested/)).toHaveCount(0);
+  } finally {
+    releaseRecovery();
+    await browser.close();
+  }
+});
+
+for (const [scope, description] of [
+  ['account', 'an account-scoped'],
+  [undefined, 'a legacy no-scope'],
+]) {
+  test(`${description} store refusal keeps its account-wide Retry-After`, async () => {
+    const askedAt = [];
+    const requests = [];
+    const { browser, page } = await playerPage((route) => {
+      askedAt.push(Date.now());
+      requests.push(route.request().postDataJSON());
+      return route.fulfill({
+        status: 503,
+        headers: { 'retry-after': '1' },
+        json: {
+          error: 'store_unavailable',
+          service: 'torbox',
+          ...(scope ? { scope } : {}),
+        },
+      });
+    });
+    try {
+      await page.goto(`${ORIGIN}/test/player.html?playback=managed&filename=blocked.mkv`);
+      await expect(page.getByRole('status')).toContainText('temporarily unavailable');
+      await expect.poll(() => requests.length, { timeout: 5_000 }).toBe(2);
+      expect(askedAt[1] - askedAt[0]).toBeGreaterThanOrEqual(900);
+      expect(requests[1]).toMatchObject({ filename: 'blocked.mkv' });
+      expect(requests[1]).not.toHaveProperty('exclude');
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+test('an unnamed release-scoped refusal keeps Retry-After until the server identifies the release', async () => {
+  const askedAt = [];
+  const requests = [];
+  const { browser, page } = await playerPage((route) => {
+    askedAt.push(Date.now());
+    requests.push(route.request().postDataJSON());
+    return route.fulfill({
+      status: 503,
+      headers: { 'retry-after': '1' },
+      json: { error: 'store_unavailable', scope: 'release', service: 'torbox' },
+    });
+  });
+  try {
+    await page.goto(`${ORIGIN}/test/player.html?playback=managed`);
+    await expect(page.getByRole('status')).toContainText('temporarily unavailable');
+    await expect.poll(() => requests.length, { timeout: 5_000 }).toBe(2);
+    expect(askedAt[1] - askedAt[0]).toBeGreaterThanOrEqual(900);
+    expect(requests[1]).not.toHaveProperty('filename');
+    expect(requests[1]).not.toHaveProperty('exclude');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a rejected TorBox key tells the guest exactly what to update', async () => {
   const { browser, page } = await playerPage((route) =>
     route.fulfill({

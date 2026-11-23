@@ -1173,7 +1173,7 @@
       ? null
       : !session
         ? startupRetryNotice
-          ? { text: startupRetryNotice }
+          ? { text: i18n.phrase(startupRetryNotice) }
           : startupNotice(elapsedMs, 'session')
         : !played && !awaitingPress && !startsIn && !reconnecting
           ? startupNotice(elapsedMs, 'starting', session.release, undefined, bufferProgress)
@@ -1832,6 +1832,34 @@
           undefined,
           delivery,
           'The remaining releases did not work—trying the full list…',
+          compatibleSubtitles,
+        );
+      }
+      // Scout can now distinguish one release's backoff from a rejected account shared by every release. Retire
+      // only an exact filename this attempt named: a legacy/no-scope answer, an account refusal, or an unnamed
+      // automatic choice has no safe identity to exclude and keeps the existing Retry-After wait below.
+      if (
+        'releaseUnavailable' in result &&
+        result.releaseUnavailable &&
+        !replacing &&
+        pick?.filename
+      ) {
+        const unavailable = pick.filename;
+        leave(unavailable);
+        if (chosenRelease === unavailable) {
+          chosenRelease = undefined;
+          forgetContinuity();
+        }
+        const nextExtra = {
+          ...extra,
+          exclude: [...new Set([...(extra.exclude ?? []), unavailable])],
+        };
+        return begin(
+          undefined,
+          nextExtra,
+          undefined,
+          'ordinary',
+          'Switching…',
           compatibleSubtitles,
         );
       }
