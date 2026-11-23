@@ -316,6 +316,14 @@ async function waitForNativeProfile(coordinator, authority) {
   });
 }
 
+async function collectTeardownError(errors, description, operation) {
+  try {
+    await operation();
+  } catch (error) {
+    errors.push(new Error(`${description}: ${String(error)}`, { cause: error }));
+  }
+}
+
 async function main() {
   let fixture;
   let coordinator;
@@ -323,7 +331,8 @@ async function main() {
   let nativeReady = false;
   let nativeCleaned = false;
   let nativeFinished = false;
-  let succeeded = false;
+  let semanticFailed = false;
+  let primaryFailure;
   let blockedStore;
   let rejectedStore;
   try {
@@ -580,10 +589,13 @@ async function main() {
     blockedStore = { path: blockedStorePath, mode: statSync(blockedStorePath).mode & 0o777 };
     chmodSync(blockedStore.path, 0o000);
     await coordinator.command('relaunch');
-    await coordinator.command('wait-button', { target: 'Retry', timeoutSeconds: 30 });
+    await coordinator.command('wait-button', {
+      target: 'Try Opening Again',
+      timeoutSeconds: 30,
+    });
     chmodSync(blockedStore.path, blockedStore.mode);
     blockedStore = null;
-    await coordinator.command('tap-button', { target: 'Retry' });
+    await coordinator.command('tap-button', { target: 'Try Opening Again' });
     await waitForNativeProfile(coordinator, directory.owner);
 
     // Both host processes restart against the same stores. Keychain/SQLite and IndexedDB must render the readback.
@@ -632,51 +644,82 @@ async function main() {
     const nativeExit = await native.exited;
     if (nativeExit.error) throw new Error(`native xcodebuild failed to start: ${nativeExit.error}`);
     if (nativeExit.code !== 0) throw new Error(`native xcodebuild exited ${nativeExit.code}`);
-    succeeded = true;
+  } catch (error) {
+    semanticFailed = true;
+    primaryFailure = error;
+  } finally {
+    const teardownErrors = [];
+    if (rejectedStore) {
+      await collectTeardownError(
+        teardownErrors,
+        'failed to remove native store refusal',
+        async () => {
+          execFileSync('sqlite3', [
+            '-cmd',
+            '.timeout 5000',
+            rejectedStore,
+            'DROP TRIGGER IF EXISTS reject_cross_host_title;',
+          ]);
+        },
+      );
+    }
+    if (blockedStore) {
+      await collectTeardownError(
+        teardownErrors,
+        'failed to restore blocked native store permissions',
+        async () => {
+          chmodSync(blockedStore.path, blockedStore.mode);
+        },
+      );
+    }
+    await collectTeardownError(teardownErrors, 'failed to finalize native runner', async () => {
+      const finalized = await finalizeNativeRunner({
+        coordinator,
+        native,
+        ready: nativeReady,
+        cleaned: nativeCleaned,
+        finished: nativeFinished,
+      });
+      teardownErrors.push(...finalized.errors);
+    });
+    await collectTeardownError(teardownErrors, 'failed to close native coordinator', async () => {
+      await coordinator?.close();
+    });
+    await collectTeardownError(teardownErrors, 'failed to close browser context', async () => {
+      await fixture?.context?.close();
+    });
+    await collectTeardownError(teardownErrors, 'failed to close browser proxy', async () => {
+      await fixture?.closeBrowserProxy?.();
+    });
+    if (fixture?.edge?.log)
+      await collectTeardownError(teardownErrors, 'failed to retain den-edge log', async () => {
+        writeFileSync(join(work, 'den-edge.log'), `${fixture.edge.log.join('\n')}\n`);
+      });
+    await collectTeardownError(teardownErrors, 'failed to stop den-edge', async () => {
+      await fixture?.edge?.stop();
+    });
+    await collectTeardownError(teardownErrors, 'failed to close Wasm wire host', async () => {
+      await fixture?.closeWire?.();
+    });
+
+    if (!KEEP && !semanticFailed && teardownErrors.length === 0) {
+      await collectTeardownError(teardownErrors, 'failed to remove isolated evidence', async () => {
+        rmSync(work, { recursive: true, force: true });
+      });
+    }
+    if (semanticFailed || teardownErrors.length) {
+      console.error(`cross-host evidence retained under ${work}`);
+      for (const error of teardownErrors) console.error(String(error));
+    }
+    if (semanticFailed) throw primaryFailure;
+    if (teardownErrors.length)
+      throw new AggregateError(teardownErrors, 'cross-host qualification teardown failed');
+
     console.log(
       KEEP
         ? `PASS native↔browser cross-host qualification; evidence retained under ${work}`
         : 'PASS native↔browser cross-host qualification; isolated artifacts verified and removed',
     );
-  } finally {
-    if (rejectedStore) {
-      try {
-        execFileSync('sqlite3', [
-          '-cmd',
-          '.timeout 5000',
-          rejectedStore,
-          'DROP TRIGGER IF EXISTS reject_cross_host_title;',
-        ]);
-      } catch (error) {
-        console.error(`failed to remove native store refusal: ${String(error)}`);
-      }
-    }
-    if (blockedStore) {
-      try {
-        chmodSync(blockedStore.path, blockedStore.mode);
-      } catch (error) {
-        console.error(`failed to restore blocked native store permissions: ${String(error)}`);
-      }
-    }
-    const finalized = await finalizeNativeRunner({
-      coordinator,
-      native,
-      ready: nativeReady,
-      cleaned: nativeCleaned,
-      finished: nativeFinished,
-    });
-    for (const error of finalized.errors) console.error(String(error));
-    await coordinator?.close().catch(() => {});
-    await fixture?.context?.close().catch(() => {});
-    await fixture?.closeBrowserProxy?.().catch(() => {});
-    if (fixture?.edge?.log)
-      writeFileSync(join(work, 'den-edge.log'), `${fixture.edge.log.join('\n')}\n`);
-    await fixture?.edge?.stop().catch(() => {});
-    await fixture?.closeWire?.().catch(() => {});
-    if (!KEEP && succeeded) rmSync(work, { recursive: true, force: true });
-    else if (!succeeded) {
-      console.error(`cross-host evidence retained under ${work}`);
-    }
   }
 }
 
