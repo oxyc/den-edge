@@ -325,6 +325,7 @@ async function main() {
   let nativeFinished = false;
   let succeeded = false;
   let blockedStore;
+  let rejectedStore;
   try {
     fixture = await prepareCrossHostFixture({ ...crossHostPlaybackEdgeOptions(), root: work });
     await switchBrowserTo(fixture.page, 'Owner', fixture.pin);
@@ -489,6 +490,10 @@ async function main() {
       const state = await coordinator.command('snapshot', { target: 'mobile_detail_watchlist' });
       return state.detail?.includes(`label=${offlineExpectedLabel}`) || undefined;
     });
+    await coordinator.command('absent', {
+      target: 'mobile_title_mutation_retry',
+      timeoutSeconds: 1,
+    });
     fixture.edge = await startEdge(
       oldEdge.dataDir,
       'visitors',
@@ -499,8 +504,6 @@ async function main() {
       return watchlisted(library.rows) === !ownerHeldWatchlisted;
     });
 
-    // A real protected SQLite namespace is unavailable at open. Restore it, then recover through the mounted Retry.
-    await coordinator.command('terminate');
     const container = execFileSync(
       'xcrun',
       ['simctl', 'get_app_container', SIMULATOR_ID, MOBILE_BUNDLE_ID, 'data'],
@@ -514,6 +517,52 @@ async function main() {
       runID,
       'Paired',
     );
+
+    // Refuse the production profile store's next records commit. Unlike an Edge outage, this makes the requested
+    // local state non-durable, so the title action must keep the current state and expose its exact Retry operation.
+    rejectedStore = join(blockedStorePath, 'Profiles', directory.owner, 'library.sqlite');
+    execFileSync('sqlite3', [
+      '-cmd',
+      '.timeout 5000',
+      rejectedStore,
+      "CREATE TRIGGER reject_cross_host_title BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'cross-host write refusal'); END;",
+    ]);
+    await coordinator.command('tap', { target: 'mobile_detail_watchlist' });
+    await coordinator.command('wait', {
+      target: 'mobile_title_mutation_retry',
+      timeoutSeconds: 30,
+    });
+    const refusedState = await coordinator.command('snapshot', {
+      target: 'mobile_detail_watchlist',
+    });
+    if (!refusedState.detail?.includes(`label=${offlineExpectedLabel}`))
+      throw new Error('refused native commit did not retain the current rendered state');
+    const refusedLibrary = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
+    if (watchlisted(refusedLibrary.rows) !== !ownerHeldWatchlisted)
+      throw new Error('refused native commit changed the remote Owner document');
+    execFileSync('sqlite3', [
+      '-cmd',
+      '.timeout 5000',
+      rejectedStore,
+      'DROP TRIGGER reject_cross_host_title;',
+    ]);
+    rejectedStore = null;
+    await coordinator.command('tap', { target: 'mobile_title_mutation_retry' });
+    await eventually('native commit Retry synchronized after store recovery', async () => {
+      const library = await readLibrary(fixture.edge, fixture.wire, owner.library.value.key);
+      return watchlisted(library.rows) === ownerHeldWatchlisted;
+    });
+    const recoveredExpectedLabel = ownerHeldWatchlisted
+      ? 'Remove from Watchlist'
+      : 'Add to Watchlist';
+    const recoveredState = await coordinator.command('snapshot', {
+      target: 'mobile_detail_watchlist',
+    });
+    if (!recoveredState.detail?.includes(`label=${recoveredExpectedLabel}`))
+      throw new Error('native commit Retry did not recover rendered state in process');
+
+    // Make the real paired SQLite namespace unavailable at open. Restore it, then recover the mounted session Retry.
+    await coordinator.command('terminate');
     blockedStore = { path: blockedStorePath, mode: statSync(blockedStorePath).mode & 0o777 };
     chmodSync(blockedStore.path, 0o000);
     await coordinator.command('relaunch');
@@ -530,7 +579,7 @@ async function main() {
     fixture.page = fixture.context.pages()[0] ?? (await fixture.context.newPage());
     await fixture.page.goto(`${fixture.browserOrigin}/movie/1002`);
     await fixture.page.getByRole('heading', { name: 'Movie 1002', level: 1 }).waitFor();
-    const expectedFinalWatchlist = !ownerHeldWatchlisted;
+    const expectedFinalWatchlist = ownerHeldWatchlisted;
     if (
       (await fixture.page
         .getByRole('button', { name: 'Watchlist', exact: true })
@@ -576,6 +625,18 @@ async function main() {
         : 'PASS native↔browser cross-host qualification; isolated artifacts verified and removed',
     );
   } finally {
+    if (rejectedStore) {
+      try {
+        execFileSync('sqlite3', [
+          '-cmd',
+          '.timeout 5000',
+          rejectedStore,
+          'DROP TRIGGER IF EXISTS reject_cross_host_title;',
+        ]);
+      } catch (error) {
+        console.error(`failed to remove native store refusal: ${String(error)}`);
+      }
+    }
     if (blockedStore) {
       try {
         chmodSync(blockedStore.path, blockedStore.mode);
