@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, globSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const exitError = ({ code, error, signal }, phase) => {
   if (error) return new Error(`native xcodebuild failed to start: ${error.message ?? error}`);
@@ -88,6 +89,10 @@ export const nativeTestArguments = ({ destination, resultBundlePath, xctestrunPa
   '-resultBundlePath',
   resultBundlePath,
 ];
+
+/** Resolve Node's cwd-relative glob matches beneath the exact isolated Products root. */
+export const generatedXCTestRuns = (productsPath) =>
+  globSync('**/*.xctestrun', { cwd: productsPath }).map((match) => resolve(productsPath, match));
 
 const readPlist = (path) =>
   JSON.parse(execFileSync('plutil', ['-convert', 'json', '-o', '-', path], { encoding: 'utf8' }));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import {
   cleanupNativeIfReady,
   coordinatorBuildSetting,
   generatedCoordinatorEnvironment,
+  generatedXCTestRuns,
   injectCoordinatorEnvironment,
   nativeBuildArguments,
   nativeTestArguments,
@@ -171,6 +172,19 @@ test('native qualification builds once then runs only the generated injected xct
       '/evidence/NativeCrossHost.xcresult',
     ],
   );
+});
+
+test('generated xctestrun discovery resolves cwd-relative Node glob matches', () => {
+  const root = mkdtempSync(join(tmpdir(), 'den-xctestrun-discovery-'));
+  try {
+    const nested = join(root, 'Debug-iphonesimulator');
+    mkdirSync(nested, { recursive: true });
+    const run = join(nested, 'DenMobile.xctestrun');
+    writeFileSync(run, 'fixture');
+    assert.deepEqual(generatedXCTestRuns(root), [run]);
+  } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
 });
 
 test('xctestrun injection round-trips a run-owned copy and leaves canonical output unchanged', () => {
