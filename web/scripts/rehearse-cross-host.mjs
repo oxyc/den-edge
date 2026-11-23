@@ -19,6 +19,7 @@ import {
   readLibrary,
   startEdge,
 } from './rehearse-household.mjs';
+import { cleanupNativeIfReady, waitForNativeReady } from './rehearse-native-runner.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const NATIVE = resolve(process.env.DEN_NATIVE_ROOT ?? join(ROOT, '../den'));
@@ -75,6 +76,8 @@ function nativeCoordinator(configuration, edgeOrigin) {
   const waiters = [];
   const results = new Map();
   const resultWaiters = new Map();
+  const readyWaiters = new Set();
+  let readyResult;
   const accessPath = `/run/${randomUUID()}`;
   let origin;
 
@@ -126,6 +129,11 @@ function nativeCoordinator(configuration, edgeOrigin) {
       for await (const chunk of request) chunks.push(chunk);
       const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       results.set(result.sequence, result);
+      if (result.sequence === 0) {
+        readyResult = result;
+        for (const waiter of readyWaiters) waiter(result);
+        readyWaiters.clear();
+      }
       const waiting = resultWaiters.get(result.sequence);
       if (waiting) {
         clearTimeout(waiting.timer);
@@ -208,7 +216,11 @@ function nativeCoordinator(configuration, edgeOrigin) {
         throw new Error(`native ${action} failed: ${result.detail ?? 'no detail'}`);
       return result;
     },
-    waitUntilReady: () => eventually('native UI runner ready', () => results.get(0), 180_000),
+    subscribeReady: (waiter) => {
+      if (readyResult) waiter(readyResult);
+      else readyWaiters.add(waiter);
+      return () => readyWaiters.delete(waiter);
+    },
   };
 }
 
@@ -248,7 +260,7 @@ function runNative(origin) {
       done(result);
     };
     child.once('error', (error) => settle({ code: null, error }));
-    child.once('exit', (code) => settle({ code, error: null }));
+    child.once('exit', (code, signal) => settle({ code, error: null, signal }));
   });
   return {
     child,
@@ -273,6 +285,7 @@ async function main() {
   let fixture;
   let coordinator;
   let native;
+  let nativeReady = false;
   let nativeCleaned = false;
   let succeeded = false;
   let blockedStore;
@@ -295,7 +308,8 @@ async function main() {
     );
     const coordinatorOrigin = await coordinator.start();
     native = runNative(coordinatorOrigin);
-    await coordinator.waitUntilReady();
+    await waitForNativeReady(native, coordinator);
+    nativeReady = true;
 
     // Browser → native: persisted Owner activity renders in the real native accessibility tree.
     await coordinator.command('switch-profile', {
@@ -492,8 +506,12 @@ async function main() {
     }
     if (coordinator && !nativeCleaned) {
       try {
-        await coordinator.command('cleanup', { timeoutSeconds: 45 });
-        nativeCleaned = true;
+        nativeCleaned = await cleanupNativeIfReady({
+          coordinator,
+          native,
+          ready: nativeReady,
+          cleaned: nativeCleaned,
+        });
       } catch (error) {
         console.error(`bounded native cleanup failed: ${String(error)}`);
       }
