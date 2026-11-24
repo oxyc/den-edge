@@ -339,11 +339,17 @@
     /** null while the first unobtrusive save runs; false after rejection; true during an explicit retry. */
     saving: boolean | null;
   };
+  type HeldEpisodeAdvance = {
+    readonly playbackIntent: number;
+    readonly receiptOperationId: string;
+    readonly next: Target;
+  };
   let finalProgressReceipts = $state<FinalProgressReceipt[]>([]);
   const finalProgressRecovery = $derived(
     finalProgressReceipts.find(({ saving }) => saving !== null),
   );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let heldEpisodeAdvance = $state.raw<HeldEpisodeAdvance | null>(null);
   let playbackReceiptHandoffPending = $state<number | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
@@ -357,6 +363,17 @@
     const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
     void tick().then(() => finalProgressRetryButton?.focus());
+  });
+  $effect(() => {
+    const held = heldEpisodeAdvance;
+    if (!held) return;
+    if (finalProgressReceipts.some(({ operationId }) => operationId === held.receiptOperationId))
+      return;
+    heldEpisodeAdvance = null;
+    // A route, player or explicit play that replaced the ended episode owns continuation now. The old receipt's
+    // acknowledgement must never revive it or replace the newer player.
+    if (!playing || playbackIntent !== held.playbackIntent) return;
+    void advance(held.next, held.playbackIntent);
   });
   $effect(() => {
     // Ordinary capable artifacts cannot enter this recovery path. Keep the E2E seam so browser automation can run
@@ -1766,7 +1783,7 @@
   });
 
   /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
-  async function advance(next: Target) {
+  async function advance(next: Target, intent = playbackIntent) {
     const blocked = await playGuard(next.title, {
       content: session.content,
       region: detailPrefs.region,
@@ -1774,7 +1791,7 @@
       restricted: session.restricted,
       signal: playSignal,
     });
-    if (playStopped()) return;
+    if (playStopped() || !playing || playbackIntent !== intent) return;
     if (blocked) {
       playing = null;
       session.notify(blocked);
@@ -1783,6 +1800,32 @@
     // Advancing is one continuing player session, not another detail visit. Rewrite its address so Refresh resumes
     // the episode now on screen without adding one history entry for every automatic advance.
     playerAddress(next, true);
+  }
+
+  function advanceAfterFinalProgress(from: Target, next: Target) {
+    const receipt = finalProgressReceipts.find(
+      ({ target }) =>
+        titleKey(target.title) === titleKey(from.title) &&
+        target.season === from.season &&
+        target.episode === from.episode,
+    );
+    const intent = playbackIntent;
+    if (!receipt) {
+      void advance(next, intent);
+      return;
+    }
+    // The countdown and an explicit Next can cross at the same boundary. Retain only one continuation for this
+    // exact player/receipt; durable acknowledgement or the viewer's Leave unsaved decision releases it.
+    if (
+      heldEpisodeAdvance?.playbackIntent === intent &&
+      heldEpisodeAdvance.receiptOperationId === receipt.operationId
+    )
+      return;
+    heldEpisodeAdvance = {
+      playbackIntent: intent,
+      receiptOperationId: receipt.operationId,
+      next: { ...next, title: { ...next.title } },
+    };
   }
 
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
@@ -3456,7 +3499,7 @@
       playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after
-        ? () => void advance({ title: target.title, ...after })
+        ? () => advanceAfterFinalProgress(target, { title: target.title, ...after })
         : target.season !== undefined && (following === undefined || following === true)
           ? () => findFollowing(target)
           : undefined}

@@ -672,6 +672,103 @@ test('closing the player and playing another title opens a fresh player', async 
   }
 });
 
+test('automatic continuation waits for the exact final progress acknowledgement', async () => {
+  test.setTimeout(45_000);
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+
+    // The player's countdown may finish, but episode 2 cannot replace episode 1 until episode 1's exact durable
+    // receipt has answered. Decoder/session teardown remains wholly inside Player and does not await this reply.
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Series ${SERIES} · S1 · E1`);
+
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+    await page.waitForTimeout(1_100);
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('retry must durably acknowledge rejected final progress before continuing', async () => {
+  test.setTimeout(45_000);
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['reject-final-progress', 'hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await recovery.getByRole('button', { name: 'Try again' }).click();
+    await expect(recovery).toContainText('Saving…');
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('Leave unsaved explicitly releases a rejected automatic continuation', async () => {
+  test.setTimeout(45_000);
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['reject-final-progress'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    const recovery = page.getByRole('alertdialog');
+    await expect(recovery).toContainText('Couldn’t save where you stopped');
+
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+    await recovery.getByRole('button', { name: 'Leave unsaved' }).click();
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'e2']);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a replacement player retires a held automatic continuation', async () => {
+  test.setTimeout(45_000);
+  const { browser, page, asked } = await open(chromium, {
+    libraryQuery: ['hold-final-progress-reply'],
+  });
+  try {
+    await playFirstEpisode(page);
+    await playingPast(page, 1);
+    await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    await page.waitForTimeout(10_500);
+    expect(asked.playback.map(itemOf)).toEqual(['e1']);
+
+    await page.evaluate(() => window.denTestReplacePlayingTitle());
+    await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'film']);
+    await page.evaluate(() => window.denTestReleaseProgressReply());
+    await page.waitForTimeout(1_100);
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'film']);
+    await expect(player(page)).toHaveAttribute('aria-label', `Film ${FILM}`);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('rejected final progress retains its exact durable retry without holding player resources', async () => {
   const { browser, page } = await open(chromium, {
     libraryQuery: ['reject-final-progress', 'hold-final-progress-reply'],
