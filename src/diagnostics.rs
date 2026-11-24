@@ -1433,6 +1433,10 @@ enum PerformanceStage {
     Warning,
     /// Main-thread stalls while one screen was showing, sent as it was left.
     Stalls,
+    /// A bounded attempt to prepare the continuation before the current episode ends.
+    ContinuationWarm,
+    /// Readiness of the next episode's skip segments after the continuation was admitted.
+    NextEpisodeSkip,
 }
 impl PerformanceStage {
     fn as_str(&self) -> &'static str {
@@ -1446,6 +1450,8 @@ impl PerformanceStage {
             Self::Background => "background",
             Self::Warning => "warning",
             Self::Stalls => "stalls",
+            Self::ContinuationWarm => "continuation_warm",
+            Self::NextEpisodeSkip => "next_episode_skip",
         }
     }
 }
@@ -1544,6 +1550,46 @@ impl PerformanceDecode {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PerformanceContinuationWarmOutcome {
+    Ready,
+    Queued,
+    ReservedForPlay,
+    Unavailable,
+    Failed,
+}
+impl PerformanceContinuationWarmOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Queued => "queued",
+            Self::ReservedForPlay => "reserved_for_play",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PerformanceNextSkipReadiness {
+    AutoEligible,
+    ManualOnly,
+    Mixed,
+    Unknown,
+}
+impl PerformanceNextSkipReadiness {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::AutoEligible => "auto_eligible",
+            Self::ManualOnly => "manual_only",
+            Self::Mixed => "mixed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// What a playback event knows: the first frame's breakdown, or a session's health as it ends. Durations in
 /// milliseconds.
 #[derive(Deserialize)]
@@ -1565,11 +1611,18 @@ struct PerformancePlayback {
     /// Time spent with the buffer run dry.
     rebuffer_ms: Option<u32>,
     min_buffer_ms: Option<u32>,
+    /// Minimum buffer from the bounded periodic health snapshots, when that telemetry exists.
+    sampled_min_buffer_ms: Option<u32>,
     min_throughput_mbps: Option<u32>,
     dropped_frames: Option<u32>,
     max_drift_ms: Option<u32>,
     /// `[count, total milliseconds, longest milliseconds]`.
     seeks: Option<(u32, u32, u32)>,
+    continuation_warm_outcome: Option<PerformanceContinuationWarmOutcome>,
+    continuation_warm_ms: Option<u32>,
+    next_skip_readiness: Option<PerformanceNextSkipReadiness>,
+    /// App-owned playback backends alive at the snapshot, not hardware decoders.
+    app_playback_instances: Option<u32>,
 }
 
 impl PerformancePlayback {
@@ -1582,6 +1635,12 @@ impl PerformancePlayback {
         }
         if let Some(decode) = &self.decode {
             parts.push(format!("decode:{}", decode.as_str()));
+        }
+        if let Some(outcome) = &self.continuation_warm_outcome {
+            parts.push(format!("continuationWarmOutcome:{}", outcome.as_str()));
+        }
+        if let Some(readiness) = &self.next_skip_readiness {
+            parts.push(format!("nextSkipReadiness:{}", readiness.as_str()));
         }
         if let Some(cached) = self.cached {
             parts.push(format!("cached:{}", u8::from(cached)));
@@ -1596,9 +1655,12 @@ impl PerformancePlayback {
             ("seconds", self.seconds, MAX_SECS),
             ("rebufferMs", self.rebuffer_ms, MAX_NET_MS),
             ("minBufferMs", self.min_buffer_ms, MAX_MS),
+            ("sampledMinBufferMs", self.sampled_min_buffer_ms, MAX_MS),
             ("minMbps", self.min_throughput_mbps, 100_000),
             ("dropped", self.dropped_frames, 1_000_000),
             ("maxDriftMs", self.max_drift_ms, MAX_MS),
+            ("continuationWarmMs", self.continuation_warm_ms, MAX_NET_MS),
+            ("appPlaybackInstances", self.app_playback_instances, 1_000),
         ] {
             if let Some(value) = value {
                 parts.push(format!("{name}:{}", value.min(cap)));
@@ -2959,6 +3021,75 @@ mod tests {
                 "memory": { "warnings": 0 }, "playback": { "url": "must not parse" } }),
         ] {
             assert!(serde_json::from_value::<PerformanceReport>(refused).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn native_continuation_events_are_accepted_bounded_and_identity_free() {
+        let h = Harness::new();
+        let warm = h
+            .send(
+                "POST",
+                "/performance/event",
+                Some(
+                    serde_json::json!({
+                        "platform": "ios", "journey": "playback", "stage": "continuation_warm",
+                        "route": "player", "memory": { "warnings": 0 },
+                        "playback": { "continuationWarmOutcome": "reserved_for_play",
+                            "continuationWarmMs": u32::MAX, "sampledMinBufferMs": u32::MAX,
+                            "appPlaybackInstances": u32::MAX }
+                    })
+                    .to_string(),
+                ),
+                &[],
+            )
+            .await;
+        assert_eq!(warm.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            warm.extensions().get::<PerformanceTag>().unwrap().0,
+            "platform:ios,journey:playback,stage:continuation_warm,route:player,memoryWarnings:0,\
+             continuationWarmOutcome:reserved_for_play,sampledMinBufferMs:600000,\
+             continuationWarmMs:36000000,appPlaybackInstances:1000"
+        );
+
+        let skip = h
+            .send(
+                "POST",
+                "/performance/event",
+                Some(
+                    serde_json::json!({
+                        "platform": "ios", "journey": "playback", "stage": "next_episode_skip",
+                        "route": "player", "memory": { "warnings": 0 },
+                        "playback": { "nextSkipReadiness": "manual_only" }
+                    })
+                    .to_string(),
+                ),
+                &[],
+            )
+            .await;
+        assert_eq!(skip.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            skip.extensions().get::<PerformanceTag>().unwrap().0,
+            "platform:ios,journey:playback,stage:next_episode_skip,route:player,memoryWarnings:0,\
+             nextSkipReadiness:manual_only"
+        );
+
+        for refused in [
+            serde_json::json!({
+                "platform": "ios", "journey": "playback", "stage": "continuation_warm",
+                "memory": { "warnings": 0 },
+                "playback": { "continuationWarmOutcome": "a title supplied by a client" }
+            }),
+            serde_json::json!({
+                "platform": "ios", "journey": "playback", "stage": "next_episode_skip",
+                "memory": { "warnings": 0 },
+                "playback": { "nextSkipReadiness": "unknown", "episode": 4 }
+            }),
+        ] {
+            assert_eq!(
+                h.call("POST", "/performance/event", Some(refused)).await.0,
+                StatusCode::BAD_REQUEST
+            );
         }
     }
 
