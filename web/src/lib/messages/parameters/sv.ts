@@ -68,6 +68,8 @@ export const parameters = {
   'player.upNext': 'Härnäst · {title}',
   'player.playsIn': 'Startar om {seconds} s',
   'player.nextIn': 'Nästa avsnitt om {seconds} sekunder',
+  'player.stillWatching.one': 'Det senaste avsnittet startade automatiskt. Nästa: {title}',
+  'player.stillWatching.other': 'De senaste {count} avsnitten startade automatiskt. Nästa: {title}',
   'player.autoSkipIn': 'Hoppar över om {seconds} s',
   'player.autoSkipNotice':
     'Hoppas över automatiskt om {seconds} sekunder. Pausa eller spola för att fortsätta titta.',

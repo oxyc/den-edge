@@ -435,6 +435,40 @@ test('replaying a finished episode cancels its advance, and a later finish advan
   }
 });
 
+test('two unattended advances play and the third waits for Still watching', async () => {
+  test.setTimeout(90_000);
+  const { browser, page, asked } = await open(chromium);
+  try {
+    await playFirstEpisode(page);
+    const finishEpisode = async () => {
+      await playingPast(page, 1);
+      await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+      await expect(pageVideo(page)).toHaveJSProperty('ended', true);
+    };
+
+    await finishEpisode();
+    await expect.poll(() => asked.playback.map(itemOf), { timeout: 20_000 }).toEqual(['e1', 'e2']);
+    await finishEpisode();
+    await expect
+      .poll(() => asked.playback.map(itemOf), { timeout: 20_000 })
+      .toEqual(['e1', 'e2', 'e3']);
+    await finishEpisode();
+
+    const prompt = page.getByRole('alertdialog', { name: 'Still watching?' });
+    await expect(prompt).toContainText('The last 2 episodes started on their own. Next: S1 · E4');
+    const continueButton = prompt.getByRole('button', { name: 'Continue', exact: true });
+    await expect(continueButton).toBeFocused();
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2', 'e3']);
+
+    await continueButton.click();
+    await expect.poll(() => asked.playback.map(itemOf)).toEqual(['e1', 'e2', 'e3', 'e4']);
+    await page.waitForTimeout(1_100);
+    expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2', 'e3', 'e4']);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('a failed next-episode lookup is distinct from a finale and Retry advances exactly once', async () => {
   test.setTimeout(60_000);
   const { browser, page, asked } = await open(chromium, {
