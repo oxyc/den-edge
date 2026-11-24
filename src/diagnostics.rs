@@ -3086,10 +3086,7 @@ mod tests {
                 "playback": { "nextSkipReadiness": "unknown", "episode": 4 }
             }),
         ] {
-            assert_eq!(
-                h.call("POST", "/performance/event", Some(refused)).await.0,
-                StatusCode::BAD_REQUEST
-            );
+            assert_eq!(h.call("POST", "/performance/event", Some(refused)).await.0, StatusCode::BAD_REQUEST);
         }
     }
 
