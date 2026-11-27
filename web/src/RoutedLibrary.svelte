@@ -347,8 +347,8 @@
   onDestroy(() => onhouseholdadmin(true));
 
   // Every retained route owns profile-specific presentation and in-flight work. Before Svelte replaces the keyed
-  // route tree, move the old Router to Home with a replace (not a history entry). This also flushes a debounced
-  // search address before teardown, so a Kid/Visitor never inherits the previous viewer's detail, Settings route,
+  // route tree, replace (not push) the address with the same title, or Home for any other route. This also flushes a
+  // debounced search address before teardown, so a Kid/Visitor never inherits the previous viewer's Settings route,
   // scroll snapshot or request graph. The pre-effect runs for local and cross-tab switches alike.
   $effect.pre(() => {
     const next = profileSessionKey(session.identity, session.policyKey);

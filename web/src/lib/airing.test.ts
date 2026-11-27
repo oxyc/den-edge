@@ -247,11 +247,14 @@ describe('AiringCache', () => {
 });
 
 describe('new episodes', () => {
-  it('is the newest episode out within a fortnight', () => {
+  it('is the newest episode out within a week, as the Apple apps count it', () => {
     expect(releasedEpisode(airing, saturday)).toMatchObject({ season: 2, episode: 1 });
     expect(releasedEpisode(airing, new Date(2026, 9, 29, 12))).toBeUndefined();
     expect(releasedEpisode(airing, new Date(2026, 10, 10, 12))).toMatchObject({ episode: 2 });
-    expect(releasedEpisode(airing, new Date(2026, 10, 21, 12))).toMatchObject({ episode: 3 });
+    // E3 is out Fri 13 Nov: new through the seventh day after it, late that evening included; not on the eighth.
+    expect(releasedEpisode(airing, new Date(2026, 10, 13, 0, 1))).toMatchObject({ episode: 3 });
+    expect(releasedEpisode(airing, new Date(2026, 10, 20, 23, 59))).toMatchObject({ episode: 3 });
+    expect(releasedEpisode(airing, new Date(2026, 10, 21, 0, 1))).toBeUndefined();
     expect(releasedEpisode(airing, new Date(2026, 10, 28, 12))).toBeUndefined();
     expect(releasedEpisode(airing, new Date(2027, 0, 1, 12))).toBeUndefined();
   });

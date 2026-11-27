@@ -227,10 +227,12 @@ if (process.argv.includes('--capture')) {
   // 2026-11-21 (#1219): the Spanish and Swedish "Official content ratings" phrase (the spoken label of a title's
   // official ratings line) measures 53,023 in CI against #881's 52,983 (+40), which sat 9 bytes under the ceiling.
   // Allow the next 128-byte boundary, retaining 97.
+  // 2026-11-27 (#1177): the Spanish and Swedish "Still watching?" prompt measures 53,235 against #1219's 53,113.
+  // Allow the next 128-byte boundary.
   // 2026-11-27 (den#477): Follow and the Updates list (buttons, empty and error notes, and the four event captions) in
-  // Swedish and Spanish measure 53,558 in CI against the 53,120 ceiling; the first draft measured 53,653 and its
-  // longer notes were cut. Allow the next 128-byte boundary containing it, retaining 74.
-  if (current.translationGzip > 53632) throw new Error('Lazy translation catalog budget exceeded');
+  // Swedish and Spanish add +535 in CI (53,558 against 53,023 before #1177); the first draft added +630 and its longer
+  // notes were cut. Allow the next 128-byte boundary containing it on top of #1177.
+  if (current.translationGzip > 53888) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -524,9 +526,14 @@ if (process.argv.includes('--capture')) {
   // routed graph's preload links are inserted. Moving it behind a lazy boundary would recreate the race it fixes.
   // Startup measured +30 gzip; translations and file count are unchanged. Allow the next 128-byte boundary,
   // retaining 81.
-  // Follows and the Updates list (den#477) measured 133,911 in CI against #1446's 128,815 (+5,096): the follows-v1
+  // Carrying the heard audio language into a replacement release (#1150) measured 128,899 against main's 128,781
+  // (+118), in the lazy Player chunk. Allow the next 128-byte boundary.
+  // The Still watching gate (#1177: the unattended-advance count, its prompt and styles) measured 129,711 with the
+  // rest of its batch (#1150, #1445) against 128,979, in the lazy Player chunk. Allow the smallest 128-byte boundary
+  // containing it.
+  // Follows and the Updates list (den#477) measured +5,096 in CI (133,911 against #1446's 128,815): the follows-v1
   // derivation, the Updates store and page, the follow and mark commands with their settings-view fields, and the bell.
-  // The page is its own lazy chunk; startup measured +27 gzip. Allow the next 128-byte boundary containing it,
-  // retaining 105.
-  if (coreTotalDelta > 134016) throw new Error('Browser total JS/CSS budget exceeded');
+  // The page is its own lazy chunk; startup measured +27 gzip. Allow the next 128-byte boundary containing it on top of
+  // #1177.
+  if (coreTotalDelta > 134912) throw new Error('Browser total JS/CSS budget exceeded');
 }

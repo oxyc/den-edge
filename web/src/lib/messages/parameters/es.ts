@@ -69,6 +69,9 @@ export const parameters = {
   'player.upNext': 'A continuación · {title}',
   'player.playsIn': 'Empieza en {seconds} s',
   'player.nextIn': 'Siguiente episodio en {seconds} segundos',
+  'player.stillWatching.one': 'El último episodio empezó automáticamente. Siguiente: {title}',
+  'player.stillWatching.other':
+    'Los últimos {count} episodios empezaron automáticamente. Siguiente: {title}',
   'player.autoSkipIn': 'Se omite en {seconds} s',
   'player.autoSkipNotice':
     'Se omite automáticamente en {seconds} segundos. Pausa o busca para seguir viendo.',

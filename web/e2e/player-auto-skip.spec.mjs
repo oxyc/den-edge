@@ -19,7 +19,7 @@ const session = {
 /** The fixture video is 60 s; the intro is its first 40. */
 const INTRO_END = 40;
 
-async function mockPlayer(page, { confidence = 0.9 } = {}) {
+async function mockPlayer(page, { confidence = 0.9, segments } = {}) {
   await guardNetwork(page);
   await routeTmdb(page, (route) =>
     route.fulfill({
@@ -31,7 +31,9 @@ async function mockPlayer(page, { confidence = 0.9 } = {}) {
   await page.route(`${ORIGIN}/skipdb/**`, (route) =>
     route.fulfill({
       json: {
-        segments: { intro: { start_ms: 0, end_ms: INTRO_END * 1000, match: 'exact', confidence } },
+        segments: segments ?? {
+          intro: { start_ms: 0, end_ms: INTRO_END * 1000, match: 'exact', confidence },
+        },
       },
     }),
   );
@@ -169,6 +171,26 @@ test('a low-confidence segment offers Skip but never counts down', async ({ page
   await expect.poll(() => position(page), { timeout: 20_000 }).toBeGreaterThan(10);
   await expect(page.locator('.auto-skip-in')).toHaveCount(0);
   expect(await position(page)).toBeLessThan(INTRO_END);
+});
+
+test('an outro in the front half of the title is never offered or counted down', async ({
+  page,
+}) => {
+  // Credits at 5-30 s of a 60 s episode are implausible; the intro that follows is still offered.
+  await mockPlayer(page, {
+    segments: {
+      outro: { start_ms: 5_000, end_ms: 30_000, match: 'exact', confidence: 0.9 },
+      intro: { start_ms: 31_000, end_ms: 45_000, match: 'exact', confidence: 0.9 },
+    },
+  });
+  await page.goto(`${ORIGIN}/test/player.html?autoSkip`);
+
+  await expect.poll(() => position(page), { timeout: 30_000 }).toBeGreaterThan(8);
+  await expect(page.getByRole('button', { name: 'Skip Credits', exact: true })).toHaveCount(0);
+  await expect(page.locator('.auto-skip-in')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Skip Intro', exact: true })).toHaveCount(0);
+  await seek(page, 32);
+  await expect(page.getByRole('button', { name: 'Skip Intro', exact: true })).toBeVisible();
 });
 
 test('Skip and its countdown speak the interface language, after a live change too', async ({

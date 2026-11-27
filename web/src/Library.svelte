@@ -911,7 +911,7 @@
     }, 5 * 60_000);
     return () => clearInterval(timer);
   });
-  /** Each followed series' episode released in the last fortnight, by atlas's date. */
+  /** Each followed series' episode released in the last `NEW_EPISODE_DAYS`, by atlas's date. */
   const releasedEpisodes = $derived(
     followedSeries.flatMap((series): NewEpisode[] => {
       const episode = releasedEpisode(airings.get(series));
