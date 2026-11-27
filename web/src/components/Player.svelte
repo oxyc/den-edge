@@ -336,7 +336,7 @@
     if (!onnext) return;
     // Every explicit Next surface can coexist with the countdown. Retire it before changing episodes so a tick at
     // the same boundary cannot invoke `onnext` a second time.
-    activateLinkInPlace(event, () => (stay(), onnext()));
+    activateLinkInPlace(event, () => (viewerPresent(), stay(), onnext()));
   }
 
   type Episode = { season?: number; episode?: number };
@@ -729,6 +729,16 @@
   let timer: ReturnType<typeof setInterval> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let countdown: ReturnType<typeof setInterval> | undefined;
+  let stillWatchingTimer: ReturnType<typeof setTimeout> | undefined;
+  let stillWatching = $state(false);
+  let stillWatchingTitle = $state('');
+  let stillWatchingAdvance: (() => void) | undefined;
+  let stillWatchingContinue = $state<HTMLButtonElement>();
+  let consecutiveAutoAdvances = $state(0);
+  let automaticAdvanceTarget: Episode | undefined;
+  let unattendedStopped = false;
+  const AUTO_ADVANCE_LIMIT = 2;
+  const STILL_WATCHING_MS = 60_000;
   let retry: ReturnType<typeof setTimeout> | undefined;
   const RECEIPT_PREPARE_MS = 3_000;
   /** A retained choice may add a short exact-group lookup before the ordinary session; it may never hold recovery. */
@@ -4377,13 +4387,73 @@
     // A second end (the last seconds replayed, or the cast page's `den-ended` again) starts the count over; left
     // running, the first would advance again every second after it.
     clearInterval(countdown);
+    if (unattendedStopped) {
+      upNext = null;
+      return;
+    }
     upNext = UP_NEXT_SECS;
     countdown = setInterval(() => {
       upNext = (upNext ?? 1) - 1;
       if (upNext > 0) return;
+      if (consecutiveAutoAdvances >= AUTO_ADVANCE_LIMIT) {
+        holdStillWatching();
+        return;
+      }
       stay();
+      consecutiveAutoAdvances += 1;
+      automaticAdvanceTarget = typeof nextEpisode === 'object' ? { ...nextEpisode } : undefined;
       onnext?.();
     }, 1000);
+  }
+
+  function holdStillWatching() {
+    clearInterval(countdown);
+    upNext = null;
+    unattendedStopped = false;
+    stillWatchingTitle = next ?? '';
+    stillWatchingAdvance = onnext;
+    stillWatching = true;
+    clearTimeout(stillWatchingTimer);
+    stillWatchingTimer = setTimeout(() => {
+      unattendedStopped = true;
+      clearStillWatching();
+      void renderTick().then(() => playerRoot?.focus({ preventScroll: true }));
+    }, STILL_WATCHING_MS);
+    void renderTick().then(() => stillWatchingContinue?.focus({ preventScroll: true }));
+  }
+
+  function clearStillWatching() {
+    stillWatching = false;
+    stillWatchingTitle = '';
+    stillWatchingAdvance = undefined;
+    clearTimeout(stillWatchingTimer);
+    stillWatchingTimer = undefined;
+  }
+
+  function continueWatching() {
+    if (!stillWatching || !stillWatchingAdvance) return;
+    const advance = stillWatchingAdvance;
+    clearStillWatching();
+    consecutiveAutoAdvances = 0;
+    automaticAdvanceTarget = undefined;
+    advance();
+  }
+
+  function stayAfterPrompt() {
+    if (!stillWatching) return;
+    clearStillWatching();
+    consecutiveAutoAdvances = 0;
+    automaticAdvanceTarget = undefined;
+    unattendedStopped = true;
+    stay();
+    playerRoot?.focus({ preventScroll: true });
+  }
+
+  function viewerPresent() {
+    if (stillWatching) return;
+    consecutiveAutoAdvances = 0;
+    automaticAdvanceTarget = undefined;
+    unattendedStopped = false;
   }
 
   // Metadata can settle after the media's one `ended` event. Adopt a ready result only while that exact natural end
@@ -4403,6 +4473,7 @@
   function stay() {
     clearInterval(countdown);
     upNext = null;
+    clearStillWatching();
   }
 
   /**
@@ -5348,6 +5419,7 @@
    * do; on the picture, its click decides (`pictureClick`). A mouse reveals them by moving (`onpointermove`).
    */
   function playerPointerDown(event: PointerEvent) {
+    if (!stillWatching) viewerPresent();
     if (webTransport && airPlayActive) return;
     lastPointer = event.pointerType;
     shownAtPress = webControlsVisible;
@@ -5679,6 +5751,7 @@
     clearInterval(timer);
     clearInterval(heartbeat);
     clearInterval(countdown);
+    clearStillWatching();
     clearInterval(noticeTimer);
     clearTimeout(retry);
     startingSession?.abort(new DOMException('player closed', 'AbortError'));
@@ -5799,6 +5872,12 @@
    */
   function playEpisode(at: Episode) {
     const previous = playingEpisode;
+    const automatic =
+      automaticAdvanceTarget?.season === at.season &&
+      automaticAdvanceTarget?.episode === at.episode;
+    automaticAdvanceTarget = undefined;
+    unattendedStopped = false;
+    if (!automatic) consecutiveAutoAdvances = 0;
     episodeGeneration += 1;
     manualChoiceGeneration += 1;
     sessionStartGeneration += 1;
@@ -6610,8 +6689,11 @@
   /** Tabbable controls in the modal player, in DOM order. Hidden and unavailable controls do not hold the loop. */
   function playerTabStops(): HTMLElement[] {
     if (!playerRoot) return [];
+    const scope = stillWatching
+      ? (playerRoot.querySelector<HTMLElement>('.still-watching') ?? playerRoot)
+      : playerRoot;
     return Array.from(
-      playerRoot.querySelectorAll<HTMLElement>(
+      scope.querySelectorAll<HTMLElement>(
         'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex]:not([tabindex="-1"])',
       ),
     ).filter(
@@ -6680,6 +6762,19 @@
     event.preventDefault();
   }
 
+  function playerWindowKey(event: KeyboardEvent) {
+    if (
+      !event.repeat &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)
+    ) {
+      if (!stillWatching) viewerPresent();
+    }
+    playerKey(event);
+  }
+
   // What the lock screen, the system's media controls and a headset's buttons show and do: the title and its poster —
   // the size the poster cards already loaded, and the detail page's — and the video's own transport.
   $effect(() => {
@@ -6700,18 +6795,21 @@
         : [],
     });
     const seek = (to: number) => {
+      viewerPresent();
       const total = length();
       element.currentTime = Math.max(0, total ? Math.min(to, total) : to);
     };
     const handlers: Parameters<typeof media.setActionHandler>[] = [
       [
         'play',
-        () =>
+        () => {
+          viewerPresent();
           void element
             .play()
-            .catch((error: unknown) => console.warn('den: system play refused', error)),
+            .catch((error: unknown) => console.warn('den: system play refused', error));
+        },
       ],
-      ['pause', () => element.pause()],
+      ['pause', () => (viewerPresent(), element.pause())],
       ['seekbackward', (d) => seek(element.currentTime - (d.seekOffset ?? SKIP_SECS))],
       ['seekforward', (d) => seek(element.currentTime + (d.seekOffset ?? SKIP_SECS))],
       ['seekto', (d) => d.seekTime !== undefined && seek(d.seekTime)],
@@ -6765,9 +6863,21 @@
       if (ended) return;
       uninstall = installTvRemote({
         close,
-        next: onnext,
-        pause: () => video?.pause(),
-        play: () => video?.play(),
+        next: onnext
+          ? () => {
+              viewerPresent();
+              stay();
+              onnext();
+            }
+          : undefined,
+        pause: () => {
+          viewerPresent();
+          video?.pause();
+        },
+        play: () => {
+          viewerPresent();
+          void video?.play();
+        },
         paused: () => video?.paused ?? true,
         adjustSubtitleTiming: (seconds) => {
           if (!tvSubtitleTimingOpen) return false;
@@ -6780,6 +6890,7 @@
           return true;
         },
         seekBy: (seconds) => {
+          viewerPresent();
           if (!video) return;
           const total = length();
           video.currentTime = Math.max(
@@ -6807,7 +6918,7 @@
 
 <!-- Escape with one of the player's menus open closes that menu, not the player: the menu has taken the key
      (`defaultPrevented`), or — focus still on its trigger — it is open as the key arrives. -->
-<svelte:window onkeydown={playerKey} />
+<svelte:window onkeydown={playerWindowKey} />
 <!-- A phone locked or a tab switched away may never come back: where it got to is written as it goes. -->
 <svelte:document
   onfullscreenchange={() => (playerFullscreen = !!document.fullscreenElement)}
@@ -6841,6 +6952,36 @@
   onfocusin={() => revealWebControls(false)}
   onfocusout={scheduleWebControls}
 >
+  {#if stillWatching && stillWatchingTitle}
+    <div
+      class="still-watching"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="still-watching-title"
+    >
+      <div class="still-watching-card">
+        <h2 id="still-watching-title">{i18n.phrase('Still watching?')}</h2>
+        <p>
+          {i18n.format(
+            consecutiveAutoAdvances === 1
+              ? 'player.stillWatching.one'
+              : 'player.stillWatching.other',
+            'The last {count} episodes started on their own. Next: {title}',
+            { count: consecutiveAutoAdvances, title: stillWatchingTitle },
+          )}
+        </p>
+        <div class="still-watching-actions">
+          <Button
+            bind:element={stillWatchingContinue}
+            variant="primary"
+            label="Continue"
+            onclick={continueWatching}
+          />
+          <Button label="Stay" onclick={stayAfterPrompt} />
+        </div>
+      </div>
+    </div>
+  {/if}
   {#if webTransport}
     {#if airPlayActive}
       <!-- AirPlay owns playback: Apple's controls are on the picture, which starts below this bar so none is covered.
@@ -8234,6 +8375,43 @@
     -webkit-user-select: none;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  .still-watching {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
+      max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+    background: rgb(0 0 0 / 0.78);
+  }
+
+  .still-watching-card {
+    width: min(520px, 100%);
+    padding: 28px;
+    border: 1px solid var(--accent-outline-45);
+    border-radius: 18px;
+    background: var(--surface-raised, #181818);
+    text-align: center;
+  }
+
+  .still-watching-card h2 {
+    margin: 0 0 12px;
+  }
+
+  .still-watching-card p {
+    margin: 0;
+    color: var(--fg-muted);
+  }
+
+  .still-watching-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 24px;
   }
 
   header {

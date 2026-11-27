@@ -1034,6 +1034,7 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Start empty': 'Börja tom',
   'Start with an empty library…': 'Börja med ett tomt bibliotek...',
   Stay: 'Stanna',
+  'Still watching?': 'Tittar du fortfarande?',
   'Stays on this browser · activity erased when you switch profiles':
     'Blir kvar i den här webbläsaren · aktivitet raderas när du byter profil',
   Stop: 'Sluta',
