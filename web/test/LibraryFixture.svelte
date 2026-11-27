@@ -362,6 +362,10 @@
             ...(linkHost === 'tv'
               ? { [`${hostDevice}.play`]: { value: { string: 'A'.repeat(43) }, at } }
               : {}),
+            // `tv-results`: that TV reports how each play went (den-spec play-results-v1 §6).
+            ...(linkHost === 'tv' && params.has('tv-results')
+              ? { [`${hostDevice}.control`]: { value: { int: 2 }, at } }
+              : {}),
             ...(params.has('second-tv')
               ? {
                   [`${secondTv}.name`]: { value: { string: 'Bedroom' }, at },
@@ -830,7 +834,7 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if visitorReady}<span data-visitor-ready hidden>ready</span>{/if}
   <output data-testid="profile-handoff" hidden>{profileHandoff}</output>
-  <LibraryStatus toast={session.toast} alert={session.alert} />
+  <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   {#key session}
     <Library
       link={shownLink}

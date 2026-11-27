@@ -311,21 +311,24 @@ describe("draining a TV's queues", () => {
         ],
       ]),
     );
+    // Each carries its envelope's id: its play results are sealed under it (play-results-v1 §1).
+    const id = expect.stringMatching(/^[0-9a-f]{32}$/);
     expect(drained).toEqual({
       fresh: [
-        { tmdbId: 550, mediaType: 'movie', title: 'Fight Club' },
-        { tmdbId: 1396, mediaType: 'tv', title: 'Breaking Bad', season: 2, episode: 3 },
+        { tmdbId: 550, mediaType: 'movie', title: 'Fight Club', id },
+        { tmdbId: 1396, mediaType: 'tv', title: 'Breaking Bad', season: 2, episode: 3, id },
       ],
       stale: [
-        { tmdbId: 550, mediaType: 'movie', title: 'Old' },
-        { tmdbId: 550, mediaType: 'movie', title: 'Ahead' },
+        { tmdbId: 550, mediaType: 'movie', title: 'Old', id },
+        { tmdbId: 550, mediaType: 'movie', title: 'Ahead', id },
       ],
       transport: [],
     });
   });
 
   it('drops everything but an authentic, well-formed play, and a play it already took', async () => {
-    const replayed = await seal(play, now, 'f'.repeat(32));
+    const replayedId = 'f'.repeat(32);
+    const replayed = await seal(play, now, replayedId);
     const otherKey = await sealMessage(new Uint8Array(32), play, { sentAt: now });
     const messages = [
       { type: 'play', tmdbId: 550, mediaType: 'movie', title: 'forged' },
@@ -338,7 +341,7 @@ describe("draining a TV's queues", () => {
       { sealed: replayed },
     ];
     expect(await drain(answering([messages]))).toEqual({
-      fresh: [{ tmdbId: 550, mediaType: 'movie', title: 'Fight Club' }],
+      fresh: [{ tmdbId: 550, mediaType: 'movie', title: 'Fight Club', id: replayedId }],
       stale: [],
       transport: [],
     });

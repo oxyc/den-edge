@@ -23,6 +23,7 @@ mod metrics;
 mod mmap;
 mod oauth;
 mod pair;
+mod play_result;
 mod playback_receipts;
 mod ratings;
 mod recovery;
@@ -64,6 +65,10 @@ pub struct AppState {
     /// When each library's TVs last drained their queues (assistant v1 §16): whether a TV is awake, and each TV's lane
     /// and name. Kept in memory alone: a TV draining refreshes it within seconds of a restart.
     pub assistant_tv_seen: std::sync::Mutex<std::collections::HashMap<String, assistant::TvsSeen>>,
+    /// What TVs said back about Play on TV requests (`play_result.rs`), opaque, in memory alone.
+    pub play_results: std::sync::Mutex<play_result::Results>,
+    /// `GET /play/result/{address}?wait=` requests waiting for a TV's next result.
+    pub play_result_holds: hold::Holds,
     /// Transactional current-row authority. Databases are opened lazily; constructing the manager replays and
     /// migrates none, so startup work is independent of library history length.
     pub(crate) library_v3: Arc<library::v3::StoreManager>,
@@ -385,6 +390,8 @@ impl AppState {
             controller_lock: tokio::sync::Mutex::new(()),
             assistant_lock: tokio::sync::Mutex::new(()),
             assistant_tv_seen: std::sync::Mutex::default(),
+            play_results: std::sync::Mutex::default(),
+            play_result_holds: hold::Holds::new(play_result::MAX_HELD, play_result::MAX_HELD_PER_ADDRESS),
             library_v3,
             library_compression_slots: Arc::new(tokio::sync::Semaphore::new(library::COMPRESSION_JOBS)),
             library_response_bytes: Arc::new(tokio::sync::Semaphore::new(library_limits.cache_bytes)),
@@ -503,6 +510,7 @@ impl AppState {
         self.inbox_holds.release_all();
         self.assistant_holds.release_all();
         self.controller_holds.release_all();
+        self.play_result_holds.release_all();
     }
 }
 

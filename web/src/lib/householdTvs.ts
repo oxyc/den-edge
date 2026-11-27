@@ -11,6 +11,8 @@ export interface HouseholdTv {
   play: string;
   /** Whether this TV advertises the household transport protocol. */
   controls?: boolean;
+  /** Whether it says how each play went (den-spec play-results-v1 §6: `<d>.control` 2 or more). */
+  results?: boolean;
 }
 
 /** Pick a transport receiver from probes ordered with the playback writer first. */
@@ -46,6 +48,7 @@ export function householdTvs(
       name,
       play: playKey!,
       controls: (controlVersion ?? 0) >= 1,
+      results: (controlVersion ?? 0) >= 2,
     }));
 }
 

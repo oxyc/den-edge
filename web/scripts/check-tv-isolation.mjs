@@ -231,7 +231,9 @@ if (process.argv.includes('--capture')) {
   // Allow the next 128-byte boundary.
   // #1169: the cinema-only notice, its question and Play anyway, in Spanish and Swedish, measure 53,447.
   // Allow the next 128-byte boundary.
-  if (current.translationGzip > 53504) throw new Error('Lazy translation catalog budget exceeded');
+  // den#476: Play on TV's result toasts (waking, preparing, playing and each reason) in Spanish and Swedish measure
+  // 53,791. Allow the next 128-byte boundary.
+  if (current.translationGzip > 53888) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -540,5 +542,7 @@ if (process.argv.includes('--capture')) {
   // #1169: the cinema-only notice and Play anyway in the lazy Detail and Player chunks, and the reason the eager
   // availability authority keeps so Play can ask before it starts, measured 131,246 with #991. Allow the next 128-byte
   // boundary.
-  if (coreTotalDelta > 131328) throw new Error('Browser total JS/CSS budget exceeded');
+  // den#476: Play on TV's results (the sender's sealed-result reader and toast states in the routed library, and the
+  // LG/Samsung receiver's reports) measured 133,220 with #991 and #1169. Allow the next 128-byte boundary.
+  if (coreTotalDelta > 133248) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -547,6 +547,8 @@ test('a TV accepts a play on its lane, records it as applied, changes nothing el
       title: { type: 'tv', id: 1399 },
       season: 1,
       episode: 2,
+      // The request's id: the TV seals the play's results under it (den-spec play-results-v1 §1).
+      id: '6713a8b33cad6b3901ffd1777962892c',
       detail: 'started %s',
     },
   ]);
