@@ -781,9 +781,13 @@ export function wantedLanguages(
   prefs: { audio?: string; subtitle?: string; shownSubtitles?: readonly string[] },
   original: string | undefined,
   browser: readonly string[],
+  audible?: string,
 ): Pick<Want, 'audio' | 'subtitleLanguages'> {
   const base = (tag: string) => tag.split('-')[0]!.toLowerCase();
-  const first = prefs.audio ?? original;
+  // The language heard in the session a replacement takes over from leads, so another release keeps it where it has
+  // that track; the preference, original and browser languages stay behind it for a release that lacks it.
+  const first = audible ? canonicalLanguage(audible) : (prefs.audio ?? original);
+  const behind = audible ? [prefs.audio ?? original] : [];
   // The preferred language leads so it is first among what den-remux offers (`subs::plan` guarantees it, and
   // English right behind it, a place) — but no rendition ever comes up unasked: every one of them is
   // DEFAULT=NO, and it is `autoSubtitleLanguage`, not this list's order, that decides what shows without the
@@ -799,7 +803,13 @@ export function wantedLanguages(
     ...browser,
   ];
   return {
-    audio: [...new Set([...(first ? [first] : []), ...browser].map(base).filter(Boolean))],
+    audio: [
+      ...new Set(
+        [...(first ? [first] : []), ...behind.filter((tag): tag is string => !!tag), ...browser]
+          .map(base)
+          .filter(Boolean),
+      ),
+    ],
     subtitleLanguages: [...new Set(wanted.map(base).filter(Boolean))].slice(
       0,
       MAX_SUBTITLE_LANGUAGES,
