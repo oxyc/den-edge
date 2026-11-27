@@ -310,7 +310,8 @@ export type NewEpisodeClaim = readonly [string];
  * negative-result throttle. Only an authoritative found or empty answer records a check; abandoning an attempt or
  * receiving no verdict releases its claim so the next real trigger may retry it.
  *
- * A found episode is kept until the viewer starts it (`clear`) or it is no longer the newest released episode.
+ * A found episode stays found. Whether it is shown is den-core's `new_episodes` answer, which leaves it out once the
+ * viewer starts it or a newer episode comes out.
  */
 export class NewEpisodes {
   readonly #checked = new Map<string, number | NewEpisodeClaim | null>();
@@ -357,10 +358,6 @@ export class NewEpisodes {
 
   has(episode: NewEpisode): boolean {
     return this.#checked.get(NewEpisodes.key(episode)) === null;
-  }
-
-  clear(episode: NewEpisode): void {
-    this.#checked.delete(NewEpisodes.key(episode));
   }
 }
 
