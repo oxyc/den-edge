@@ -23,7 +23,7 @@ export function profileRouteAfterSwitch(path: string): string {
 export function resetProfileNavigation(
   target: EventTarget = document,
   address: Pick<History, 'replaceState'> = history,
-  path: string = currentAppPath(),
+  path: string = __DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search,
 ): void {
   const next = profileRouteAfterSwitch(path);
   // The packaged TV's own `replaceState` (`tv/packaged.ts`) moves the path into its index.html address.
