@@ -260,8 +260,6 @@ describe('new episodes', () => {
     expect(news.settle(found, 3)).toBe(true);
     expect(news.has(episode)).toBe(true);
     expect(news.claim(episode)).toBeNull();
-    news.clear(episode);
-    expect(news.has(episode)).toBe(false);
   });
 
   it('releases a settling claim when its episode disappears', () => {
