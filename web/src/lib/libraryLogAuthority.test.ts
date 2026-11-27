@@ -2385,6 +2385,8 @@ describe('LibraryLogAuthority', () => {
         maturityCeiling: undefined,
       },
       assistant: { write: false, read: false },
+      follows: {},
+      updates: {},
     });
 
     await expect(
@@ -2625,6 +2627,44 @@ describe('LibraryLogAuthority', () => {
     await expect(
       authority.command({ kind: 'preferences.seed', household }, 'seed-2'),
     ).resolves.toMatchObject({ outcome: 'unchanged' });
+  });
+
+  it('follows into set:follows and marks updates into set:updates, publishing both in the settings view', async () => {
+    const { log, authority } = await localAuthority();
+    await expect(
+      authority.command({ kind: 'follow.set', key: 'tv:1399', follow: true }, 'follow-1'),
+    ).resolves.toMatchObject({ outcome: 'applied', affected: [{ kind: 'settings' }] });
+    const since = (log.settings('follows')!.values['tv:1399']!.value as { int: number }).int;
+    // Following again keeps the baseline: only a new follow after an unfollow starts another.
+    await expect(
+      authority.command({ kind: 'follow.set', key: 'tv:1399', follow: true }, 'follow-2'),
+    ).resolves.toMatchObject({ outcome: 'unchanged' });
+    await authority.command({ kind: 'follow.set', key: 'person:525', follow: true }, 'follow-3');
+    await authority.command({ kind: 'follow.set', key: 'person:525', follow: false }, 'follow-4');
+    expect(log.settings('follows')!.values['person:525']!.value).toBeNull();
+    // A mark past retention is read by nothing (follows-v1 §1), whatever version of the row still holds it.
+    await log.write({
+      kind: 'set',
+      schema: 2,
+      name: 'updates',
+      values: {
+        'episode:tv:1:1:1': { value: { string: 'read' }, at: [1_000, 0, 'a1b2c3d4e5f60718'] },
+      },
+    });
+    await authority.command(
+      { kind: 'updates.mark', ids: ['episode:tv:1399:8:5', 'release:movie:550'], mark: 'read' },
+      'mark-1',
+    );
+    await authority.command(
+      { kind: 'updates.mark', ids: ['release:movie:550'], mark: 'dismissed' },
+      'mark-2',
+    );
+    const view = await authority.select({ kind: 'settings' });
+    expect(view).toMatchObject({ follows: { 'tv:1399': since } });
+    expect((view as { updates?: object }).updates).toEqual({
+      'episode:tv:1399:8:5': 'read',
+      'release:movie:550': 'dismissed',
+    });
   });
 
   it('owns normalized connections and semantic settings commands without exposing rows', async () => {

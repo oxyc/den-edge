@@ -304,6 +304,8 @@ function facts(row: Row | null): {
     const fact = { schema: LIBRARY_FACT_SCHEMA, row: setting } as const;
     if (
       setting.name === 'prefs' ||
+      setting.name === 'follows' ||
+      setting.name === 'updates' ||
       setting.name === 'assistant-grants' ||
       setting.name === 'assistant-read'
     )
