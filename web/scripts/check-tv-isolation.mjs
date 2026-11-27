@@ -524,5 +524,9 @@ if (process.argv.includes('--capture')) {
   // routed graph's preload links are inserted. Moving it behind a lazy boundary would recreate the race it fixes.
   // Startup measured +30 gzip; translations and file count are unchanged. Allow the next 128-byte boundary,
   // retaining 81.
-  if (coreTotalDelta > 128896) throw new Error('Browser total JS/CSS budget exceeded');
+  // Follows and the Updates list (den#477) measured 133,911 in CI against #1446's 128,815 (+5,096): the follows-v1
+  // derivation, the Updates store and page, the follow and mark commands with their settings-view fields, and the bell.
+  // The page is its own lazy chunk; startup measured +27 gzip. Allow the next 128-byte boundary containing it,
+  // retaining 105.
+  if (coreTotalDelta > 134016) throw new Error('Browser total JS/CSS budget exceeded');
 }
