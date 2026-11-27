@@ -20,6 +20,7 @@ import { retryAfterMs } from './retryAfter';
 import { localAuthorityKey } from './localAuthorityKey';
 
 type Verdict = 'available' | 'unavailable' | 'unknown';
+export type AvailabilityReason = 'only_cinema_recordings';
 interface Episode {
   season: number;
   episode: number;
@@ -90,6 +91,7 @@ type StoredVerdicts = [namespace: string, verdicts: KeptVerdicts];
 export class Availability {
   /** By TMDB movie id. `unknown` here is final: no IMDb id, or scout never could tell. */
   private readonly verdicts = new SvelteMap<number, Verdict>();
+  private readonly reasons = new SvelteMap<number, AvailabilityReason>();
   /** The movies scout answered for this visit; the rest of `verdicts` came from an earlier one and is asked again. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Request bookkeeping; only verdicts are UI state.
   private readonly settled = new Set<number>();
@@ -109,6 +111,7 @@ export class Availability {
   private readonly tries = new Map<number, number>();
   /** A series' verdicts by `episodeKey`: the episode its poster asks about. */
   private readonly episodeVerdicts = new SvelteMap<string, Verdict>();
+  private readonly episodeReasons = new SvelteMap<string, AvailabilityReason>();
   /** When each episode verdict was given, and whether this visit's scout gave it. */
   // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Bookkeeping; only verdicts are UI state.
   private readonly episodeAnswers = new Map<string, { at: number; settled: boolean }>();
@@ -206,6 +209,7 @@ export class Availability {
     this.answeredBy = undefined;
     this.namespace = undefined;
     this.verdicts.clear();
+    this.reasons.clear();
     this.settled.clear();
     this.givenAt.clear();
     this.tries.clear();
@@ -215,6 +219,7 @@ export class Availability {
     }
     this.episodePending.clear();
     this.episodeVerdicts.clear();
+    this.episodeReasons.clear();
     this.episodeAnswers.clear();
     this.episodeTries.clear();
   }
@@ -355,6 +360,13 @@ export class Availability {
     return !!episode && this.episodeVerdicts.get(episodeKey(title.id, episode)) === 'unavailable';
   }
 
+  reason(title: Pick<Title, 'type' | 'id' | 'releaseDate'>): AvailabilityReason | undefined {
+    if (title.type === 'movie') return this.reasons.get(title.id);
+    if (title.type !== 'tv') return undefined;
+    const episode = this.episodeOf(title);
+    return episode ? this.episodeReasons.get(episodeKey(title.id, episode)) : undefined;
+  }
+
   /**
    * An authoritative stream list — the title's Sources, or a new episode's search — heals the fade: one with
    * sources clears a stale "nothing to play" at once, without waiting for scout to be asked again.
@@ -449,6 +461,7 @@ export class Availability {
       for (const key of noEpisodeImdb) this.settleEpisode(key, 'unknown');
 
       let answer: Record<string, unknown> = {};
+      let reasons: Record<string, unknown> = {};
       let refused = false;
       if (byRequest.size > 0) {
         const controller = new AbortController();
@@ -464,9 +477,14 @@ export class Availability {
           if (res.status === 429) {
             refused = true;
             this.pausedUntil = this.now() + retryAfterMs(res, RETRY_MS, this.now);
-          } else if (res.ok)
-            answer =
-              ((await res.json()) as { availability?: Record<string, unknown> }).availability ?? {};
+          } else if (res.ok) {
+            const body = (await res.json()) as {
+              availability?: Record<string, unknown>;
+              reasons?: Record<string, unknown>;
+            };
+            answer = body.availability ?? {};
+            reasons = body.reasons ?? {};
+          }
         } catch {
           // Out of reach: every title stays unknown, and is asked again.
         } finally {
@@ -491,12 +509,14 @@ export class Availability {
       else
         for (const [requestId, targets] of byRequest) {
           const verdict = verdictOf(answer, requestId);
+          const reason =
+            reasons[requestId] === 'only_cinema_recordings' ? 'only_cinema_recordings' : undefined;
           for (const target of targets) {
             if (target.kind === 'movie') {
               if (verdict === 'unknown') again.push(target.id);
-              else this.settle(target.id, verdict);
+              else this.settle(target.id, verdict, reason);
             } else if (verdict === 'unknown') episodeAgain.push([target.key, target.probe]);
-            else this.settleEpisode(target.key, verdict);
+            else this.settleEpisode(target.key, verdict, reason);
           }
         }
       this.keep();
@@ -515,17 +535,21 @@ export class Availability {
     }
   }
 
-  private settle(id: number, verdict: Verdict): void {
+  private settle(id: number, verdict: Verdict, reason?: AvailabilityReason): void {
     this.pending.delete(id);
     this.verdicts.set(id, verdict);
     this.settled.add(id);
     this.givenAt.set(id, this.now());
+    if (reason && verdict === 'unavailable') this.reasons.set(id, reason);
+    else this.reasons.delete(id);
   }
 
-  private settleEpisode(key: string, verdict: Verdict): void {
+  private settleEpisode(key: string, verdict: Verdict, reason?: AvailabilityReason): void {
     this.episodePending.delete(key);
     this.episodeVerdicts.set(key, verdict);
     this.episodeAnswers.set(key, { at: this.now(), settled: true });
+    if (reason && verdict === 'unavailable') this.episodeReasons.set(key, reason);
+    else this.episodeReasons.delete(key);
   }
 
   /** Scout's verdicts, for the next visit's posters. Unknowns aren't kept: they are asked again anyway. */

@@ -208,6 +208,8 @@ export interface Want {
    * serves media, instead of ending it as soon as this is asked for.
    */
   replaces?: string;
+  /** Play anyway on a title with only cinema recordings: Scout's recovery list instead of its ordinary one. */
+  allowCinema?: boolean;
 }
 
 export type Failure =

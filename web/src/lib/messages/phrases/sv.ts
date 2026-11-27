@@ -727,6 +727,10 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'One source': 'En källa',
   'Only Owner can change this profile’s age limit and unrated-title policy.':
     'Endast ägaren kan ändra den här profilens åldersgräns och policy för oklassificerad titel.',
+  'Only cinema recordings so far': 'Än så länge finns bara biografinspelningar',
+  'Camera and telesync copies have poor picture and sound. You can wait for a proper release or play the best one now.':
+    'Kamera- och telesynkkopior har dålig bild och dåligt ljud. Du kan vänta på en riktig utgåva eller spela den bästa nu.',
+  'Play anyway': 'Spela ändå',
   'Open Den': 'Öppna Den',
   'Open a recovery code in Den on a phone or computer, then link this TV with the QR or code above.':
     'Öppna en återställningskod i Den på en telefon eller dator och länka sedan den här TV:n med QR-koden eller koden ovan.',
