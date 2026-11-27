@@ -229,7 +229,9 @@ if (process.argv.includes('--capture')) {
   // Allow the next 128-byte boundary, retaining 97.
   // 2026-11-27 (#1177): the Spanish and Swedish "Still watching?" prompt measures 53,235 against #1219's 53,113.
   // Allow the next 128-byte boundary.
-  if (current.translationGzip > 53248) throw new Error('Lazy translation catalog budget exceeded');
+  // #1169: the cinema-only notice, its question and Play anyway, in Spanish and Swedish, measure 53,447.
+  // Allow the next 128-byte boundary.
+  if (current.translationGzip > 53504) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -535,5 +537,8 @@ if (process.argv.includes('--capture')) {
   // measured 130,329; allow the next 128-byte boundary.
   // #991: the held next-episode continuation in Library, which waits for the final progress receipt, measured 130,581
   // on main at e63a937c. Allow the next 128-byte boundary.
-  if (coreTotalDelta > 130688) throw new Error('Browser total JS/CSS budget exceeded');
+  // #1169: the cinema-only notice and Play anyway in the lazy Detail and Player chunks, and the reason the eager
+  // availability authority keeps so Play can ask before it starts, measured 131,246 with #991. Allow the next 128-byte
+  // boundary.
+  if (coreTotalDelta > 131328) throw new Error('Browser total JS/CSS budget exceeded');
 }

@@ -212,6 +212,7 @@ export async function fetchSourceList(
   fetchImpl: typeof fetch = relayFetch,
   fresh = false,
   early = false,
+  allowCinema = false,
 ): Promise<SourceListResult> {
   try {
     const id =
@@ -219,7 +220,11 @@ export async function fetchSourceList(
     const url = `${addon.base}/stream/${season === undefined ? 'movie' : 'series'}/${encodeURIComponent(id)}.json`;
     const init: RequestInit = fresh ? { signal, cache: 'no-store' } : { signal };
     if (early) init.headers = { [EARLY_ANSWER_HEADER]: '1' };
-    const response = await fetchImpl(fresh ? `${url}?fresh=1` : url, init);
+    const query = new URLSearchParams();
+    if (fresh) query.set('fresh', '1');
+    if (allowCinema) query.set('allowCinema', '1');
+    const queryString = query.toString();
+    const response = await fetchImpl(queryString ? `${url}?${queryString}` : url, init);
     const retry = response.headers.has('retry-after') ? retryAfterMs(response, 60_000) : undefined;
     if (!response.ok)
       return {

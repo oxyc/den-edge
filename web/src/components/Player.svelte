@@ -192,6 +192,7 @@
     season,
     episode,
     filename,
+    allowCinema = false,
     content,
     region,
     scout,
@@ -229,6 +230,8 @@
     season?: number;
     episode?: number;
     filename?: string;
+    /** Explicit one-shot recovery after the viewer accepted poor camera-recording quality. */
+    allowCinema?: boolean;
     content: ContentServiceClientPort;
     /** Active profile region, for the title-detail cache key used by the expected-runtime fallback. */
     region: string;
@@ -832,7 +835,21 @@
   const sourceCoordinate = (at: Episode): string => `${at.season ?? ''}:${at.episode ?? ''}`;
   function sourceListFor(at: Episode): Promise<SourceListResult> {
     const key = sourceCoordinate(at);
-    return sourceLists.get(key, () => fetchSourceList(scout, imdb!, routes, at.season, at.episode));
+    const recovery = allowCinema && at.season === season && at.episode === episode;
+    return sourceLists.get(key, () =>
+      fetchSourceList(
+        scout,
+        imdb!,
+        routes,
+        at.season,
+        at.episode,
+        undefined,
+        undefined,
+        false,
+        false,
+        recovery,
+      ),
+    );
   }
 
   function forgetContinuity() {
@@ -1626,6 +1643,10 @@
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
       ...(wideListener ? { wideListener } : {}),
+      // Play anyway reaches the cinema-recording copies for the episode it was pressed on, not the ones after it.
+      ...(allowCinema && requestedEpisode.season === season && requestedEpisode.episode === episode
+        ? { allowCinema }
+        : {}),
       // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
       ...(excluded.length && delivery !== 'direct' ? { exclude: [...excluded] } : {}),
       ...extra,

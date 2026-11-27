@@ -274,6 +274,26 @@ it('keeps refresh admission separate from coverage and skips the plain warm when
   expect(got).toMatchObject({ fresh: 'limited', answer: { kind: 'partial', missing: 1 } });
   expect(asked).toEqual(['/scout/config/stream/series/tt1%3A3%3A7.json?fresh=1']);
 });
+it('isolates an explicit cinema-recording recovery in the stream-list URL', async () => {
+  const asked: string[] = [];
+  const network = (async (input) => {
+    asked.push(String(input));
+    return Response.json({ streams: [raw] });
+  }) as typeof fetch;
+  await fetchSourceList(
+    addon,
+    'tt1',
+    routes,
+    undefined,
+    undefined,
+    undefined,
+    network,
+    false,
+    false,
+    true,
+  );
+  expect(asked).toEqual(['/scout/config/stream/movie/tt1.json?allowCinema=1']);
+});
 it('reads what scout says about its list, and nothing from an older scout or a malformed one', () => {
   const den = (extra: object) => ({
     streams: [],

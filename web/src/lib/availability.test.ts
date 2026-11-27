@@ -79,6 +79,23 @@ describe('Availability', () => {
     expect(availability.unavailable({ type: 'movie', id: 2 })).toBe(true);
   });
 
+  it('retains Scout’s cinema-only reason separately from the unavailable verdict', async () => {
+    const fetchImpl: typeof fetch = async () =>
+      Response.json({
+        availability: { tt0000001: 'unavailable' },
+        reasons: { tt0000001: 'only_cinema_recordings' },
+      });
+    const availability = new Availability();
+    availability.connect(SCOUT, content, fetchImpl);
+    availability.want({ type: 'movie', id: 1 });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(availability.unavailable({ type: 'movie', id: 1 })).toBe(true);
+    expect(availability.reason({ type: 'movie', id: 1 })).toBe('only_cinema_recordings');
+    availability.confirm({ type: 'movie', id: 1 }, undefined, true);
+    expect(availability.reason({ type: 'movie', id: 1 })).toBeUndefined();
+  });
+
   it('caps a mixed request at 100 without starving an episode behind a movie backlog', async () => {
     const calls: string[][] = [];
     const fetchImpl: typeof fetch = async (_input, init) => {

@@ -598,7 +598,13 @@
     };
   });
 
-  type Target = { title: Title; season?: number; episode?: number; filename?: string };
+  type Target = {
+    title: Title;
+    season?: number;
+    episode?: number;
+    filename?: string;
+    allowCinema?: boolean;
+  };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
   let playbackIntent = $state(0);
@@ -1489,7 +1495,13 @@
    */
   const playHere = $derived(
     policyReady && scout && (scout.playback || remux !== null)
-      ? async (title: Title, season?: number, episode?: number, filename?: string) => {
+      ? async (
+          title: Title,
+          season?: number,
+          episode?: number,
+          filename?: string,
+          allowCinema = false,
+        ) => {
           const blocked = await playGuard(title, {
             content: session.content,
             region: detailPrefs.region,
@@ -1505,9 +1517,9 @@
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
-            playerAddress({ title, ...(up ?? { season: 1, episode: 1 }) });
+            playerAddress({ title, ...(up ?? { season: 1, episode: 1 }), allowCinema });
           } else {
-            playerAddress({ title, season, episode, filename });
+            playerAddress({ title, season, episode, filename, allowCinema });
           }
           return true;
         }
@@ -3465,6 +3477,7 @@
       season={target.season}
       episode={target.episode}
       filename={target.filename}
+      allowCinema={target.allowCinema}
       content={session.content}
       region={detailPrefs.region}
       {scout}
