@@ -5046,7 +5046,7 @@
       void loadSegments();
     }
     if (!segments.length) return;
-    active = activeAt(segments, at);
+    active = activeAt(segments, at, length());
     const next = nextAutoSkip(
       autoSkip,
       active,
