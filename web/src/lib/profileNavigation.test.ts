@@ -17,17 +17,14 @@ describe('profile navigation reset', () => {
   it('replaces the current entry without adding a history destination', () => {
     const dispatchEvent = vi.fn((_event: Event) => true);
     const replaceState = vi.fn();
-    const historyUrl = vi.fn((path: string) => `index.html#${path}`);
 
     resetProfileNavigation(
       { dispatchEvent } as unknown as EventTarget,
       { replaceState },
       '/movie/1002?play=1',
-      historyUrl,
     );
 
-    expect(historyUrl).toHaveBeenCalledExactlyOnceWith('/movie/1002');
-    expect(replaceState).toHaveBeenCalledExactlyOnceWith(null, '', 'index.html#/movie/1002');
+    expect(replaceState).toHaveBeenCalledExactlyOnceWith(null, '', '/movie/1002');
     expect(dispatchEvent).toHaveBeenCalledOnce();
     const event = dispatchEvent.mock.calls[0]![0] as CustomEvent;
     expect(event.type).toBe('den:navigate');

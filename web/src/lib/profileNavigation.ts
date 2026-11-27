@@ -1,5 +1,5 @@
 import { parseRoute, routePath } from './route';
-import { appHistoryUrl, currentAppPath } from './runtimeUrl';
+import { currentAppPath } from './runtimeUrl';
 
 /**
  * Where the replacement profile opens. A title's page stays (season and episode kept) so switching profile does not
@@ -24,10 +24,10 @@ export function resetProfileNavigation(
   target: EventTarget = document,
   address: Pick<History, 'replaceState'> = history,
   path: string = currentAppPath(),
-  historyUrl: (path: string) => string = appHistoryUrl,
 ): void {
   const next = profileRouteAfterSwitch(path);
-  address.replaceState(null, '', historyUrl(next));
+  // The packaged TV's own `replaceState` (`tv/packaged.ts`) moves the path into its index.html address.
+  address.replaceState(null, '', next);
   // Not `replace: true`: that is Router's in-place address rewrite for a growing query and leaves the page drawn. The
   // address already says `next`, so following it opens that route without pushing an entry.
   target.dispatchEvent(new CustomEvent('den:navigate', { detail: { path: next } }));
