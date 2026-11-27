@@ -673,7 +673,6 @@ test('closing the player and playing another title opens a fresh player', async 
 });
 
 test('automatic continuation waits for the exact final progress acknowledgement', async () => {
-  test.setTimeout(45_000);
   const { browser, page, asked } = await open(chromium, {
     libraryQuery: ['hold-final-progress-reply'],
   });
@@ -699,14 +698,14 @@ test('automatic continuation waits for the exact final progress acknowledgement'
 });
 
 test('retry must durably acknowledge rejected final progress before continuing', async () => {
-  test.setTimeout(45_000);
   const { browser, page, asked } = await open(chromium, {
-    libraryQuery: ['reject-final-progress', 'hold-final-progress-reply'],
+    libraryQuery: ['reject-ended-progress', 'hold-final-progress-reply'],
   });
   try {
     await playFirstEpisode(page);
     await playingPast(page, 1);
     await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
     const recovery = page.getByRole('alertdialog');
     await expect(recovery).toContainText('Couldn’t save where you stopped');
 
@@ -724,14 +723,14 @@ test('retry must durably acknowledge rejected final progress before continuing',
 });
 
 test('Leave unsaved explicitly releases a rejected automatic continuation', async () => {
-  test.setTimeout(45_000);
   const { browser, page, asked } = await open(chromium, {
-    libraryQuery: ['reject-final-progress'],
+    libraryQuery: ['reject-ended-progress'],
   });
   try {
     await playFirstEpisode(page);
     await playingPast(page, 1);
     await pageVideo(page).evaluate((video) => (video.currentTime = video.duration - 1.5));
+    await expect(pageVideo(page)).toHaveJSProperty('ended', true);
     const recovery = page.getByRole('alertdialog');
     await expect(recovery).toContainText('Couldn’t save where you stopped');
 
@@ -745,7 +744,6 @@ test('Leave unsaved explicitly releases a rejected automatic continuation', asyn
 });
 
 test('a replacement player retires a held automatic continuation', async () => {
-  test.setTimeout(45_000);
   const { browser, page, asked } = await open(chromium, {
     libraryQuery: ['hold-final-progress-reply'],
   });
