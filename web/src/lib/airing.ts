@@ -301,8 +301,11 @@ export function daysUntil(date: string, now = new Date()): number | undefined {
   return day ? dayIndex(day) - dayIndex(now) : undefined;
 }
 
-/** How long an episode counts as new once it is out. */
-export const NEW_EPISODE_DAYS = 14;
+/**
+ * How long an episode counts as new once it is out, in calendar days after its date (DenKit
+ * `NewEpisodePolicy.freshDays`, the same rule).
+ */
+export const NEW_EPISODE_DAYS = 7;
 
 /**
  * The episode a followed series has just released, if any: atlas's newest dated episode whose day has come within
