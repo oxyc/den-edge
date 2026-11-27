@@ -34,6 +34,9 @@ export const LIBRARY_SERVICE_WIRE_LIMITS = {
   historyDetailTitles: 48,
   historyDetailEpisodes: 100_000,
   profileEntries: 64,
+  /** follows-v1 §1: the follows a view carries, and the marks (the row's own cap). */
+  follows: 2_000,
+  updates: 2_000,
 } as const;
 
 export type LibraryServiceProtocol = typeof LIBRARY_SERVICE_PROTOCOL;
@@ -267,6 +270,10 @@ export type LibraryCommand =
       watched: boolean;
     }
   | { kind: 'continue-dismissed.set'; title: TitleRef; dismissed: boolean }
+  /** Follow or unfollow a series, film or person (den-spec follows-v1 §1): `key` is `tv:<id>`, `movie:<id>`, `person:<id>`. */
+  | { kind: 'follow.set'; key: string; follow: boolean }
+  /** Mark updates read or dismissed (den-spec follows-v1 §1), by event id. */
+  | { kind: 'updates.mark'; ids: string[]; mark: 'read' | 'dismissed' }
   | {
       kind: 'progress.record';
       title: TitleRef;
@@ -547,6 +554,10 @@ export interface SettingsView {
    * read record means publishing a projection. Both false, as for nearly every library, and the page runs nothing.
    */
   assistant: AssistantNeeds;
+  /** What the profile follows, key → since (den-spec follows-v1 §1). Absent in a view kept by an older build. */
+  follows?: Record<string, number>;
+  /** The profile's read and dismissed updates, by event id (follows-v1 §1). */
+  updates?: Record<string, 'read' | 'dismissed'>;
 }
 
 export interface AssistantNeeds {

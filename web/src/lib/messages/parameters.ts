@@ -147,6 +147,10 @@ export const PARAMETER_FALLBACKS = {
   'category.serviceSort': '{value} {type}',
   'notice.allowedForChild': 'Allowed “{title}” for {name}',
   'notice.removedFromChild': 'Removed “{title}” from {name}',
+  'updates.episodeAired': 'S{season}E{episode} · aired {day}',
+  'updates.premieres': 'Premieres {day}',
+  'updates.returns': 'Season {season} returns {day}',
+  'updates.released': 'Released {day}',
 } as const;
 
 export type ParameterMessageId = keyof typeof PARAMETER_FALLBACKS;

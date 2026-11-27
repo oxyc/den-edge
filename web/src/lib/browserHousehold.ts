@@ -258,6 +258,7 @@ const KEPT: ReadonlySet<LibraryCommand['kind']> = new Set<LibraryCommand['kind']
   'season-watched.set',
   'watched.set',
   'continue-dismissed.set',
+  'follow.set',
   'progress.record',
   'preferences.patch',
   'api-key.set',

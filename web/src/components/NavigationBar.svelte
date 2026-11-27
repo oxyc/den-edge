@@ -26,6 +26,7 @@
   } from '../lib/recentSearches';
   import type { ProfileModeCoordinator } from '../lib/profileModeCoordinator.svelte';
   import { libraryOpeningProgress } from '../lib/libraryOpening.svelte';
+  import { updatesUnread } from '../lib/updates.svelte';
   import { i18n } from '../lib/i18n.svelte';
   let {
     route,
@@ -253,8 +254,14 @@
     { page: 'movies' as const, label: i18n.text('nav.movies'), icon: undefined },
     { page: 'series' as const, label: i18n.text('nav.series'), icon: undefined },
     { page: 'watchlist' as const, label: i18n.text('nav.watchlist'), icon: undefined },
+    // The bell carries Updates as the sliders carry Settings (den-spec follows-v1); not on a TV.
+    ...(__DEN_TV__
+      ? []
+      : [{ page: 'updates' as const, label: i18n.text('nav.updates'), icon: 'bell' as const }]),
     { page: 'settings' as const, label: i18n.text('nav.settings'), icon: 'sliders' as const },
   ]);
+  /** The open profile's unread updates, drawn on the bell. */
+  const unread = $derived(updatesUnread());
   /** A library's first read from den-edge, drawn along the bar's lower edge while it runs. */
   const opening = $derived(libraryOpeningProgress());
   /** What the line draws: the read's progress, then full for a moment once it has finished, then nothing. */
@@ -495,6 +502,11 @@
             aria-current={route.page === tab.page ? 'page' : undefined}
           >
             {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
+              {#if tab.page === 'updates' && unread}<span class="count"
+                  >{unread > 99 ? '99+' : unread}<span class="spoken">
+                    {i18n.text('nav.unread')}</span
+                  ></span
+                >{/if}
             {:else}{tab.label}{/if}
           </a>
         {/each}
@@ -915,6 +927,26 @@
   nav a :global(svg) {
     width: 18px;
     height: 18px;
+  }
+
+  .count {
+    min-width: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 12px;
+    line-height: 18px;
+    text-align: center;
+  }
+
+  .spoken {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .search-toggle {

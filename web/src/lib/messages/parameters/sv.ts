@@ -149,4 +149,8 @@ export const parameters = {
   'category.serviceSort': '{type}: {value}',
   'notice.allowedForChild': '“{title}” tilläts för {name}',
   'notice.removedFromChild': '“{title}” togs bort från {name}',
+  'updates.episodeAired': 'S{season}A{episode} · sändes {day}',
+  'updates.premieres': 'Premiär {day}',
+  'updates.returns': 'Säsong {season} kommer {day}',
+  'updates.released': 'Släpptes {day}',
 } as const satisfies ParameterCatalog;

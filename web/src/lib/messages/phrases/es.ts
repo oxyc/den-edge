@@ -1478,4 +1478,17 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'TorBox stopped—refreshing…': 'TorBox se detuvo; actualizando…',
   'Trying TorBox without Den subtitles…': 'Probando TorBox sin subtítulos Den…',
   'Trying Den Remux…': 'Probando Den Remux…',
+  Updates: 'Novedades',
+  Follow: 'Seguir',
+  Unfollow: 'Dejar de seguir',
+  'Mark all as read': 'Marcar todo como leído',
+  'Mark as read': 'Marcar como leído',
+  'Checking for updates': 'Buscando novedades',
+  'Couldn’t check for updates.': 'No se pudieron buscar novedades.',
+  'Nothing new from what you follow yet.': 'Aún no hay nada nuevo de lo que sigues.',
+  'Follow a series, film or person to see what’s new from them here.':
+    'Sigue una serie, una película o una persona para ver aquí sus novedades.',
+  'Updates come from what you follow, which lives in your library.':
+    'Las novedades vienen de lo que sigues, que está en tu biblioteca.',
+  'to follow series, films and people.': 'para seguir series, películas y personas.',
 };

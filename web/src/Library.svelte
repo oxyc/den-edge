@@ -21,8 +21,11 @@
     preloadScreens,
     SearchScreen,
     ServiceScreen,
+    UpdatesScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
+  import { UpdatesStore } from './lib/updates.svelte';
+  import { followKey } from './lib/follows';
   import {
     browseRows,
     contentPages,
@@ -837,6 +840,34 @@
   });
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
+  /**
+   * The profile's explicit follows and its updates list (den-spec follows-v1), apart from the series `followedOf`
+   * infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground once Home has
+   * settled, when the follows change, and on opening Updates; never on a timer.
+   */
+  const updates =
+    model && !__DEN_TV__
+      ? new UpdatesStore(
+          () => model.settings.value,
+          untrack(() => session.content),
+          untrack(() => airings),
+        )
+      : null;
+  onDestroy(() => updates?.close());
+  $effect(() => updates?.publish());
+  const followsKey = $derived(updates ? Object.keys(updates.follows).sort().join(',') : '');
+  $effect(() => {
+    void followsKey;
+    if (!updates || !foreground || !initialHomeSettled || !atlas) return;
+    void untrack(() => updates.reconcile());
+  });
+  $effect(() => {
+    if (updates && route.page === 'updates' && atlas) void untrack(() => updates.reconcile());
+  });
+  const setFollow = (key: string, on: boolean) =>
+    runCommand(model ? () => model.setFollow(key, on) : undefined);
+  const markUpdates = (ids: string[], mark: 'read' | 'dismissed') =>
+    runCommand(model ? () => model.markUpdates(ids, mark) : undefined);
   /** What the library says of each series this viewer might follow (`airing.ts` `followedOf`). */
   const followFacts = $derived.by((): FollowCandidates => {
     const series = (refs: ReadonlyArray<{ type: string; id: number }> | undefined) =>
@@ -1181,6 +1212,7 @@
     else if (route.page === 'downloads') void DownloadsScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
     else if (route.page === 'watchlist') void WatchlistScreen.load();
+    else if (route.page === 'updates') void UpdatesScreen.load();
   });
   $effect(() => {
     if (playing) void PlayerScreen.load();
@@ -3062,6 +3094,10 @@
     {notice}
     model={downloadsModel}
     onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
+    following={updates?.following(followKey(page.type, page.id))}
+    onfollow={updates
+      ? (on: boolean) => fromPage(setFollow(followKey(page.type, page.id), on))
+      : undefined}
     onseen={(title, seen) => fromPage(setSeen(title, seen))}
     onseason={markSeasonSeen}
     onreact={(title, reaction) => fromPage(setReaction(title, reaction))}
@@ -3085,7 +3121,14 @@
 {:else if route.page === 'search' && !SearchScreen.current}
   <ScreenLoading screen={SearchScreen} />
 {:else if route.page === 'person'}
-  <PersonScreen.current id={route.id} content={session.content} {active} />
+  {@const personKey = followKey('person', route.id)}
+  <PersonScreen.current
+    id={route.id}
+    content={session.content}
+    {active}
+    following={updates?.following(personKey)}
+    onfollow={updates ? (on: boolean) => fromPage(setFollow(personKey, on)) : undefined}
+  />
 {:else if route.page === 'service' && !ServiceScreen.current}
   <ScreenLoading screen={ServiceScreen} />
 {:else if route.page === 'service'}
@@ -3146,6 +3189,18 @@
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
     <DownloadsScreen.current model={downloadsModel} {active} />
+  {/if}
+{:else if route.page === 'updates'}
+  {#if !updates}
+    <p class="note">
+      Updates come from what you follow, which lives in your library. <a href="/settings"
+        >Link a TV</a
+      > to follow series, films and people.
+    </p>
+  {:else if !UpdatesScreen.current}
+    <ScreenLoading screen={UpdatesScreen} />
+  {:else}
+    <UpdatesScreen.current {updates} onmark={markUpdates} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !model && !profileActivity}

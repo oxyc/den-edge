@@ -109,6 +109,22 @@ function titleRef(value: unknown): value is TitleRef {
 
 const titleIdentity = (title: { type: unknown; id: unknown }) => `${title.type}:${title.id}`;
 
+/** den-spec follows-v1 §1 and §2: a follow key and an event id. */
+const followKey = (value: unknown): value is string =>
+  typeof value === 'string' && /^(tv|movie|person):[1-9][0-9]{0,15}$/.test(value);
+const updateId = (value: unknown): value is string =>
+  typeof value === 'string' && value.length <= 96 && /^[a-z]+(:[a-z0-9]+)+$/.test(value);
+const followsView = (value: unknown): value is Record<string, number> =>
+  record(value) &&
+  Object.keys(value).length <= LIBRARY_SERVICE_WIRE_LIMITS.follows &&
+  Object.entries(value).every(([key, since]) => followKey(key) && integer(since));
+const updatesView = (value: unknown): value is Record<string, 'read' | 'dismissed'> =>
+  record(value) &&
+  Object.keys(value).length <= LIBRARY_SERVICE_WIRE_LIMITS.updates &&
+  Object.entries(value).every(
+    ([id, mark]) => updateId(id) && (mark === 'read' || mark === 'dismissed'),
+  );
+
 export function isLibraryMetadataTitle(value: unknown): value is LibraryMetadataTitle {
   return (
     record(value) &&
@@ -633,6 +649,15 @@ function command(value: unknown): value is LibraryCommand {
     case 'continue-dismissed.set':
       return (
         exact(value, ',kind,title,dismissed,') && titleRef(value.title) && bool(value.dismissed)
+      );
+    case 'follow.set':
+      return exact(value, ',kind,key,follow,') && followKey(value.key) && bool(value.follow);
+    case 'updates.mark':
+      return (
+        exact(value, ',kind,ids,mark,') &&
+        list(value.ids, updateId, LIBRARY_SERVICE_WIRE_LIMITS.updates) &&
+        unique(value.ids) &&
+        (value.mark === 'read' || value.mark === 'dismissed')
       );
     case 'progress.record':
       return (
@@ -1797,12 +1822,14 @@ function selectionValue(value: unknown): value is LibrarySelectionValue {
       );
     case 'settings':
       return (
-        exact(value, ',kind,preferences,assistant,') &&
+        exact(value, ',kind,preferences,assistant,follows,updates,') &&
         preferencesView(value.preferences) &&
         record(value.assistant) &&
         exact(value.assistant, ',write,read,') &&
         bool(value.assistant.write) &&
-        bool(value.assistant.read)
+        bool(value.assistant.read) &&
+        optional(value.follows, followsView) &&
+        optional(value.updates, updatesView)
       );
     case 'devices':
       return devicesView(value);
