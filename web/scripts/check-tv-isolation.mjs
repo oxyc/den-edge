@@ -521,5 +521,7 @@ if (process.argv.includes('--capture')) {
   // routed graph's preload links are inserted. Moving it behind a lazy boundary would recreate the race it fixes.
   // Startup measured +30 gzip; translations and file count are unchanged. Allow the next 128-byte boundary,
   // retaining 81.
-  if (coreTotalDelta > 128896) throw new Error('Browser total JS/CSS budget exceeded');
+  // Carrying the heard audio language into a replacement release (#1150) measured 128,899 against main's 128,781
+  // (+118), in the lazy Player chunk. Allow the next 128-byte boundary.
+  if (coreTotalDelta > 129024) throw new Error('Browser total JS/CSS budget exceeded');
 }
