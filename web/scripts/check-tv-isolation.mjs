@@ -227,7 +227,9 @@ if (process.argv.includes('--capture')) {
   // 2026-11-21 (#1219): the Spanish and Swedish "Official content ratings" phrase (the spoken label of a title's
   // official ratings line) measures 53,023 in CI against #881's 52,983 (+40), which sat 9 bytes under the ceiling.
   // Allow the next 128-byte boundary, retaining 97.
-  if (current.translationGzip > 53120) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-27 (#1177): the Spanish and Swedish "Still watching?" prompt measures 53,235 against #1219's 53,113.
+  // Allow the next 128-byte boundary.
+  if (current.translationGzip > 53248) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -523,5 +525,8 @@ if (process.argv.includes('--capture')) {
   // retaining 81.
   // Carrying the heard audio language into a replacement release (#1150) measured 128,899 against main's 128,781
   // (+118), in the lazy Player chunk. Allow the next 128-byte boundary.
-  if (coreTotalDelta > 129024) throw new Error('Browser total JS/CSS budget exceeded');
+  // The Still watching gate (#1177: the unattended-advance count, its prompt and styles) measured 129,711 with the
+  // rest of its batch (#1150, #1445) against 128,979, in the lazy Player chunk. Allow the smallest 128-byte boundary
+  // containing it.
+  if (coreTotalDelta > 129792) throw new Error('Browser total JS/CSS budget exceeded');
 }
