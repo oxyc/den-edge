@@ -225,6 +225,8 @@
     onepisode,
     onclose,
     oncontrols,
+    onstarted,
+    onfailed,
   }: {
     title: Title;
     season?: number;
@@ -292,6 +294,10 @@
     oncontrols?: (
       controls: { play: () => void; pause: () => void; seekBy: (seconds: number) => void } | null,
     ) => void;
+    /** The media reported playing: a Play on TV request's evidence that it started (den-spec play-results-v1 §3). */
+    onstarted?: () => void;
+    /** The player shows a failure, by its kind: a Play on TV request's evidence that it did not start. */
+    onfailed?: (failure: string) => void;
   } = $props();
   const nextHref = $derived(
     typeof nextEpisode === 'object' &&
@@ -679,6 +685,10 @@
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
   >(null);
+  $effect(() => {
+    const shown = failure;
+    if (shown) untrack(() => onfailed?.(shown));
+  });
   /** The cast page plays the session itself (away from home): its frame is the picture, its button in the corner. */
   const castStage = $derived(
     (!!session?.castOrigin || !!heldFrame) && !failure && !castView && !castActive,
@@ -4355,6 +4365,7 @@
     if (tv) setTvPlaybackActive(true);
     scheduleWebControls();
     progress.playing();
+    onstarted?.();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
     // The segment requests playback itself makes already say this viewer is here.

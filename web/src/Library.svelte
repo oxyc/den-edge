@@ -35,6 +35,8 @@
   import { playGuard } from './lib/playGuard';
   import { episodeProgress } from './lib/detailPresentation';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
+  import { reportResult, type PlayResult } from './lib/playResults';
+  import { hex } from './lib/crypto';
   import {
     airedSeasons,
     episodeAfter,
@@ -644,6 +646,8 @@
     following = undefined;
     if (playingSeasonsOf !== target.title) playingSeasons = undefined;
     playbackIntent += 1;
+    // Something else is played here before a pending Play on TV request started: it never will.
+    if (!isRemotePlay(target)) settleRemotePlay({ state: 'failed', reason: 'superseded' });
     playing = target;
   }
   if (import.meta.env.DEN_E2E) {
@@ -1427,21 +1431,36 @@
           }
           const queue = await householdQueue(tv.play);
           if (playStopped()) return;
-          const sealed = await sendToTV(queue, {
-            type: 'play',
-            tmdbId: title.id,
-            mediaType: title.type,
-            title: title.title,
-            season,
-            episode,
-          });
+          // A TV that reports play results seals them under the envelope's id (den-spec play-results-v1 §1), and one
+          // that was not listening is being woken, or needs Den opened.
+          const id = tv.results ? hex(crypto.getRandomValues(new Uint8Array(16))) : undefined;
+          const listening = tv.results ? await tvListening(queue) : null;
+          if (playStopped()) return;
+          const sealed = await sendToTV(
+            queue,
+            {
+              type: 'play',
+              tmdbId: title.id,
+              mediaType: title.type,
+              title: title.title,
+              season,
+              episode,
+            },
+            undefined,
+            id ? { id } : {},
+          );
           if (playStopped()) return;
           busy = false;
           if (sealed)
-            playOnTv.start(queue, sealed, tv.name, {
-              type: title.type,
-              id: title.id,
-            });
+            playOnTv.start(
+              queue,
+              sealed,
+              tv.name,
+              { type: title.type, id: title.id },
+              id
+                ? { id, listening, retry: () => playAgain(tvId, title, season, episode) }
+                : undefined,
+            );
           else
             failure = i18n.format(
               'error.couldntReachDevice',
@@ -1451,6 +1470,11 @@
         }
       : undefined,
   );
+
+  /** The toast's "Try again": a new request with a new id, never the old one sent again (play-results-v1 §7). */
+  function playAgain(tvId: string, title: Title, season?: number, episode?: number): void {
+    void play?.(tvId, title, season, episode);
+  }
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
@@ -1527,24 +1551,80 @@
   );
 
   /**
+   * The Play on TV request this TV is starting, whose sender waits to hear how it went (den-spec play-results-v1 §4):
+   * `preparing` once it is taken, then `playing` when the player made for it reports playing, or `failed` and why.
+   */
+  let remotePlay: { id: string; push: PlayRequest; failed: boolean } | null = null;
+
+  /**
+   * Tell the pending request's sender its last word and stop waiting on it; `push` settles only that request's, if it
+   * is still pending. A failure the player already reported is not said twice.
+   */
+  function settleRemotePlay(result: Omit<PlayResult, 'at'>, push?: PlayRequest) {
+    const pending = remotePlay;
+    if (!pending || (push && pending.push !== push)) return;
+    remotePlay = null;
+    if (result.state !== 'failed' || !pending.failed) void reportResult(pending.id, result);
+  }
+
+  /** Whether `target`, about to play or playing, is the pending request's title (and episode, when it named one). */
+  function isRemotePlay(target: Target): boolean {
+    const push = remotePlay?.push;
+    return (
+      !!push &&
+      target.title.type === push.mediaType &&
+      target.title.id === push.tmdbId &&
+      (push.episode === undefined ||
+        (target.season === push.season && target.episode === push.episode))
+    );
+  }
+
+  /**
+   * The player shows `failure` for `target`: no source of any kind, or another failure. Said once, and the request stays
+   * pending, so a source the viewer picks next in the same player can still report `playing` (play-results-v1 §3).
+   */
+  function remotePlayFailed(target: Target, failure: string) {
+    const pending = remotePlay;
+    if (!pending || pending.failed || !isRemotePlay(target)) return;
+    pending.failed = true;
+    const noSource = ['none', 'sourceUnavailable', 'noCopy', 'source', 'imdb'].includes(failure);
+    void reportResult(pending.id, { state: 'failed', reason: noSource ? 'no_source' : 'failed' });
+  }
+
+  /** The player made for `target` reports playing: the pending request's only evidence that it started. */
+  function remotePlayStarted(target: Target) {
+    if (isRemotePlay(target)) settleRemotePlay({ state: 'playing' });
+  }
+
+  /**
    * Start a play sent from another device as this TV's own Play would, through `playHere` and its parental guard.
    * Nobody at the TV asked, so a refusal is not offered a PIN: the guard's message says why.
    */
   async function startPushed(push: PlayRequest, signal?: AbortSignal) {
+    if (push.id) {
+      settleRemotePlay({ state: 'failed', reason: 'superseded' });
+      remotePlay = { id: push.id, push, failed: false };
+      void reportResult(push.id, { state: 'preparing' });
+    }
     // A TV opened to take this play may still be finding its sources: give that a moment, well inside the play's two
     // minutes, before saying there is none.
     for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500) {
       await abortableDelay(500, playSignal, signal);
-      if (playStopped(signal)) return;
+      if (playStopped(signal)) return settleRemotePlay({ state: 'failed', reason: 'failed' }, push);
     }
     const start = untrack(() => playHere);
-    if (playStopped(signal)) return;
+    if (playStopped(signal)) return settleRemotePlay({ state: 'failed', reason: 'failed' }, push);
     if (!start) {
       session.notify(`No playable source for “${push.title}”`);
+      settleRemotePlay({ state: 'failed', reason: 'no_source' }, push);
       return;
     }
     const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
-    if (!(await start(title, push.season, push.episode))) return;
+    if (!(await start(title, push.season, push.episode))) {
+      // Refused by the parental guard, unless the page retired under it.
+      const reason = playStopped(signal) ? 'failed' : 'not_allowed';
+      return settleRemotePlay({ state: 'failed', reason }, push);
+    }
     if (playStopped(signal)) return;
     session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
@@ -1566,11 +1646,14 @@
       if (stop.signal.aborted) return;
       // An assistant's play on this TV's lane (RoutedLibrary) starts here too: a trailer as the title page's.
       unregister = startPlaysWith(async (play) => {
-        if (play.trailer)
+        if (play.trailer) {
+          // The title page's trailer reports no start of its own yet: its requester hears `preparing`, then
+          // unconfirmed (play-results-v1 §6).
+          if (play.id) void reportResult(play.id, { state: 'preparing' });
           navigate(
             titleHref({ type: play.mediaType, id: play.tmdbId, title: play.title, trailer: true }),
           );
-        else await startPushed(play, stop.signal);
+        } else await startPushed(play, stop.signal);
       });
       return receiveTv(
         {
@@ -1604,6 +1687,8 @@
   });
 
   function closePlayer() {
+    // Closed before it played: the request it was opened for did not start.
+    settleRemotePlay({ state: 'failed', reason: 'failed' });
     playing = null;
     if (route.page === 'title' && route.play)
       navigate(
@@ -3525,6 +3610,8 @@
           : 0}
       onepisode={(at) => void advance({ title: target.title, ...at })}
       oncontrols={(controls) => (tvControls = controls)}
+      onstarted={() => remotePlayStarted(target)}
+      onfailed={(failure) => remotePlayFailed(target, failure)}
       onclose={closePlayer}
     />
   {/key}

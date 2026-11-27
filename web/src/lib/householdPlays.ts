@@ -6,6 +6,7 @@ import type { OtherQueue } from './assistant';
 import { abortableDelay } from './abortableDelay';
 import { hex, hkdf } from './crypto';
 import { drainTv, type PlayRequest, type TransportCommand } from './inbox';
+import { reportResult } from './playResults';
 import { fromBase64url, toBase64url } from './wire';
 
 const KEY = 'den.tvPlayKey.v1';
@@ -133,10 +134,17 @@ export async function laneId(playKey: string): Promise<string> {
   return hex(await hkdf(fromBase64url(playKey), 'den/link/v1', 'assistant-tv', 16));
 }
 
-/** The lane as the assistant drain loop takes it: drained under this TV's name, so den-mcp can ask for it by name. */
+/**
+ * The lane as the assistant drain loop takes it: drained under this TV's name, so den-mcp can ask for it by name, and
+ * saying this TV reports play results (play-results-v1 §6), so den-mcp waits for them.
+ */
 export async function laneQueue(playKey: string, name: string): Promise<OtherQueue> {
   const id = await laneId(playKey);
-  return { query: `queue=tv&tv=${id}`, body: JSON.stringify({ name }), key: `.tv.${id}` };
+  return {
+    query: `queue=tv&tv=${id}`,
+    body: JSON.stringify({ name, results: 1 }),
+    key: `.tv.${id}`,
+  };
 }
 
 /** When this TV last woke or came to the foreground: a play sent before that never starts (§16 *Freshness*). */
@@ -162,9 +170,15 @@ export function startPlaysWith(start: (play: TvPlay) => Promise<void>): () => vo
   };
 }
 
-/** Start `play` through the registered page; false when none is open to start it. */
+/**
+ * Start `play` through the registered page; false when none is open to start it, which its requester hears as a
+ * failure (play-results-v1 §3).
+ */
 export async function startPlay(play: TvPlay): Promise<boolean> {
-  if (!starter) return false;
+  if (!starter) {
+    if (play.id) void reportResult(play.id, { state: 'failed', reason: 'failed' });
+    return false;
+  }
   await starter(play);
   return true;
 }
@@ -172,7 +186,8 @@ export async function startPlay(play: TvPlay): Promise<boolean> {
 /**
  * Drain this TV's household command queue until `signal` aborts. The newest fresh play of a drain (the queue keeps
  * arrival order) goes to `play`, since several in one drain would only replace each other; each play that waited too
- * long goes to `stale`, and never starts; transport commands go to `transport` in order.
+ * long goes to `stale`, and never starts; transport commands go to `transport` in order. The requesters of the plays
+ * that never start hear why (play-results-v1 §4): `expired`, or `superseded` by the newest.
  */
 export async function receiveTv(
   handlers: {
@@ -194,9 +209,14 @@ export async function receiveTv(
         await abortableDelay(RETRY_MS, active);
         continue;
       }
-      for (const play of drained.stale) handlers.stale(play);
+      for (const play of drained.stale) {
+        handlers.stale(play);
+        if (play.id) void reportResult(play.id, { state: 'failed', reason: 'expired' });
+      }
       for (const command of drained.transport) handlers.transport(command);
       const newest = drained.fresh.at(-1);
+      for (const replaced of drained.fresh.slice(0, -1))
+        if (replaced.id) void reportResult(replaced.id, { state: 'failed', reason: 'superseded' });
       if (newest) await handlers.play(newest).catch(() => undefined);
       // An empty answer that came early (no held drains on this den-edge, or its cap on them reached) must not be
       // followed straight away by another (inbox-v1 §3). One that brought something drains again at once.

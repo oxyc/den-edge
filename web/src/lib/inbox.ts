@@ -86,10 +86,10 @@ async function openQueue(
   enc: Bytes,
   now: number,
   storage: Storage | undefined,
-): Promise<{ sentAt: number; message: Record<string, unknown> }[]> {
+): Promise<{ id: string; sentAt: number; message: Record<string, unknown> }[]> {
   if (!Array.isArray(messages)) return [];
   const key = await crypto.subtle.importKey('raw', enc, 'AES-GCM', false, ['decrypt']);
-  const opened: { sentAt: number; message: Record<string, unknown> }[] = [];
+  const opened: { id: string; sentAt: number; message: Record<string, unknown> }[] = [];
   for (const entry of messages as { sealed?: unknown }[]) {
     if (typeof entry?.sealed !== 'string') continue;
     try {
@@ -115,7 +115,7 @@ async function openQueue(
         typeof message === 'object' &&
         admit(id, now, storage)
       )
-        opened.push({ sentAt: sentAt as number, message: message as Record<string, unknown> });
+        opened.push({ id, sentAt: sentAt as number, message: message as Record<string, unknown> });
     } catch {
       // Not sealed under this key, or not a message.
     }
@@ -220,15 +220,17 @@ export async function sealMessage(
 }
 
 /** Queue `message`, sealed, for the TV behind `link`. The sealed string it appended, so a caller can ask
- * `stillQueued` whether the TV has taken it yet; false when den-edge didn't take it. */
+ * `stillQueued` whether the TV has taken it yet; false when den-edge didn't take it. A caller that watches the play's
+ * results (play-results-v1) names the envelope's `id` in `sealing`, since its results are sealed under it. */
 export async function sendToTV(
   link: Pick<Link, 'inboxKey' | 'linkKey'>,
   message: object,
   fetchImpl: typeof fetch = fetch,
+  sealing: Pick<Sealing, 'id'> = {},
 ): Promise<string | false> {
   try {
     const { enc } = await linkKeys(Uint8Array.from(atob(link.linkKey), (c) => c.charCodeAt(0)));
-    return appendSealed(link.inboxKey, enc, message, fetchImpl);
+    return appendSealed(link.inboxKey, enc, message, fetchImpl, sealing);
   } catch {
     return false;
   }
@@ -263,8 +265,9 @@ async function appendSealed(
   enc: Bytes,
   message: object,
   fetchImpl: typeof fetch,
+  sealing: Pick<Sealing, 'id'> = {},
 ): Promise<string | false> {
-  const sealed = await sealMessage(enc, message);
+  const sealed = await sealMessage(enc, message, sealing);
   try {
     const res = await fetchImpl('/inbox/append', {
       signal: AbortSignal.timeout(REQUEST_MS),
@@ -454,6 +457,8 @@ export interface PlayRequest {
   title: string;
   season?: number;
   episode?: number;
+  /** The request's id, under which its play results are sealed (play-results-v1 §1): set by the receiver. */
+  id?: string;
 }
 
 /**
@@ -538,10 +543,18 @@ export async function drainTv(
   const at = now();
   const drained: TvDrain = { fresh: [], stale: [], transport: [] };
   if (household)
-    for (const { sentAt, message } of await openQueue(body.queues[0], household.enc, at, storage)) {
+    for (const { id, sentAt, message } of await openQueue(
+      body.queues[0],
+      household.enc,
+      at,
+      storage,
+    )) {
       const play = playRequest(message);
       if (play)
-        (Math.abs(at - sentAt) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push(play);
+        (Math.abs(at - sentAt) <= PLAY_FRESHNESS ? drained.fresh : drained.stale).push({
+          ...play,
+          id,
+        });
       const command = transportCommand(message, sentAt);
       if (command) drained.transport.push(command);
     }

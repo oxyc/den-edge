@@ -733,6 +733,9 @@ async fn dispatch(
     if crate::playback_receipts::is_path(&path) {
         return Box::pin(crate::playback_receipts::handle(state, req)).await;
     }
+    if crate::play_result::is_path(&path) {
+        return Box::pin(crate::play_result::handle(state, req)).await;
+    }
     if crate::controller::is_path(&path) {
         return Box::pin(crate::controller::handle(state, req)).await;
     }
@@ -854,11 +857,14 @@ impl Face {
                 || crate::recovery::is_path(path)
                 || crate::assistant::is_path(path)
                 || crate::playback_receipts::is_path(path)
+                || crate::play_result::is_path(path)
                 || crate::controller::is_path(path);
         // Recovery codes are made and redeemed mostly in the web app (den-spec `wire/recovery-code.md`). The web app
         // also keeps a library's assistant drop-box key here and drains its requests while it is open.
         let web_app_calls = crate::assistant::is_path(path)
             || crate::playback_receipts::is_path(path)
+            // "Play on TV" reads the TV's results, and an LG or Samsung TV posts its own.
+            || crate::play_result::is_path(path)
             || path.starts_with("/pair/")
             || path.starts_with("/lib/")
             || path.starts_with("/grant/")

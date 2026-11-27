@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LIVE_MS } from './livePosition';
 import { GIVE_UP_MS, HINT_MS, PEEK_MS, PlayOnTvTracker, playOnTvStatus } from './playOnTv.svelte';
@@ -53,6 +54,159 @@ describe('playOnTvStatus (pure)', () => {
       done: true,
     });
   });
+});
+
+describe('playOnTvStatus with a TV that reports results', () => {
+  const base = {
+    now: 0,
+    sentAt: 0,
+    tvName: 'Living Room TV',
+    queued: null as boolean | null,
+    playing: false,
+    results: true,
+  };
+
+  it('says waking for a TV that was not listening, and sent for one that was', () => {
+    expect(playOnTvStatus({ ...base, waking: true }).message).toBe('Waking Living Room TV…');
+    expect(playOnTvStatus({ ...base, waking: true, now: HINT_MS }).message).toBe(
+      'Sent to Living Room TV… Den needs to be open on Living Room TV.',
+    );
+    expect(playOnTvStatus(base).message).toBe('Sent to Living Room TV…');
+  });
+
+  it('follows the TV: preparing, then playing, final', () => {
+    expect(playOnTvStatus({ ...base, result: { state: 'preparing', at: 1 } })).toEqual({
+      message: 'Preparing source on Living Room TV…',
+      done: false,
+    });
+    expect(playOnTvStatus({ ...base, result: { state: 'playing', at: 2 } })).toEqual({
+      message: 'Playing on Living Room TV',
+      done: true,
+    });
+  });
+
+  it('never says playing from a same-title position: only the TV’s own result', () => {
+    expect(playOnTvStatus({ ...base, playing: true }).message).toBe('Sent to Living Room TV…');
+  });
+
+  it('says why it failed, offering a new send only where one can help', () => {
+    const failed = (reason: 'no_source' | 'not_allowed' | 'expired' | 'failed' | 'superseded') =>
+      playOnTvStatus({ ...base, result: { state: 'failed', reason, at: 1 } });
+    expect(failed('no_source')).toEqual({
+      message: 'No playable source on Living Room TV.',
+      done: true,
+    });
+    expect(failed('not_allowed')).toEqual({
+      message: 'Living Room TV didn’t play it: a content limit or profile there blocks it.',
+      done: true,
+    });
+    expect(failed('superseded').retry).toBeUndefined();
+    expect(failed('expired')).toEqual({
+      message: 'Living Room TV got it too late to play it.',
+      done: true,
+      retry: true,
+    });
+    expect(failed('failed').retry).toBe(true);
+  });
+
+  it('is unconfirmed — not failed — when the wait ends with no word from the TV', () => {
+    expect(
+      playOnTvStatus({ ...base, now: GIVE_UP_MS, result: { state: 'preparing', at: 1 } }),
+    ).toEqual({
+      message: 'Living Room TV didn’t confirm it started.',
+      done: true,
+      retry: true,
+    });
+  });
+});
+
+describe('PlayOnTvTracker with a TV that reports results', () => {
+  const link = { inboxKey: 'abcdef0123456789' };
+  const title = { type: 'movie', id: 550 };
+  const vectors = JSON.parse(
+    readFileSync(new URL('../../../spec/vectors/play-results-v1.json', import.meta.url), 'utf8'),
+  ) as { id: string; results: { sealed: string }[] };
+  const [preparing, playing, failed] = vectors.results.map((r) => r.sealed);
+
+  /** den-edge's held read of the results: each answer once the TV has said one more thing. */
+  function resultsFetch(answers: string[][]) {
+    let asked = 0;
+    return vi.fn(async () => Response.json({ results: answers[asked++] ?? answers.at(-1) }));
+  }
+
+  it('shows the TV’s preparing and playing, and ignores a same-title position', async () => {
+    vi.useFakeTimers();
+    const session = { notify: vi.fn() };
+    const tracker = new PlayOnTvTracker(
+      session,
+      fakeQueued(true),
+      Date.now,
+      resultsFetch([[preparing!], [preparing!, playing!]]),
+    );
+    tracker.start(link, 'AAEC', 'Living Room TV', title, { id: vectors.id, listening: true });
+    tracker.observe([{ title, seconds: 12, at: Date.now() + 1 }]);
+    await vi.waitFor(() =>
+      expect(session.notify).toHaveBeenLastCalledWith('Playing on Living Room TV', undefined),
+    );
+    // A peek re-renders what is already shown; the sequence is what the toast went through.
+    const shown = session.notify.mock.calls.map((call) => call[0] as string);
+    expect(shown.filter((message, i) => message !== shown[i - 1])).toEqual([
+      'Sent to Living Room TV…',
+      'Preparing source on Living Room TV…',
+      'Playing on Living Room TV',
+    ]);
+    expect(tracker.active).toBe(false);
+  });
+
+  it('wakes a TV that was not listening, then says why it failed', async () => {
+    vi.useFakeTimers();
+    const session = { notify: vi.fn() };
+    const retry = vi.fn();
+    const tracker = new PlayOnTvTracker(
+      session,
+      fakeQueued(false),
+      Date.now,
+      resultsFetch([[preparing!, failed!]]),
+    );
+    tracker.start(link, 'AAEC', 'Living Room TV', title, {
+      id: vectors.id,
+      listening: false,
+      retry,
+    });
+    expect(session.notify).toHaveBeenLastCalledWith('Waking Living Room TV…', {
+      holdMs: Infinity,
+    });
+    // `no_source` has no retry: another title, or Den on the TV, is the way on.
+    await vi.waitFor(() =>
+      expect(session.notify).toHaveBeenLastCalledWith(
+        'No playable source on Living Room TV.',
+        undefined,
+      ),
+    );
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it('gives up unconfirmed, with Try again, when the TV says nothing', async () => {
+    vi.useFakeTimers();
+    const session = { notify: vi.fn() };
+    const retry = vi.fn();
+    const tracker = new PlayOnTvTracker(session, fakeQueued(false), Date.now, resultsFetch([[]]));
+    tracker.start(link, 'AAEC', 'Living Room TV', title, {
+      id: vectors.id,
+      listening: true,
+      retry,
+    });
+    await vi.advanceTimersByTimeAsync(GIVE_UP_MS);
+    const [message, options] = session.notify.mock.calls.at(-1)!;
+    expect(message).toBe('Living Room TV didn’t confirm it started.');
+    (options as { undo: { run: () => void } }).undo.run();
+    expect(retry).toHaveBeenCalledOnce();
+    expect(tracker.active).toBe(false);
+  });
+
+  function fakeQueued(queued: boolean) {
+    return vi.fn(async () => Response.json({ queued }));
+  }
 });
 
 describe('PlayOnTvTracker', () => {

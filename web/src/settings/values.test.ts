@@ -238,7 +238,7 @@ describe('synced prefs', () => {
           'bbbb000000000002.name': { value: { string: 'Bedroom' }, at },
           'bbbb000000000002.kind': { value: { string: 'tv' }, at },
           'bbbb000000000002.play': key('b'),
-          'bbbb000000000002.control': { value: { int: 1 }, at },
+          'bbbb000000000002.control': { value: { int: 2 }, at },
           'bbbb000000000002.played': { value: { int: 100 }, at },
           // Too old to take household plays, a browser, and a key that isn't one.
           'cccc000000000003.name': { value: { string: 'Old TV' }, at },
@@ -253,8 +253,21 @@ describe('synced prefs', () => {
     ]);
     const tvs = householdTvs(devices);
     expect(tvs).toEqual([
-      { id: 'bbbb000000000002', name: 'Bedroom', play: 'b'.repeat(43), controls: true },
-      { id: 'aaaa000000000001', name: 'Living room', play: 'a'.repeat(43), controls: false },
+      // Control 2 also reports how each play went (play-results-v1 §6).
+      {
+        id: 'bbbb000000000002',
+        name: 'Bedroom',
+        play: 'b'.repeat(43),
+        controls: true,
+        results: true,
+      },
+      {
+        id: 'aaaa000000000001',
+        name: 'Living room',
+        play: 'a'.repeat(43),
+        controls: false,
+        results: false,
+      },
     ]);
     expect(tvs.map((tv) => playOnLabel(tv, tvs))).toEqual([
       'Play on Bedroom',

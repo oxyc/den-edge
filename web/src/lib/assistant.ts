@@ -90,6 +90,8 @@ export type ApplyResult =
       /** A play's episode (§16), when it names one. */
       season?: number;
       episode?: number;
+      /** A play's request id, under which this TV seals its play results (play-results-v1 §1). */
+      id?: string;
       detail: string;
     }
   | { seq: number; outcome: 'rejected'; reason: string };
