@@ -9,9 +9,11 @@ import { checkSeasonProjection } from './season-projection-parity.mjs';
 verifyTvCore();
 for (const [name, maximum] of [
   ['den_core_bg.wasm', 1_000_000],
-  ['den_core_startup_bg.wasm', 555_000],
+  // den-core#125 `continue_row` and #131 `new_episodes` (Home's rows) are startup operations.
+  ['den_core_startup_bg.wasm', 578_000],
   ['den_core_deferred_bg.wasm', 900_000],
-  ['den_core_assistant_bg.wasm', 550_000],
+  // den-core#121 playback receipts v2 live in the assistant module.
+  ['den_core_assistant_bg.wasm', 594_000],
   ['den_core_recovery_bg.wasm', 140_000],
 ]) {
   const bytes = statSync(join(tvCore, 'generated', name)).size;
@@ -43,8 +45,8 @@ const cores = await Promise.all(
       if (request.op.startsWith('assistant_'))
         return JSON.parse(assistant.evaluateAssistant(input));
       if (request.op === 'recovery_derive') return JSON.parse(recovery.evaluateRecovery(input));
-      // The column index is the startup module's alone: the full core refuses it.
-      if (request.op === 'library_columns') {
+      // The column index and the Continue Watching row are the startup module's alone: the full core refuses them.
+      if (request.op === 'library_columns' || request.op === 'continue_row') {
         assert.equal(JSON.parse(main.evaluate(input)).error, 'invalid_request', request.op);
         return JSON.parse(startup.evaluateStartup(input));
       }
@@ -63,6 +65,11 @@ let count = 0;
 for (const file of ['policy-v1.json', 'profiles-v1.json']) {
   const fixture = JSON.parse(readFileSync(join(browserCore, file)));
   for (const vector of fixture.cases) {
+    // Native and Hearth only: a browser's Remux picks audio, and every browser module refuses it.
+    if (vector.request.op === 'audio_pick') {
+      for (const core of cores) assert.equal(core(vector.request).error, 'invalid_request');
+      continue;
+    }
     const actual = cores[1](vector.request);
     assert.deepEqual(
       actual,

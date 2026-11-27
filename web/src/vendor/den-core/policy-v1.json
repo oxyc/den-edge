@@ -2547,6 +2547,256 @@
    }
   },
   {
+   "name": "continue_row: series by their episode decision and films by their record, newest first",
+   "request": {
+    "op": "continue_row",
+    "series": [
+     {
+      "id": "tv:1",
+      "input": {
+       "mark": {"season": 1, "episode": 2, "fraction": 0.4, "at": 5000},
+       "finished": null,
+       "flag": null,
+       "seasons": [{"season": 1, "episodes": 10}],
+       "last_aired": null,
+       "dismissed_at": null
+      },
+      "progress_at": 5000,
+      "added_at": 100
+     },
+     {
+      "id": "tv:2",
+      "input": {
+       "mark": null,
+       "finished": null,
+       "flag": {"season": 1, "episode": 2},
+       "seasons": [{"season": 1, "episodes": 10}],
+       "last_aired": null,
+       "dismissed_at": null
+      },
+      "progress_at": 9000,
+      "added_at": 100
+     }
+    ],
+    "films": [
+     {"id": "movie:1", "progress_at": 7000, "dismissed_at": null},
+     {"id": "movie:2", "progress_at": 7500, "dismissed_at": 8000},
+     {"id": "movie:3", "progress_at": 8500, "dismissed_at": 8000}
+    ]
+   },
+   "ok": {
+    "rows": [
+     {"kind": "series", "id": "tv:2", "activity": 9000, "action": "next", "code": "next",
+      "episode": {"season": 1, "episode": 3}, "fraction": 0.0,
+      "reason": "the next episode after the one finished last"},
+     {"kind": "film", "id": "movie:3", "activity": 8500},
+     {"kind": "film", "id": "movie:1", "activity": 7000},
+     {"kind": "series", "id": "tv:1", "activity": 5000, "action": "resume", "code": "resume",
+      "episode": {"season": 1, "episode": 2}, "fraction": 0.4,
+      "reason": "resuming where it was left"}
+    ]
+   }
+  },
+  {
+   "name": "continue_row: a dismissed series stays off the row, and a series with no layout yet is held",
+   "request": {
+    "op": "continue_row",
+    "series": [
+     {
+      "id": "tv:1",
+      "input": {
+       "mark": {"season": 1, "episode": 3, "fraction": 0.5, "at": 5000},
+       "finished": null,
+       "flag": null,
+       "seasons": [{"season": 1, "episodes": 10}],
+       "last_aired": null,
+       "dismissed_at": 6000
+      }
+     },
+     {
+      "id": "tv:2",
+      "input": {
+       "mark": {"season": 1, "episode": 2, "fraction": 1.0, "at": 4000},
+       "finished": {"season": 1, "episode": 2, "at": 4000},
+       "flag": null,
+       "seasons": [],
+       "last_aired": null,
+       "dismissed_at": null
+      }
+     }
+    ],
+    "films": []
+   },
+   "ok": {
+    "rows": [
+     {"kind": "series", "id": "tv:2", "activity": 4000, "action": "hold", "code": "no_layout",
+      "episode": {"season": 1, "episode": 2}, "fraction": 0.0, "finished": true,
+      "reason": "no season layout known"}
+    ]
+   }
+  },
+  {
+   "name": "new_episodes: an episode is new for 7 days, the day it came out included",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-11-06",
+    "continuing": [{"series": 1, "season": 2, "episode": 1, "upcoming": false, "fraction": 0, "watched": false}],
+    "airing": [{"series": 1, "previous": {"season": 2, "episode": 1, "date": "2026-10-30"},
+                "premiere": {"season": 2, "date": "2026-10-30"}}]
+   },
+   "ok": {
+    "candidates": [1],
+    "followed": [1],
+    "released": [{"series": 1, "season": 2, "episode": 1}],
+    "new": [{"series": 1, "season": 2, "episode": 1, "released": {"season": 2, "episode": 1}, "name": null}],
+    "coming_up": []
+   }
+  },
+  {
+   "name": "new_episodes: on the eighth day it is an episode not watched, not a new one",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-11-07",
+    "continuing": [{"series": 1, "season": 2, "episode": 1, "upcoming": false, "fraction": 0, "watched": false}],
+    "airing": [{"series": 1, "previous": {"season": 2, "episode": 1, "date": "2026-10-30"},
+                "premiere": {"season": 2, "date": "2026-10-30"}}]
+   },
+   "ok": {"candidates": [1], "followed": [1], "released": [], "new": [], "coming_up": []}
+  },
+  {
+   "name": "new_episodes: followed are the Watchlist and the series caught up on, never one sampled once or seasons behind",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-10-31",
+    "watchlist": [5, 7],
+    "continuing": [
+     {"series": 259909, "season": 2, "episode": 1, "upcoming": false},
+     {"series": 1416, "season": 10, "episode": 3, "upcoming": false},
+     {"series": 2, "season": 4, "episode": 2, "upcoming": false},
+     {"series": 3, "season": 2, "episode": 1, "upcoming": false},
+     {"series": 6, "season": 2, "episode": 2, "upcoming": true}
+    ],
+    "caught_up": [4],
+    "seen": [1416, 8],
+    "dismissed": [7],
+    "airing": [
+     {"series": 259909, "previous": {"season": 2, "episode": 1, "date": "2026-10-30"},
+      "next": {"season": 2, "episode": 2, "date": "2026-11-06"}, "upcoming": [],
+      "premiere": {"season": 2, "date": "2026-10-30"}},
+     {"series": 1416, "previous": {"season": 22, "episode": 5, "date": "2026-10-30"},
+      "premiere": {"season": 22, "date": "2026-10-02"}},
+     {"series": 2, "previous": {"season": 4, "episode": 5, "date": "2026-10-30"},
+      "premiere": {"season": 4, "date": "2026-10-02"}},
+     {"series": 3, "previous": {"season": 2, "episode": 10, "name": "Finale", "date": "2026-10-30"},
+      "premiere": {"season": 2, "date": "2026-10-30"}}
+    ]
+   },
+   "ok": {
+    "candidates": [5, 259909, 1416, 2, 3, 6, 4, 8],
+    "followed": [5, 259909, 3, 6, 4, 8],
+    "released": [{"series": 259909, "season": 2, "episode": 1}, {"series": 3, "season": 2, "episode": 10}],
+    "new": [
+     {"series": 259909, "season": 2, "episode": 1, "released": {"season": 2, "episode": 1}, "name": null},
+     {"series": 3, "season": 2, "episode": 1, "released": {"season": 2, "episode": 10}, "name": null}
+    ],
+    "coming_up": [{"series": 259909, "season": 2, "episode": 2, "date": "2026-11-06", "premiere": false}]
+   }
+  },
+  {
+   "name": "new_episodes: a series on the Watchlist and on the row is new at its row episode",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-10-31",
+    "watchlist": [20],
+    "continuing": [{"series": 20, "season": 1, "episode": 4, "upcoming": false}],
+    "airing": [{"series": 20, "previous": {"season": 1, "episode": 4, "date": "2026-10-30"}}]
+   },
+   "ok": {
+    "candidates": [20],
+    "followed": [20],
+    "released": [{"series": 20, "season": 1, "episode": 4}],
+    "new": [{"series": 20, "season": 1, "episode": 4, "released": {"season": 1, "episode": 4}, "name": null}],
+    "coming_up": []
+   }
+  },
+  {
+   "name": "new_episodes: an episode watched or played past the resume floor is started, and not new",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-11-06",
+    "continuing": [
+     {"series": 10, "season": 1, "episode": 3, "upcoming": false, "fraction": 0.02, "watched": false},
+     {"series": 11, "season": 1, "episode": 3, "upcoming": false, "fraction": 0.03, "watched": false},
+     {"series": 12, "season": 1, "episode": 3, "upcoming": false, "fraction": 0, "watched": true}
+    ],
+    "airing": [
+     {"series": 10, "previous": {"season": 1, "episode": 3, "name": "Three", "date": "2026-11-05"}},
+     {"series": 11, "previous": {"season": 1, "episode": 3, "name": "Three", "date": "2026-11-05"}},
+     {"series": 12, "previous": {"season": 1, "episode": 3, "name": "Three", "date": "2026-11-05"}}
+    ]
+   },
+   "ok": {
+    "candidates": [10, 11, 12],
+    "followed": [10, 11, 12],
+    "released": [{"series": 10, "season": 1, "episode": 3}, {"series": 11, "season": 1, "episode": 3},
+                 {"series": 12, "season": 1, "episode": 3}],
+    "new": [{"series": 10, "season": 1, "episode": 3, "released": {"season": 1, "episode": 3}, "name": "Three"}],
+    "coming_up": []
+   }
+  },
+  {
+   "name": "new_episodes: Coming up is each followed series' soonest release within 30 days, today included, by date then series",
+   "request": {
+    "op": "new_episodes",
+    "today": "2026-10-31",
+    "watchlist": [13, 9, 8, 11, 12, 14],
+    "airing": [
+     {"series": 9, "premiere": {"season": 3, "date": "2026-11-20"}},
+     {"series": 8, "premiere": {"season": 2, "date": "2026-11-20"}},
+     {"series": 11, "premiere": {"season": 5, "date": "2026-11-30"}},
+     {"series": 12, "premiere": {"season": 5, "date": "2026-12-01"}},
+     {"series": 13, "premiere": {"season": 4, "date": "2026-10-31"}},
+     {"series": 14, "previous": {"season": 1, "episode": 1, "date": "2026-10-26"},
+      "next": {"season": 0, "episode": 3, "date": "2026-11-02"},
+      "upcoming": [{"season": 1, "episode": 2, "date": "2026-11-09"}, {"season": 1, "episode": 3, "date": "2026-11-16"}]}
+    ]
+   },
+   "ok": {
+    "candidates": [13, 9, 8, 11, 12, 14],
+    "followed": [13, 9, 8, 11, 12, 14],
+    "released": [{"series": 14, "season": 1, "episode": 1}],
+    "new": [],
+    "coming_up": [
+     {"series": 13, "season": 4, "episode": 1, "date": "2026-10-31", "premiere": true},
+     {"series": 14, "season": 1, "episode": 2, "date": "2026-11-09", "premiere": false},
+     {"series": 8, "season": 2, "episode": 1, "date": "2026-11-20", "premiere": true},
+     {"series": 9, "season": 3, "episode": 1, "date": "2026-11-20", "premiere": true},
+     {"series": 11, "season": 5, "episode": 1, "date": "2026-11-30", "premiere": true}
+    ]
+   }
+  },
+  {
+   "name": "new_episodes: without the viewer's day the answer is who is followed, and nothing is new or coming up",
+   "request": {
+    "op": "new_episodes",
+    "watchlist": [1, 0],
+    "continuing": [{"series": 2, "season": 1, "episode": 1, "upcoming": true}],
+    "airing": [{"series": 1, "previous": {"season": 1, "episode": 1, "date": "2026-10-30"},
+                "next": {"season": 1, "episode": 2, "date": "2026-11-06"}}]
+   },
+   "ok": {"candidates": [1, 2], "followed": [1, 2], "released": [], "new": [], "coming_up": []}
+  },
+  {
+   "name": "new_episodes: a day that is no calendar date is refused",
+   "request": {"op": "new_episodes", "today": "31.10.2026", "watchlist": [1]},
+   "error": "invalid_request"
+  },
+  {
+   "name": "new_episodes: a row entry without its episode is refused",
+   "request": {"op": "new_episodes", "today": "2026-10-31", "continuing": [{"series": 1, "upcoming": false}]},
+   "error": "invalid_request"
+  },
+  {
    "name": "recovery_code: 22 random bytes make den-spec recovery-v1's first code",
    "request": {
     "op": "recovery_code",
@@ -10375,6 +10625,28 @@
   {"name":"source_wait: a Retry-After sets the earliest retry, spread by the jitter","request":{"op":"source_wait","elapsed_ms":800,"attempt":0,"retry_after_ms":3000,"jitter":0.5},"ok":{"phase":"loading","next_ms":4200,"retry_in_ms":4000}},
   {"name":"source_wait: a Retry-After of zero still waits the base delay","request":{"op":"source_wait","elapsed_ms":800,"attempt":0,"retry_after_ms":0,"jitter":0},"ok":{"phase":"loading","next_ms":4200,"retry_in_ms":500}},
   {"name":"source_wait: a Retry-After after the automatic retry runs nothing","request":{"op":"source_wait","elapsed_ms":800,"attempt":1,"retry_after_ms":3000,"jitter":0.5},"ok":{"phase":"loading","next_ms":4200,"retry_in_ms":null}},
-  {"name":"source_wait: a jitter sample outside [0, 1) is refused","request":{"op":"source_wait","elapsed_ms":0,"attempt":0,"jitter":1},"error":"invalid_request"}
+  {"name":"source_wait: a jitter sample outside [0, 1) is refused","request":{"op":"source_wait","elapsed_ms":0,"attempt":0,"jitter":1},"error":"invalid_request"},
+  {"name":"audio_pick: the language already being heard comes before the wanted ones","request":{"op":"audio_pick","tracks":[{"language":"ita","default":true,"channels":6},{"language":"eng","channels":6}],"kept":"en","wanted":["it"]},"ok":{"index":1,"reason":"kept"}},
+  {"name":"audio_pick: the first wanted language a track is in wins","request":{"op":"audio_pick","tracks":[{"language":"rus","default":true},{"language":"eng"},{"language":"fin"}],"wanted":["sv","fi","en"]},"ok":{"index":2,"reason":"wanted"}},
+  {"name":"audio_pick: every spelling of a language compares equal","request":{"op":"audio_pick","tracks":[{"language":"en-US"},{"language":"ces"},{"language":"ger"}],"wanted":["deu"]},"ok":{"index":2,"reason":"wanted"}},
+  {"name":"audio_pick: ISO 639-2 and 639-1 Czech match","request":{"op":"audio_pick","tracks":[{"language":"en"},{"language":"cze"}],"wanted":["cs"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: Bokmal, Nynorsk and Norwegian are one language","request":{"op":"audio_pick","tracks":[{"language":"eng","default":true},{"language":"nno"}],"wanted":["no"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: a commentary is never picked for its language","request":{"op":"audio_pick","tracks":[{"language":"eng","commentary":true,"channels":6},{"language":"fre","default":true,"channels":6},{"language":"eng","channels":2}],"wanted":["en"]},"ok":{"index":2,"reason":"wanted"}},
+  {"name":"audio_pick: the surround main mix over its default stereo downmix","request":{"op":"audio_pick","tracks":[{"language":"eng","default":true,"channels":2},{"language":"eng","channels":6},{"language":"eng","commentary":true,"channels":8}],"wanted":["en"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: Atmos over more channels","request":{"op":"audio_pick","tracks":[{"language":"eng","channels":8},{"language":"eng","channels":6,"atmos":true}],"wanted":["en"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: between equal mixes the default-flagged one","request":{"op":"audio_pick","tracks":[{"language":"eng","channels":6},{"language":"eng","channels":6,"default":true}],"wanted":["en"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: between equal mixes with no default the first","request":{"op":"audio_pick","tracks":[{"language":"fre"},{"language":"eng","channels":6},{"language":"eng","channels":6}],"wanted":["en"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: with no track in a wanted language an unlabelled track beats one labelled with another language","request":{"op":"audio_pick","tracks":[{"language":"ita","default":true,"channels":6},{"language":"und","channels":6}],"wanted":["en"]},"ok":{"index":1,"reason":"unlabelled"}},
+  {"name":"audio_pick: an absent or empty tag is unlabelled too, and among unlabelled tracks the default-flagged one","request":{"op":"audio_pick","tracks":[{"language":"ita","default":true},{"language":""},{"default":true}],"kept":"en","wanted":["fi"]},"ok":{"index":2,"reason":"unlabelled"}},
+  {"name":"audio_pick: an unlabelled commentary never beats a labelled main track","request":{"op":"audio_pick","tracks":[{"language":"ita","default":true},{"commentary":true}],"wanted":["en"]},"ok":{"index":0,"reason":"default"}},
+  {"name":"audio_pick: with nothing unlabelled the default-flagged track of another language","request":{"op":"audio_pick","tracks":[{"language":"rus"},{"language":"fre","default":true}],"wanted":["en"]},"ok":{"index":1,"reason":"default"}},
+  {"name":"audio_pick: with nothing unlabelled or flagged default the first track","request":{"op":"audio_pick","tracks":[{"language":"rus"},{"language":"fre"}],"wanted":["en"]},"ok":{"index":0,"reason":"first"}},
+  {"name":"audio_pick: a language that has only a commentary is not a match","request":{"op":"audio_pick","tracks":[{"language":"eng","commentary":true},{"language":"ita","default":true}],"wanted":["en"]},"ok":{"index":1,"reason":"default"}},
+  {"name":"audio_pick: with no language wanted none is unwanted, so the default-flagged track","request":{"op":"audio_pick","tracks":[{"language":"und"},{"language":"ita","default":true}]},"ok":{"index":1,"reason":"default"}},
+  {"name":"audio_pick: with no language wanted and nothing flagged default the first track","request":{"op":"audio_pick","tracks":[{"language":"ita"},{}],"kept":null,"wanted":[]},"ok":{"index":0,"reason":"first"}},
+  {"name":"audio_pick: an unlabelled kept or wanted language asks for nothing","request":{"op":"audio_pick","tracks":[{"language":"und","default":true},{"language":"eng"}],"kept":"und","wanted":["","en"]},"ok":{"index":1,"reason":"wanted"}},
+  {"name":"audio_pick: only commentaries: the first track","request":{"op":"audio_pick","tracks":[{"commentary":true,"default":true},{"language":"eng","commentary":true}],"wanted":["en"]},"ok":{"index":0,"reason":"first"}},
+  {"name":"audio_pick: no tracks pick nothing","request":{"op":"audio_pick","tracks":[],"wanted":["en"]},"ok":null},
+  {"name":"audio_pick: a request without its tracks is refused","request":{"op":"audio_pick","wanted":["en"]},"error":"invalid_request"}
  ]
 }

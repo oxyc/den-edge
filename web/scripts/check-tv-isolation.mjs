@@ -528,5 +528,10 @@ if (process.argv.includes('--capture')) {
   // The Still watching gate (#1177: the unattended-advance count, its prompt and styles) measured 129,711 with the
   // rest of its batch (#1150, #1445) against 128,979, in the lazy Player chunk. Allow the smallest 128-byte boundary
   // containing it.
-  if (coreTotalDelta > 129792) throw new Error('Browser total JS/CSS budget exceeded');
+  // den-core's new-episode rule (den#1470) measured 129,447 against matched main's 128,781 (+666, main at b9faa807):
+  // the content Worker's `new.episodes` request and answer validators and their protocol types, and the vendored
+  // den-core's newer JS glue, less the TypeScript copy of the rule it replaces. The Worker codec must check what the
+  // page sends, and the page and Worker share the protocol module. Startup measured +87. On main at fc28480e it
+  // measured 130,329; allow the next 128-byte boundary.
+  if (coreTotalDelta > 130432) throw new Error('Browser total JS/CSS budget exceeded');
 }

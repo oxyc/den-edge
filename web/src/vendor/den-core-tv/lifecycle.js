@@ -18,6 +18,8 @@ export const STARTUP_OPERATIONS = Object.freeze([
   'kid_title_approvals_validate',
   'title_state',
   'library_columns',
+  'continue_row',
+  'new_episodes',
   'download_status',
 ]);
 

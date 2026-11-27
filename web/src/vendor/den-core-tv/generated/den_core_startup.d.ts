@@ -33,7 +33,7 @@ export class LibraryColumns {
     /**
      * `doc_decode` of one row's plaintext, its document kept here: the decode's envelope without the document.
      */
-    decode(plaintext: Uint8Array, expected?: string | null): string;
+    decode(plaintext: Uint8Array | number[], expected?: string | null): string;
     /**
      * One held document's JSON, as it was added.
      */
