@@ -131,6 +131,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Atlas couldn’t check this title for this profile.':
     'Atlas no pudo comprobar este título para este perfil.',
   'Art House': 'Casa de Arte',
+  'Ask Owner': 'Pedir al propietario',
+  'this title': 'este título',
   'Assassin & Hitman': 'Asesino y sicario',
   Assault: 'Asalto',
   Assistants: 'Asistentes',

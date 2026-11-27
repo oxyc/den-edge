@@ -189,13 +189,15 @@ for (const worker of ['libraryServiceWorker', 'recoveryWorker']) {
 if (assets.some((file) => file.includes('libraryServiceSharedWorker')))
   throw new Error(`${platform}: desktop SharedWorker leaked into the TV build`);
 const manifest = JSON.parse(await readFile(resolve(directory, '.vite/manifest.json'), 'utf8'));
-if (Object.keys(manifest).some((file) => file.endsWith('/KidTitleAccessDialog.svelte')))
-  throw new Error('The Browser Kid title-access editor leaked into a TV build');
+// Only the reduced Tizen 3 package compiles the Kid title-access PIN entry out; webOS and supported Tizen carry it
+// for a Kid's request to the Owner.
+if (tizen3 && Object.keys(manifest).some((file) => file.endsWith('/KidTitleAccessDialog.svelte')))
+  throw new Error('The Browser Kid title-access editor leaked into a Tizen 3 build');
 const titleAccessMarkers = [
   'kid-title-access-pin',
   'a Kid title-access change is already in progress',
 ];
-for (const file of assets.filter((name) => name.endsWith('.js'))) {
+for (const file of assets.filter((name) => tizen3 && name.endsWith('.js'))) {
   const code = await readFile(resolve(directory, 'assets', file), 'utf8');
   const marker = titleAccessMarkers.find((candidate) => code.includes(candidate));
   if (marker)

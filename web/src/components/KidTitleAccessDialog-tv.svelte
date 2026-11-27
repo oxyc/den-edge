@@ -1,6 +1,6 @@
 <script lang="ts">
-  // TV builds expose the exact-title supported-browser handoff in Detail. Keep this prop-compatible replacement
-  // intentionally empty so the Browser PIN writer and its recovery copy cannot enter any TV package.
+  // The reduced Tizen 3 build exposes the exact-title supported-browser handoff in Detail. Keep this
+  // prop-compatible replacement intentionally empty so the PIN writer and its recovery copy cannot enter it.
   let {
     request: _request,
     onconfirm: _onconfirm,

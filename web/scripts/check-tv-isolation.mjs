@@ -550,5 +550,9 @@ if (process.argv.includes('--capture')) {
   // episode window is den-core's `new_episodes` answer), the Updates store and page, the follow and mark commands with
   // their settings-view fields, and the bell. The page is its own lazy chunk. Allow the next 128-byte boundary
   // containing it.
-  if (coreTotalDelta > 138240) throw new Error('Browser total JS/CSS budget exceeded');
+  // A Kid's "Ask Owner" on a title its policy withholds (the lazy Detail's action, the routed library's request, and
+  // the coordinator's Kid branch of the existing approval write) measured 138,501 with den#477 (+282). The PIN dialog
+  // and writer are already in this graph; the write must stay with the coordinator that owns the session. Allow the
+  // next 128-byte boundary.
+  if (coreTotalDelta > 138624) throw new Error('Browser total JS/CSS budget exceeded');
 }

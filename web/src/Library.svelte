@@ -320,7 +320,7 @@
   let busy = $state(false);
   let kidAccessRequest = $state.raw<{
     kid: { id: string; name: string };
-    title: Title;
+    title: Pick<Title, 'type' | 'id' | 'title'>;
     allow: boolean;
     authority: object;
   } | null>(null);
@@ -328,10 +328,34 @@
     const request = kidAccessRequest;
     if (
       request &&
-      (!profiles || profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority)
+      (!profiles ||
+        (profiles.mode === 'kid'
+          ? session !== request.authority
+          : profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority))
     )
       kidAccessRequest = null;
   });
+  /**
+   * A Kid whose policy blocks a title asks for the Owner PIN here, which writes the same persistent approval the
+   * Owner's menu does. Only a Kid session of a household with an Owner PIN, and never the reduced Tizen 3 package.
+   */
+  const askOwner = $derived(
+    !__DEN_TV_LEGACY_JS_CORE__ &&
+      profiles?.mode === 'kid' &&
+      profiles.parentalPinConfigured === true &&
+      session.identity.kind === 'profile'
+      ? (title: Pick<Title, 'type' | 'id' | 'title'>) => {
+          const kid = profiles.activeChoice;
+          if (kid?.id)
+            kidAccessRequest = {
+              kid: { id: kid.id, name: kid.name },
+              title,
+              allow: true,
+              authority: session,
+            };
+        }
+      : undefined,
+  );
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -3144,16 +3168,19 @@
   }
 </script>
 
-{#if !__DEN_TV__}
+{#if !__DEN_TV_LEGACY_JS_CORE__}
   <KidTitleAccessDialog
     request={kidAccessRequest}
     onclose={() => (kidAccessRequest = null)}
     onconfirm={async (pin) => {
       const request = kidAccessRequest;
+      const asKid = profiles?.mode === 'kid';
       if (
         !request ||
         !profiles ||
-        profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority
+        (asKid
+          ? session !== request.authority
+          : profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority)
       )
         return { outcome: 'superseded' };
       const result = await profiles.setKidTitleApproval(
@@ -3161,6 +3188,7 @@
         { type: request.title.type, id: request.title.id },
         request.allow,
         pin,
+        asKid,
       );
       return finishKidTitleApprovalPresentation(request, kidAccessRequest, result, () =>
         session.notify(
@@ -3256,6 +3284,7 @@
     away={remuxAway && !!scout}
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}
+    onaskowner={askOwner}
     onepisode={markEpisodeSeen}
     shown={relatedShown}
     kidTitleAccessHandoff={__DEN_TV__ &&

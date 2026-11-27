@@ -128,6 +128,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Atlas couldn’t check this title for this profile.':
     'Atlas kunde inte kontrollera den här titeln för den här profilen.',
   'Art House': 'Konsthus',
+  'Ask Owner': 'Fråga ägaren',
+  'this title': 'den här titeln',
   'Assassin & Hitman': 'Lönnmördare',
   Assault: 'Överfall',
   Assistants: 'Assistenter',

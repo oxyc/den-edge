@@ -11,7 +11,11 @@
     onconfirm,
     onclose,
   }: {
-    request: { kid: { id: string; name: string }; title: Title; allow: boolean } | null;
+    request: {
+      kid: { id: string; name: string };
+      title: Pick<Title, 'type' | 'id' | 'title'>;
+      allow: boolean;
+    } | null;
     onconfirm: (pin: string) => Promise<KidTitleApprovalChangeResult>;
     onclose: () => void;
   } = $props();

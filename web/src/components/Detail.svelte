@@ -103,7 +103,10 @@
     playRequest,
     trailerRequested = false,
     kidTitleAccessHandoff,
+    onaskowner,
   }: {
+    /** A Kid's way to ask the Owner (by PIN) to allow a title its policy withholds; absent for anyone else. */
+    onaskowner?: (title: Pick<Title, 'type' | 'id' | 'title'>) => void;
     ref: { type: MediaType; id: number };
     /**
      * The season the address names (`?season=2`), with the title it is for. Only the page of that title, while it is
@@ -1127,6 +1130,17 @@
 
 {#if withheld}
   <p class="note">This title isn’t available on this profile.</p>
+  {#if onaskowner}
+    <Button
+      label="Ask Owner"
+      onclick={() =>
+        onaskowner({
+          type: ref.type,
+          id: ref.id,
+          title: seed?.title ?? i18n.phrase('this title'),
+        })}
+    />
+  {/if}
 {:else if detail === null}
   <p class="note" role="alert">
     {detailFailure?.state === 'unavailable' &&
