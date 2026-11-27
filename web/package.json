@@ -86,7 +86,7 @@
     "@formatjs/intl-displaynames": "8.0.3",
     "@formatjs/intl-locale": "5.4.3",
     "@formatjs/intl-numberformat": "10.0.2",
-    "@formatjs/intl-pluralrules": "6.3.16",
+    "@formatjs/intl-pluralrules": "7.1.0",
     "@formatjs/intl-relativetimeformat": "13.0.1",
     "@juggle/resize-observer": "^3.4.0",
     "@noble/curves": "^2.4.0",
