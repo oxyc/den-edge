@@ -1,5 +1,5 @@
 import { SvelteMap } from 'svelte/reactivity';
-import { localDay, type Airing } from './airing';
+import { localDay, newEpisodesRequest, type Airing } from './airing';
 import type { AiringStore } from './airing.svelte';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { deriveUpdates, type UpdateEvent, type UpdateFacts } from './follows';
@@ -95,12 +95,30 @@ export class UpdatesStore {
       keys.filter((key) => key.startsWith(`${kind}:`)).map((key) => Number(key.split(':')[1]));
     const [series, films, people] = [ids('tv'), ids('movie'), ids('person')];
     let failures = 0;
-    const facts: Required<UpdateFacts> = { airing: {}, films: {}, credits: {} };
+    const facts: Required<UpdateFacts> = { airing: {}, released: {}, films: {}, credits: {} };
     await this.airing.follow(series.map((tmdb) => ({ tmdb }))).catch(() => failures++);
     const observedAt = Date.now();
-    for (const id of series) {
-      const airing: Airing | undefined = this.airing.get(id);
-      if (airing) facts.airing[id] = { ...airing, observedAt };
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one request and discarded.
+    const airings: ReadonlyMap<number, Airing> = new Map(
+      series.flatMap((id) => {
+        const airing = this.airing.get(id);
+        return airing ? [[id, airing] as const] : [];
+      }),
+    );
+    for (const [id, airing] of airings) facts.airing[id] = { ...airing, observedAt };
+    if (airings.size) {
+      // Each followed series' newest episode out is den-core's to say, as for Home's New badge (`new_episodes`).
+      const none: number[] = [];
+      const request = newEpisodesRequest(
+        { watchlist: airings.keys(), continuing: [], caughtUp: none, seen: none, dismissed: none },
+        airings,
+      );
+      const answer = await this.content
+        .query({ kind: 'new.episodes', ...request })
+        .catch(() => null);
+      if (!answer) failures++;
+      for (const { series: id, season, episode } of answer?.answer.released ?? [])
+        facts.released[id] = { season, episode };
     }
     if (films.length) {
       const answer = await this.content

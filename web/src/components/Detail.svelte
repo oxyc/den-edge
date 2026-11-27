@@ -19,6 +19,7 @@
   import PosterRow from './PosterRow.svelte';
   import TitleActions from './TitleActions.svelte';
   import Button from './Button.svelte';
+  import Confirm from '../settings/Confirm.svelte';
   import TitleMetadata from './TitleMetadata.svelte';
   import ProductionMetadata from './ProductionMetadata.svelte';
   import DetailTabs from './DetailTabs.svelte';
@@ -57,6 +58,7 @@
   import { i18n } from '../lib/i18n.svelte';
   import { airedThrough, seriesStatusBadge, withAiring } from '../lib/airing';
   import { airingStore } from '../lib/airing.svelte';
+  import { availability } from '../lib/availability.svelte';
 
   type Reaction = TitleRow['reaction']['value'];
   let {
@@ -157,7 +159,13 @@
     onplay?: (tv: string, title: Title, season?: number, episode?: number) => void;
     /** The household's TVs, the one used last first: one Play on TV each. */
     tvs?: readonly HouseholdTv[];
-    onplayhere?: (title: Title, season?: number, episode?: number, filename?: string) => void;
+    onplayhere?: (
+      title: Title,
+      season?: number,
+      episode?: number,
+      filename?: string,
+      allowCinema?: boolean,
+    ) => void;
     /** Controls the command-capable household TV that authored `live`; absent for another or older device. */
     ontransport?: (action: 'play' | 'pause' | 'skip', offsetSeconds?: number) => Promise<boolean>;
     /** Where den-remux answers (`findRemux`) for playback and link premeasurement. */
@@ -354,6 +362,17 @@
    * spent 24 ms in this flush.
    */
   let detail = $state.raw<TitleDetail | null | undefined>();
+  let cinemaPlayTarget = $state<{ title: Title; season?: number; episode?: number }>();
+  let cinemaAsking = $state(false);
+  let cinemaReturnFocus: HTMLElement | undefined;
+  const cinemaOnly = $derived(
+    detail?.title && availability.reason(detail.title) === 'only_cinema_recordings',
+  );
+  $effect(() => {
+    const current = detail;
+    if (active && current)
+      availability.want({ ...current.title, imdbId: current.imdbId ?? undefined });
+  });
   let detailFailure = $state.raw<OptionalContent<TitleDetail>>();
   /** The active profile's content policy does not allow this title: nothing about it is shown or offered. */
   let withheld = $state(false);
@@ -956,6 +975,13 @@
 
   /** Start it here when this browser can play, else on the TV a play last went to. */
   function start(title: Title, season?: number, episode?: number) {
+    if (onplayhere && availability.reason(title) === 'only_cinema_recordings') {
+      cinemaReturnFocus =
+        document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+      cinemaPlayTarget = { title, season, episode };
+      cinemaAsking = true;
+      return;
+    }
     if (onplayhere) onplayhere(title, season, episode);
     else if (onplay && tvs[0]) onplay(tvs[0].id, title, season, episode);
   }
@@ -1295,7 +1321,7 @@
                 }
               : undefined}
             onplayhere={onplayhere && playbackTarget
-              ? () => onplayhere(d.title, playbackTarget.season, playbackTarget.episode)
+              ? () => start(d.title, playbackTarget.season, playbackTarget.episode)
               : undefined}
             playHref={playbackTarget
               ? titleHref({
@@ -1338,6 +1364,30 @@
                   // describe. Built from the route rather than from wherever this page happens to be open.
                   url: `${__DEN_TV_WEB_ORIGIN__ || location.origin}${titleHref({ ...d.title, season: requestedSeason })}`,
                 }}
+          />
+          {#if cinemaOnly}<p class="cinema-notice" role="status">
+              {i18n.phrase(
+                'Camera and telesync copies have poor picture and sound. You can wait for a proper release or play the best one now.',
+              )}
+            </p>{/if}
+          <Confirm
+            label="Play anyway"
+            question="Only cinema recordings so far"
+            detail="Camera and telesync copies have poor picture and sound. You can wait for a proper release or play the best one now."
+            tone="primary"
+            hideTrigger
+            bind:asking={cinemaAsking}
+            onclose={() => {
+              if (active && cinemaReturnFocus?.isConnected) cinemaReturnFocus.focus();
+              cinemaReturnFocus = undefined;
+            }}
+            onconfirm={() => {
+              const target = cinemaPlayTarget;
+              cinemaPlayTarget = undefined;
+              cinemaReturnFocus = undefined;
+              if (target)
+                onplayhere?.(target.title, target.season, target.episode, undefined, true);
+            }}
           />
           {#if kidTitleAccessHandoff}
             <div class="kid-access-handoff">
@@ -1607,6 +1657,12 @@
 {/if}
 
 <style>
+  .cinema-notice {
+    max-width: 42rem;
+    margin: 10px 0 0;
+    color: var(--muted);
+  }
+
   .title-sources {
     margin-bottom: 24px;
   }

@@ -99,6 +99,8 @@ struct SeenTv {
     tv: String,
     name: Option<String>,
     at: u64,
+    /// Its last drain said it reports play results (den-spec play-results-v1 §6).
+    results: bool,
 }
 
 /// A library's queues (§16): its own, which every device drains, and its TVs': the shared one, or a lane of a TV's
@@ -170,16 +172,21 @@ fn lane_of(req: &Request) -> Result<Lane, Box<Response>> {
         .map_err(|code| Box::new(refused_lane(code)))
 }
 
-/// What a TV calls its lane, from a drain's body: `{"name"}`, cleaned as a pairing label. Absent or unreadable is
-/// none, and the drain goes ahead.
-async fn drain_name(req: Request) -> Option<String> {
-    let bytes = axum::body::to_bytes(req.into_body(), DROPBOX_BODY_BYTES).await.ok()?;
-    let body: Value = serde_json::from_slice(&bytes).ok()?;
-    crate::oauth::clean_name(body.get("name")?.as_str()?, TV_NAME_MAX)
+/// What a TV says of its lane in a drain's body: `{"name", "results"}` — its name, cleaned as a pairing label, and
+/// whether it reports play results (`"results": 1`). Absent or unreadable is none and false, and the drain goes ahead.
+async fn drain_body(req: Request) -> (Option<String>, bool) {
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), DROPBOX_BODY_BYTES).await else {
+        return (None, false);
+    };
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return (None, false) };
+    let name =
+        body.get("name").and_then(Value::as_str).and_then(|name| crate::oauth::clean_name(name, TV_NAME_MAX));
+    (name, body.get("results").and_then(Value::as_u64).is_some_and(|v| v >= 1))
 }
 
-/// Note a TV queue's drain: the TV is awake, and a lane's TV is listed under the name it gave (or the last one).
-fn saw_tv(state: &AppState, library: &str, tv: Option<&str>, name: Option<String>) {
+/// Note a TV queue's drain: the TV is awake, and a lane's TV is listed under the name it gave (or the last one), with
+/// whether it reports play results as its latest drain said.
+fn saw_tv(state: &AppState, library: &str, tv: Option<&str>, name: Option<String>, results: bool) {
     let now = state.now();
     let mut seen = state.assistant_tv_seen.lock().expect("TV drain times");
     let library = seen.entry(library.to_owned()).or_default();
@@ -191,8 +198,9 @@ fn saw_tv(state: &AppState, library: &str, tv: Option<&str>, name: Option<String
         Some(seen) => {
             seen.at = now;
             seen.name = name.or(seen.name.take());
+            seen.results = results;
         }
-        None => library.lanes.push(SeenTv { tv: tv.to_owned(), name, at: now }),
+        None => library.lanes.push(SeenTv { tv: tv.to_owned(), name, at: now, results }),
     }
     if library.lanes.len() > MAX_TVS {
         library.lanes.sort_by_key(|seen| std::cmp::Reverse(seen.at));
@@ -394,7 +402,7 @@ pub async fn delete_projection(state: &AppState, grant: &str) -> std::io::Result
 }
 
 /// The library a member route's `x-den-library-member` proves, or `403 not_a_member`.
-async fn member_library(state: &AppState, headers: &HeaderMap) -> Result<String, Box<Response>> {
+pub(crate) async fn member_library(state: &AppState, headers: &HeaderMap) -> Result<String, Box<Response>> {
     let claim = headers.get(crate::library::MEMBER_HEADER).and_then(|v| v.to_str().ok());
     if !crate::library::is_household_member(state, claim).await {
         return Err(Box::new(json_reply(StatusCode::FORBIDDEN, &error("not_a_member"))));
@@ -578,8 +586,8 @@ async fn drain(state: &AppState, req: Request) -> Response {
     let admission = req.extensions().get::<crate::handler::AdmissionSlot>().cloned();
     // Only a TV drains a TV queue, so a drain of one says that TV is awake (`GET /assistant/tv`).
     if let Lane::Tv(tv) = &lane {
-        let name = if tv.is_some() { drain_name(req).await } else { None };
-        saw_tv(state, &library, tv.as_deref(), name);
+        let (name, results) = if tv.is_some() { drain_body(req).await } else { (None, false) };
+        saw_tv(state, &library, tv.as_deref(), name, results);
     }
     // Registered before the queue is read: a request appended after the read still wakes the wait.
     let held_on = lane.hold(&library);
@@ -650,8 +658,11 @@ async fn get_tv(state: &AppState, req: Request) -> Response {
         let seen = state.assistant_tv_seen.lock().expect("TV drain times");
         match seen.get(&session.library) {
             Some(seen) => {
-                let lanes =
-                    seen.lanes.iter().map(|tv| (tv.at, tv.tv.clone(), tv.name.clone())).collect::<Vec<_>>();
+                let lanes = seen
+                    .lanes
+                    .iter()
+                    .map(|tv| (tv.at, tv.tv.clone(), tv.name.clone(), tv.results))
+                    .collect::<Vec<_>>();
                 (lanes.iter().map(|(at, ..)| *at).chain(seen.shared).max(), lanes)
             }
             None => (None, Vec::new()),
@@ -667,10 +678,10 @@ async fn get_tv(state: &AppState, req: Request) -> Response {
     }
     let wakeable = state.controllers.wakeable(&session.library, now);
     for (tv, name, at) in &registered {
-        if !lanes.iter().any(|(_, lane, _)| lane == tv) {
-            lanes.push((0, tv.clone(), Some(name.clone())));
+        if !lanes.iter().any(|(_, lane, ..)| lane == tv) {
+            lanes.push((0, tv.clone(), Some(name.clone()), false));
         }
-        if let Some((_, _, current_name)) = lanes.iter_mut().find(|(_, lane, _)| lane == tv) {
+        if let Some((_, _, current_name, _)) = lanes.iter_mut().find(|(_, lane, ..)| lane == tv) {
             if current_name.is_none() {
                 *current_name = Some(name.clone());
             }
@@ -680,12 +691,13 @@ async fn get_tv(state: &AppState, req: Request) -> Response {
     lanes.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
     let tvs: Vec<Value> = lanes
         .into_iter()
-        .map(|(at, tv, name)| {
+        .map(|(at, tv, name, results)| {
             let registration = registered.iter().find(|(lane, ..)| lane == &tv);
             json!({
                 "tv": tv,
                 "name": name,
                 "online": at > 0 && online(at),
+                "results": results,
                 "registered": registration.is_some(),
                 "wakeable": wakeable.iter().any(|(lane, ..)| lane == &tv),
                 "lastSeenAt": (at > 0).then_some(at),
@@ -1268,6 +1280,14 @@ mod tests {
         assert_eq!(listed["tvs"][0]["tv"], OTHER_LANE, "the one seen last first");
         assert_eq!(listed["tvs"][0]["name"], "Bedroom", "a drain naming nothing keeps the name");
         assert_eq!(listed["tvs"][1]["online"], false);
+        // A TV that reports play results says so as it drains; its next drain from a build without them unsays it.
+        assert_eq!(listed["tvs"][0]["results"], false);
+        as_member(&h, "POST", &drain(OTHER_LANE), Some(json!({ "name": "Bedroom", "results": 1 }))).await;
+        let (_, listed) = as_assistant(&h, &access, "GET", "/assistant/tv", None).await;
+        assert_eq!(listed["tvs"][0]["results"], true);
+        as_member(&h, "POST", &drain(OTHER_LANE), Some(json!({ "name": "Bedroom" }))).await;
+        let (_, listed) = as_assistant(&h, &access, "GET", "/assistant/tv", None).await;
+        assert_eq!(listed["tvs"][0]["results"], false);
     }
 
     /// A key reset retires the library: its queue and drop-box key go, and its write sessions end with it.

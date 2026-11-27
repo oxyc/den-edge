@@ -229,10 +229,13 @@ if (process.argv.includes('--capture')) {
   // Allow the next 128-byte boundary, retaining 97.
   // 2026-11-27 (#1177): the Spanish and Swedish "Still watching?" prompt measures 53,235 against #1219's 53,113.
   // Allow the next 128-byte boundary.
+  // #1169: the cinema-only notice, its question and Play anyway, in Spanish and Swedish, measure 53,447.
+  // Allow the next 128-byte boundary.
+  // den#476: Play on TV's result toasts (waking, preparing, playing and each reason) in Spanish and Swedish measure
+  // 53,791. Allow the next 128-byte boundary.
   // 2026-11-27 (den#477): Follow and the Updates list (buttons, empty and error notes, and the four event captions) in
-  // Swedish and Spanish add +535 in CI (53,558 against 53,023 before #1177); the first draft added +630 and its longer
-  // notes were cut. Allow the next 128-byte boundary containing it on top of #1177.
-  if (current.translationGzip > 53888) throw new Error('Lazy translation catalog budget exceeded');
+  // Swedish and Spanish measure 54,227 on top of den#476 (+436). Allow the next 128-byte boundary containing it.
+  if (current.translationGzip > 54272) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -531,9 +534,21 @@ if (process.argv.includes('--capture')) {
   // The Still watching gate (#1177: the unattended-advance count, its prompt and styles) measured 129,711 with the
   // rest of its batch (#1150, #1445) against 128,979, in the lazy Player chunk. Allow the smallest 128-byte boundary
   // containing it.
-  // Follows and the Updates list (den#477) measured +5,096 in CI (133,911 against #1446's 128,815): the follows-v1
-  // derivation, the Updates store and page, the follow and mark commands with their settings-view fields, and the bell.
-  // The page is its own lazy chunk; startup measured +27 gzip. Allow the next 128-byte boundary containing it on top of
-  // #1177.
-  if (coreTotalDelta > 134912) throw new Error('Browser total JS/CSS budget exceeded');
+  // den-core's new-episode rule (den#1470) measured 129,447 against matched main's 128,781 (+666, main at b9faa807):
+  // the content Worker's `new.episodes` request and answer validators and their protocol types, and the vendored
+  // den-core's newer JS glue, less the TypeScript copy of the rule it replaces. The Worker codec must check what the
+  // page sends, and the page and Worker share the protocol module. Startup measured +87. On main at fc28480e it
+  // measured 130,329; allow the next 128-byte boundary.
+  // #991: the held next-episode continuation in Library, which waits for the final progress receipt, measured 130,581
+  // on main at e63a937c. Allow the next 128-byte boundary.
+  // #1169: the cinema-only notice and Play anyway in the lazy Detail and Player chunks, and the reason the eager
+  // availability authority keeps so Play can ask before it starts, measured 131,246 with #991. Allow the next 128-byte
+  // boundary.
+  // den#476: Play on TV's results (the sender's sealed-result reader and toast states in the routed library, and the
+  // LG/Samsung receiver's reports) measured 133,220 with #991 and #1169. Allow the next 128-byte boundary.
+  // Follows and the Updates list (den#477) measured 138,219 on main at 9ca7e30b (+4,999): the follows-v1 derivation (its
+  // episode window is den-core's `new_episodes` answer), the Updates store and page, the follow and mark commands with
+  // their settings-view fields, and the bell. The page is its own lazy chunk. Allow the next 128-byte boundary
+  // containing it.
+  if (coreTotalDelta > 138240) throw new Error('Browser total JS/CSS budget exceeded');
 }

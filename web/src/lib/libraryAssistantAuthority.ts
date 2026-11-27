@@ -991,6 +991,8 @@ export class LibraryAssistantAuthority {
         op: accept.op,
         title: { type: accept.args.title.type, id: accept.args.title.id },
         ...(accept.op === 'play' ? { season, episode } : {}),
+        // The TV seals the play's results under its id (den-spec play-results-v1 §1).
+        ...(accept.op === 'play' || accept.op === 'play_trailer' ? { id: accept.id } : {}),
         detail: describe(accept),
       });
     }

@@ -192,6 +192,7 @@
     season,
     episode,
     filename,
+    allowCinema = false,
     content,
     region,
     scout,
@@ -224,11 +225,15 @@
     onepisode,
     onclose,
     oncontrols,
+    onstarted,
+    onfailed,
   }: {
     title: Title;
     season?: number;
     episode?: number;
     filename?: string;
+    /** Explicit one-shot recovery after the viewer accepted poor camera-recording quality. */
+    allowCinema?: boolean;
     content: ContentServiceClientPort;
     /** Active profile region, for the title-detail cache key used by the expected-runtime fallback. */
     region: string;
@@ -289,6 +294,10 @@
     oncontrols?: (
       controls: { play: () => void; pause: () => void; seekBy: (seconds: number) => void } | null,
     ) => void;
+    /** The media reported playing: a Play on TV request's evidence that it started (den-spec play-results-v1 §3). */
+    onstarted?: () => void;
+    /** The player shows a failure, by its kind: a Play on TV request's evidence that it did not start. */
+    onfailed?: (failure: string) => void;
   } = $props();
   const nextHref = $derived(
     typeof nextEpisode === 'object' &&
@@ -676,6 +685,10 @@
   let failure = $state<
     Failure | 'imdb' | 'unsupported' | 'playback' | 'source' | 'lost' | 'engine' | null
   >(null);
+  $effect(() => {
+    const shown = failure;
+    if (shown) untrack(() => onfailed?.(shown));
+  });
   /** The cast page plays the session itself (away from home): its frame is the picture, its button in the corner. */
   const castStage = $derived(
     (!!session?.castOrigin || !!heldFrame) && !failure && !castView && !castActive,
@@ -832,7 +845,21 @@
   const sourceCoordinate = (at: Episode): string => `${at.season ?? ''}:${at.episode ?? ''}`;
   function sourceListFor(at: Episode): Promise<SourceListResult> {
     const key = sourceCoordinate(at);
-    return sourceLists.get(key, () => fetchSourceList(scout, imdb!, routes, at.season, at.episode));
+    const recovery = allowCinema && at.season === season && at.episode === episode;
+    return sourceLists.get(key, () =>
+      fetchSourceList(
+        scout,
+        imdb!,
+        routes,
+        at.season,
+        at.episode,
+        undefined,
+        undefined,
+        false,
+        false,
+        recovery,
+      ),
+    );
   }
 
   function forgetContinuity() {
@@ -1626,6 +1653,10 @@
       // No address is looked up here: `startSession` does that only when den-edge asks for it.
       ...(noHint ? { noHint } : {}),
       ...(wideListener ? { wideListener } : {}),
+      // Play anyway reaches the cinema-recording copies for the episode it was pressed on, not the ones after it.
+      ...(allowCinema && requestedEpisode.season === season && requestedEpisode.episode === episode
+        ? { allowCinema }
+        : {}),
       // Hearth sends a request that leaves releases out, or replaces a Remux session, to Remux: a TorBox one has neither.
       ...(excluded.length && delivery !== 'direct' ? { exclude: [...excluded] } : {}),
       ...extra,
@@ -4334,6 +4365,7 @@
     if (tv) setTvPlaybackActive(true);
     scheduleWebControls();
     progress.playing();
+    onstarted?.();
     clearInterval(timer);
     timer = setInterval(() => report(), REPORT_MS);
     // The segment requests playback itself makes already say this viewer is here.

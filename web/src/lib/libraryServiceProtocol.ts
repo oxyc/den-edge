@@ -891,6 +891,8 @@ export type AssistantApplied =
       /** A play's episode, when it names one: the page starts it, as nothing in the library changes. */
       season?: number;
       episode?: number;
+      /** A play's request id, under which the TV seals its play results (den-spec play-results-v1 §1). */
+      id?: string;
       /** What it did, in the words of the page's toast: "added to your watchlist". */
       detail: string;
     }

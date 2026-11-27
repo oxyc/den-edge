@@ -318,7 +318,8 @@
               undefined,
               __DEN_TV__ ? 'tv' : 'browser',
               playKey,
-              __DEN_TV__ ? 1 : undefined,
+              // Household control 2: transport (1), and play results for every play (den-spec play-results-v1 §6).
+              __DEN_TV__ ? 2 : undefined,
             );
           })().catch((error: unknown) => {
             if (current) console.warn('den: this device could not check in', error);
@@ -1706,6 +1707,7 @@
                   ...(result.season !== undefined ? { season: result.season } : {}),
                   ...(result.episode !== undefined ? { episode: result.episode } : {}),
                   ...(result.op === 'play_trailer' ? { trailer: true } : {}),
+                  ...(result.id ? { id: result.id } : {}),
                 });
               },
               ...(work.fetchImpl ? { fetch: work.fetchImpl } : {}),

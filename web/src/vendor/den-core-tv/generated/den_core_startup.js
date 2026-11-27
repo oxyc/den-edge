@@ -87,11 +87,19 @@ export class LibraryColumns {
      * @returns {ColumnsAnswer}
      */
     continuing(now, layouts, airing) {
-        const ptr0 = passStringToWasm0(layouts, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        var ptr1 = isLikeNone(airing) ? 0 : passStringToWasm0(airing, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        var len1 = WASM_VECTOR_LEN;
-        const ret = wasm.librarycolumns_continuing(this.__wbg_ptr, now, ptr0, len0, ptr1, len1);
+        const val3 = +now;
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passStringToWasm0(layouts, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = isLikeNone(airing) ? 0 : passStringToWasm0(airing, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.librarycolumns_continuing(this.__wbg_ptr, val3, ptr0, len0, ptr1, len1);
         if (ret[2]) {
             throw takeObject(ret[1]);
         }
@@ -99,7 +107,7 @@ export class LibraryColumns {
     }
     /**
      * `doc_decode` of one row's plaintext, its document kept here: the decode's envelope without the document.
-     * @param {Uint8Array} plaintext
+     * @param {Uint8Array | number[]} plaintext
      * @param {string | null} [expected]
      * @returns {string}
      */
@@ -107,10 +115,17 @@ export class LibraryColumns {
         let deferred3_0;
         let deferred3_1;
         try {
-            const ptr0 = passArray8ToWasm0(plaintext, wasm.__wbindgen_malloc);
-            const len0 = WASM_VECTOR_LEN;
-            var ptr1 = isLikeNone(expected) ? 0 : passStringToWasm0(expected, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            var len1 = WASM_VECTOR_LEN;
+            let ptr0, len0, ptr1, len1;
+            try {
+                ptr0 = passArray8ToWasm0(plaintext, wasm.__wbindgen_malloc);
+                len0 = WASM_VECTOR_LEN;
+                ptr1 = isLikeNone(expected) ? 0 : passStringToWasm0(expected, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                len1 = WASM_VECTOR_LEN;
+            } catch (e) {
+                if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+                if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+                throw e;
+            }
             const ret = wasm.librarycolumns_decode(this.__wbg_ptr, ptr0, len0, ptr1, len1);
             deferred3_0 = ret[0];
             deferred3_1 = ret[1];
@@ -246,11 +261,11 @@ export function evaluate_startup(request) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg_Error_30c8987f7c2ed4e2: function(arg0, arg1) {
+        __wbg_Error_208446807d0d1e30: function(arg0, arg1) {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return addHeapObject(ret);
         },
-        __wbg___wbindgen_throw_41e9ee4f547fc59a: function(arg0, arg1) {
+        __wbg___wbindgen_throw_4c88d8bf264fd984: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
@@ -319,7 +334,8 @@ function getFloat64ArrayMemory0() {
 }
 
 function getStringFromWasm0(ptr, len) {
-    return decodeText(ptr >>> 0, len);
+    ptr = ptr >>> 0;
+    return decodeText(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -391,18 +407,18 @@ function takeObject(idx) {
     return ret;
 }
 
-let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
 let numBytesDecoded = 0;
-function decodeText(ptr, len) {
-    numBytesDecoded += len;
+function decodeText(bytes) {
+    numBytesDecoded += bytes.length;
     if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
-        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
         cachedTextDecoder.decode();
-        numBytesDecoded = len;
+        numBytesDecoded = bytes.length;
     }
-    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+    return cachedTextDecoder.decode(bytes);
 }
 
 const cachedTextEncoder = new TextEncoder();
@@ -490,9 +506,17 @@ function initSync(module) {
     return __wbg_finalize_init(instance, module);
 }
 
+let __wbg_init_promise;
 async function __wbg_init(module_or_path) {
     if (wasm !== undefined) return wasm;
+    if (__wbg_init_promise === undefined) {
+        __wbg_init_promise = __wbg_init_once(module_or_path);
+        __wbg_init_promise.catch(() => { __wbg_init_promise = undefined; });
+    }
+    return __wbg_init_promise;
+}
 
+async function __wbg_init_once(module_or_path) {
 
     if (module_or_path !== undefined) {
         if (Object.getPrototypeOf(module_or_path) === Object.prototype) {

@@ -19,6 +19,7 @@ import {
   policedAtlasFetch,
   policyKey,
 } from './contentPolicy';
+import { newEpisodes } from './newEpisodePolicy';
 import type {
   ContentPolicy,
   ContentProvider,
@@ -767,6 +768,8 @@ export class ContentAuthority implements ContentReader, ContentServiceAuthority 
         return { kind: request.kind, slides: await this.#atlasRecommend(request, signal, policy) };
       case 'atlas.airing':
         return { kind: 'atlas.airing', airing: await this.#atlasAiring(request.series, signal) };
+      case 'new.episodes':
+        return { kind: 'new.episodes', answer: await newEpisodes(request) };
       case 'import.resolve':
         return {
           kind: 'import.resolve',

@@ -38,6 +38,8 @@
   import { playGuard } from './lib/playGuard';
   import { episodeProgress } from './lib/detailPresentation';
   import { PlayOnTvTracker } from './lib/playOnTv.svelte';
+  import { reportResult, type PlayResult } from './lib/playResults';
+  import { hex } from './lib/crypto';
   import {
     airedSeasons,
     episodeAfter,
@@ -127,20 +129,17 @@
   import {
     airedThrough,
     airingEpisode,
-    caughtUpTo,
-    comingUp,
     continueAiringFacts,
-    followCandidates,
-    followedOf,
     NewEpisodes,
+    newEpisodesRequest,
     outDay,
-    releasedEpisode,
     withNewEpisodes,
     type Airing,
-    type FollowCandidates,
+    type FollowFacts,
     type NewEpisode,
     type NewEpisodeClaim,
   } from './lib/airing';
+  import type { ContentNewEpisodes } from './lib/contentServiceProtocol';
   import { airingStore } from './lib/airing.svelte';
   import { recheckEpisode } from './lib/seasonDownloads.svelte';
 
@@ -345,11 +344,17 @@
     /** null while the first unobtrusive save runs; false after rejection; true during an explicit retry. */
     saving: boolean | null;
   };
+  type HeldEpisodeAdvance = {
+    readonly playbackIntent: number;
+    readonly receiptOperationId: string;
+    readonly next: Target;
+  };
   let finalProgressReceipts = $state<FinalProgressReceipt[]>([]);
   const finalProgressRecovery = $derived(
     finalProgressReceipts.find(({ saving }) => saving !== null),
   );
   let finalProgressRetryButton = $state<HTMLButtonElement | null>(null);
+  let heldEpisodeAdvance = $state.raw<HeldEpisodeAdvance | null>(null);
   let playbackReceiptHandoffPending = $state<number | null>(null);
   let finalProgressAlive = true;
   onDestroy(() => (finalProgressAlive = false));
@@ -363,6 +368,17 @@
     const receipt = finalProgressRecovery;
     if (!receipt || receipt.saving) return;
     void tick().then(() => finalProgressRetryButton?.focus());
+  });
+  $effect(() => {
+    const held = heldEpisodeAdvance;
+    if (!held) return;
+    if (finalProgressReceipts.some(({ operationId }) => operationId === held.receiptOperationId))
+      return;
+    heldEpisodeAdvance = null;
+    // A route, player or explicit play that replaced the ended episode owns continuation now. The old receipt's
+    // acknowledgement must never revive it or replace the newer player.
+    if (!playing || playbackIntent !== held.playbackIntent) return;
+    void advance(held.next, held.playbackIntent);
   });
   $effect(() => {
     // Ordinary capable artifacts cannot enter this recovery path. Keep the E2E seam so browser automation can run
@@ -587,7 +603,13 @@
     };
   });
 
-  type Target = { title: Title; season?: number; episode?: number; filename?: string };
+  type Target = {
+    title: Title;
+    season?: number;
+    episode?: number;
+    filename?: string;
+    allowCinema?: boolean;
+  };
   /** What's playing in this browser. */
   let playing = $state<Target | null>(null);
   let playbackIntent = $state(0);
@@ -627,6 +649,8 @@
     following = undefined;
     if (playingSeasonsOf !== target.title) playingSeasons = undefined;
     playbackIntent += 1;
+    // Something else is played here before a pending Play on TV request started: it never will.
+    if (!isRemotePlay(target)) settleRemotePlay({ state: 'failed', reason: 'superseded' });
     playing = target;
   }
   if (import.meta.env.DEN_E2E) {
@@ -841,8 +865,8 @@
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
   /**
-   * The profile's explicit follows and its updates list (den-spec follows-v1), apart from the series `followedOf`
-   * infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground once Home has
+   * The profile's explicit follows and its updates list (den-spec follows-v1), apart from the series den-core's
+   * `new_episodes` infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground once Home has
    * settled, when the follows change, and on opening Updates; never on a timer.
    */
   const updates =
@@ -868,13 +892,32 @@
     runCommand(model ? () => model.setFollow(key, on) : undefined);
   const markUpdates = (ids: string[], mark: 'read' | 'dismissed') =>
     runCommand(model ? () => model.markUpdates(ids, mark) : undefined);
-  /** What the library says of each series this viewer might follow (`airing.ts` `followedOf`). */
-  const followFacts = $derived.by((): FollowCandidates => {
+  /** Their library rows, to tell whether the viewer has started a released episode (`policy.released`). */
+  let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
+  /** What the library says of each series this viewer might follow (`airing.ts` `newEpisodesRequest`). */
+  const followFacts = $derived.by((): FollowFacts => {
     const series = (refs: ReadonlyArray<{ type: string; id: number }> | undefined) =>
       (refs ?? []).flatMap((ref) => (ref.type === 'tv' ? [ref.id] : []));
     const continuing = (profileActivity?.continueWatching ?? continueView?.items ?? []).flatMap(
-      ({ title, episode, upcoming }) =>
-        title.type === 'tv' && episode ? [{ series: title.id, episode, upcoming: !!upcoming }] : [],
+      ({ title, episode, upcoming, fraction }) => {
+        if (title.type !== 'tv' || !episode) return [];
+        // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
+        // Continue Watching's resume point instead.
+        const row = releasedViews
+          .get(title.id)
+          ?.snapshot.value?.episodes.find(
+            (item) => item.season === episode.season && item.episode === episode.episode,
+          );
+        return [
+          {
+            series: title.id,
+            episode,
+            upcoming: !!upcoming,
+            fraction: Math.max(fraction ?? 0, row?.fraction ?? 0),
+            watched: row?.watched ?? false,
+          },
+        ];
+      },
     );
     // Marked Seen as a whole: the visitor's by its activity key (`tv:1399`), a library's from its overview.
     const seen = profileActivity
@@ -890,14 +933,31 @@
       dismissed: series(continueView?.dismissed),
     };
   });
-  /** Every series that might be followed: their release dates are asked for while Home is open, and again as each
-   * answer's hour runs out. */
-  const followCandidateSeries = $derived(followCandidates(followFacts).sort((a, b) => a - b));
-  /** The series this viewer follows (`airing.ts` `followedOf`): what Coming up and new episodes are about. */
-  const followedSeries = $derived(followedOf(followFacts, airings));
-  const followedKey = $derived(followCandidateSeries.join(','));
   /** Ticks while Home is open so released episodes are looked for again (`NewEpisodes` holds each to `RECHECK_MS`). */
   let airingTick = $state(0);
+  /**
+   * den-core's answer (`new_episodes`, in the content Worker): who might be followed and who is, each followed series'
+   * fresh release and new episode, and Coming up. Asked again whenever the facts, the dates or the day change.
+   */
+  let policy = $state.raw<ContentNewEpisodes | null>(null);
+  $effect(() => {
+    void airingTick;
+    const request = newEpisodesRequest(followFacts, airings.all);
+    let current = true;
+    void session.content.query({ kind: 'new.episodes', ...request }).then(
+      ({ answer }) => {
+        if (current) policy = answer;
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  });
+  /** Every series that might be followed: their release dates are asked for while Home is open, and again as each
+   * answer's hour runs out. */
+  const followCandidateSeries = $derived([...(policy?.candidates ?? [])].sort((a, b) => a - b));
+  const followedKey = $derived(followCandidateSeries.join(','));
   $effect(() => {
     void followedKey;
     const ids = untrack(() => followCandidateSeries);
@@ -911,15 +971,8 @@
     }, 5 * 60_000);
     return () => clearInterval(timer);
   });
-  /** Each followed series' episode released in the last `NEW_EPISODE_DAYS`, by atlas's date. */
-  const releasedEpisodes = $derived(
-    followedSeries.flatMap((series): NewEpisode[] => {
-      const episode = releasedEpisode(airings.get(series));
-      return episode ? [{ series, season: episode.season, episode: episode.episode }] : [];
-    }),
-  );
-  /** Their library rows, to tell whether the viewer has started the released episode. */
-  let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
+  /** Each followed series' episode out within den-core's window, whatever the viewer's standing on it. */
+  const releasedEpisodes = $derived(policy?.released ?? []);
   const releasedKey = $derived(releasedEpisodes.map(({ series }) => series).join(','));
   $effect(() => {
     void releasedKey;
@@ -939,36 +992,18 @@
   const newEpisodes = new NewEpisodes();
   onDestroy(() => newEpisodes.retain());
   /**
-   * For each released episode a viewer is caught up to, the episode that plays: their Continue Watching entry, which
-   * is the released one itself week to week and where they are in a season that came out at once (S2E1, never the
-   * finale). It is what is searched for, and what the billboard and the row name. Only those not started, whose
-   * library row has been read.
+   * den-core's new episodes, each as the episode that plays: the viewer's Continue Watching entry, which is the released
+   * one itself week to week and where they are in a season that came out at once (S2E1, never the finale). It is what
+   * is searched for, and what the billboard and the row name. Only those whose library row has been read.
    */
   const unstartedEpisodes = $derived(
-    releasedEpisodes.flatMap((released): NewEpisode[] => {
-      const view = releasedViews.get(released.series)?.snapshot.value;
+    (policy?.new ?? []).flatMap(({ series, season, episode }): NewEpisode[] => {
+      const view = releasedViews.get(series)?.snapshot.value;
       // Both reads are needed to say it is unstarted: an unread one is no evidence, and searching on it is wasted.
       // A followed series' view lists its watched episodes once the library knows its layout; before that, neither it
       // nor Continue Watching can say whether the new one was started.
       if (!view || !view.episodes.length || (!profileActivity && !continueView)) return [];
-      // Read before naming: an entry whose title is not named yet is already a resume point.
-      const continued = (profileActivity?.continueWatching ?? continueView?.items ?? []).find(
-        ({ title }) => title.type === 'tv' && title.id === released.series,
-      );
-      const at = continued?.episode;
-      // A viewer behind on the series is told of no new episode anywhere: not on the billboard, not on the row.
-      if (!at || !caughtUpTo(at, released, airings.get(released.series))) return [];
-      const next = { series: released.series, season: at.season, episode: at.episode };
-      const row = view.episodes.find(
-        (item) => item.season === at.season && item.episode === at.episode,
-      );
-      // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
-      // Continue Watching's resume point instead.
-      if ((continued.fraction ?? 0) > 0 || (row && (row.watched || row.fraction > 0))) {
-        newEpisodes.clear(next);
-        return [];
-      }
-      return [next];
+      return [{ series, season, episode }];
     }),
   );
   let newEpisodesVersion = $state(0);
@@ -1428,21 +1463,36 @@
           }
           const queue = await householdQueue(tv.play);
           if (playStopped()) return;
-          const sealed = await sendToTV(queue, {
-            type: 'play',
-            tmdbId: title.id,
-            mediaType: title.type,
-            title: title.title,
-            season,
-            episode,
-          });
+          // A TV that reports play results seals them under the envelope's id (den-spec play-results-v1 §1), and one
+          // that was not listening is being woken, or needs Den opened.
+          const id = tv.results ? hex(crypto.getRandomValues(new Uint8Array(16))) : undefined;
+          const listening = tv.results ? await tvListening(queue) : null;
+          if (playStopped()) return;
+          const sealed = await sendToTV(
+            queue,
+            {
+              type: 'play',
+              tmdbId: title.id,
+              mediaType: title.type,
+              title: title.title,
+              season,
+              episode,
+            },
+            undefined,
+            id ? { id } : {},
+          );
           if (playStopped()) return;
           busy = false;
           if (sealed)
-            playOnTv.start(queue, sealed, tv.name, {
-              type: title.type,
-              id: title.id,
-            });
+            playOnTv.start(
+              queue,
+              sealed,
+              tv.name,
+              { type: title.type, id: title.id },
+              id
+                ? { id, listening, retry: () => playAgain(tvId, title, season, episode) }
+                : undefined,
+            );
           else
             failure = i18n.format(
               'error.couldntReachDevice',
@@ -1452,6 +1502,11 @@
         }
       : undefined,
   );
+
+  /** The toast's "Try again": a new request with a new id, never the old one sent again (play-results-v1 §7). */
+  function playAgain(tvId: string, title: Title, season?: number, episode?: number): void {
+    void play?.(tvId, title, season, episode);
+  }
 
   /** Transport the exact title/episode represented by the live widget. Old commands cannot affect a replacement. */
   async function transport(action: 'play' | 'pause' | 'skip', offsetSeconds?: number) {
@@ -1496,7 +1551,13 @@
    */
   const playHere = $derived(
     policyReady && scout && (scout.playback || remux !== null)
-      ? async (title: Title, season?: number, episode?: number, filename?: string) => {
+      ? async (
+          title: Title,
+          season?: number,
+          episode?: number,
+          filename?: string,
+          allowCinema = false,
+        ) => {
           const blocked = await playGuard(title, {
             content: session.content,
             region: detailPrefs.region,
@@ -1512,9 +1573,9 @@
           }
           if (title.type === 'tv' && (season === undefined || episode === undefined)) {
             const up = continueEntries.find((e) => titleKey(e.title) === titleKey(title))?.episode;
-            playerAddress({ title, ...(up ?? { season: 1, episode: 1 }) });
+            playerAddress({ title, ...(up ?? { season: 1, episode: 1 }), allowCinema });
           } else {
-            playerAddress({ title, season, episode, filename });
+            playerAddress({ title, season, episode, filename, allowCinema });
           }
           return true;
         }
@@ -1522,24 +1583,80 @@
   );
 
   /**
+   * The Play on TV request this TV is starting, whose sender waits to hear how it went (den-spec play-results-v1 §4):
+   * `preparing` once it is taken, then `playing` when the player made for it reports playing, or `failed` and why.
+   */
+  let remotePlay: { id: string; push: PlayRequest; failed: boolean } | null = null;
+
+  /**
+   * Tell the pending request's sender its last word and stop waiting on it; `push` settles only that request's, if it
+   * is still pending. A failure the player already reported is not said twice.
+   */
+  function settleRemotePlay(result: Omit<PlayResult, 'at'>, push?: PlayRequest) {
+    const pending = remotePlay;
+    if (!pending || (push && pending.push !== push)) return;
+    remotePlay = null;
+    if (result.state !== 'failed' || !pending.failed) void reportResult(pending.id, result);
+  }
+
+  /** Whether `target`, about to play or playing, is the pending request's title (and episode, when it named one). */
+  function isRemotePlay(target: Target): boolean {
+    const push = remotePlay?.push;
+    return (
+      !!push &&
+      target.title.type === push.mediaType &&
+      target.title.id === push.tmdbId &&
+      (push.episode === undefined ||
+        (target.season === push.season && target.episode === push.episode))
+    );
+  }
+
+  /**
+   * The player shows `failure` for `target`: no source of any kind, or another failure. Said once, and the request stays
+   * pending, so a source the viewer picks next in the same player can still report `playing` (play-results-v1 §3).
+   */
+  function remotePlayFailed(target: Target, failure: string) {
+    const pending = remotePlay;
+    if (!pending || pending.failed || !isRemotePlay(target)) return;
+    pending.failed = true;
+    const noSource = ['none', 'sourceUnavailable', 'noCopy', 'source', 'imdb'].includes(failure);
+    void reportResult(pending.id, { state: 'failed', reason: noSource ? 'no_source' : 'failed' });
+  }
+
+  /** The player made for `target` reports playing: the pending request's only evidence that it started. */
+  function remotePlayStarted(target: Target) {
+    if (isRemotePlay(target)) settleRemotePlay({ state: 'playing' });
+  }
+
+  /**
    * Start a play sent from another device as this TV's own Play would, through `playHere` and its parental guard.
    * Nobody at the TV asked, so a refusal is not offered a PIN: the guard's message says why.
    */
   async function startPushed(push: PlayRequest, signal?: AbortSignal) {
+    if (push.id) {
+      settleRemotePlay({ state: 'failed', reason: 'superseded' });
+      remotePlay = { id: push.id, push, failed: false };
+      void reportResult(push.id, { state: 'preparing' });
+    }
     // A TV opened to take this play may still be finding its sources: give that a moment, well inside the play's two
     // minutes, before saying there is none.
     for (let waited = 0; !untrack(() => playHere) && waited < 15_000; waited += 500) {
       await abortableDelay(500, playSignal, signal);
-      if (playStopped(signal)) return;
+      if (playStopped(signal)) return settleRemotePlay({ state: 'failed', reason: 'failed' }, push);
     }
     const start = untrack(() => playHere);
-    if (playStopped(signal)) return;
+    if (playStopped(signal)) return settleRemotePlay({ state: 'failed', reason: 'failed' }, push);
     if (!start) {
       session.notify(`No playable source for “${push.title}”`);
+      settleRemotePlay({ state: 'failed', reason: 'no_source' }, push);
       return;
     }
     const title = { type: push.mediaType, id: push.tmdbId, title: push.title };
-    if (!(await start(title, push.season, push.episode))) return;
+    if (!(await start(title, push.season, push.episode))) {
+      // Refused by the parental guard, unless the page retired under it.
+      const reason = playStopped(signal) ? 'failed' : 'not_allowed';
+      return settleRemotePlay({ state: 'failed', reason }, push);
+    }
     if (playStopped(signal)) return;
     session.notify(push.title ? `Starting “${push.title}”…` : 'Starting…');
     void householdModel
@@ -1561,11 +1678,14 @@
       if (stop.signal.aborted) return;
       // An assistant's play on this TV's lane (RoutedLibrary) starts here too: a trailer as the title page's.
       unregister = startPlaysWith(async (play) => {
-        if (play.trailer)
+        if (play.trailer) {
+          // The title page's trailer reports no start of its own yet: its requester hears `preparing`, then
+          // unconfirmed (play-results-v1 §6).
+          if (play.id) void reportResult(play.id, { state: 'preparing' });
           navigate(
             titleHref({ type: play.mediaType, id: play.tmdbId, title: play.title, trailer: true }),
           );
-        else await startPushed(play, stop.signal);
+        } else await startPushed(play, stop.signal);
       });
       return receiveTv(
         {
@@ -1599,6 +1719,8 @@
   });
 
   function closePlayer() {
+    // Closed before it played: the request it was opened for did not start.
+    settleRemotePlay({ state: 'failed', reason: 'failed' });
     playing = null;
     if (route.page === 'title' && route.play)
       navigate(
@@ -1790,7 +1912,7 @@
   });
 
   /** Autoplay and "Next": the profile's policy is asked again before the following episode starts. */
-  async function advance(next: Target) {
+  async function advance(next: Target, intent = playbackIntent) {
     const blocked = await playGuard(next.title, {
       content: session.content,
       region: detailPrefs.region,
@@ -1798,7 +1920,7 @@
       restricted: session.restricted,
       signal: playSignal,
     });
-    if (playStopped()) return;
+    if (playStopped() || !playing || playbackIntent !== intent) return;
     if (blocked) {
       playing = null;
       session.notify(blocked);
@@ -1807,6 +1929,32 @@
     // Advancing is one continuing player session, not another detail visit. Rewrite its address so Refresh resumes
     // the episode now on screen without adding one history entry for every automatic advance.
     playerAddress(next, true);
+  }
+
+  function advanceAfterFinalProgress(from: Target, next: Target) {
+    const receipt = finalProgressReceipts.find(
+      ({ target }) =>
+        titleKey(target.title) === titleKey(from.title) &&
+        target.season === from.season &&
+        target.episode === from.episode,
+    );
+    const intent = playbackIntent;
+    if (!receipt) {
+      void advance(next, intent);
+      return;
+    }
+    // The countdown and an explicit Next can cross at the same boundary. Retain only one continuation for this
+    // exact player/receipt; durable acknowledgement or the viewer's Leave unsaved decision releases it.
+    if (
+      heldEpisodeAdvance?.playbackIntent === intent &&
+      heldEpisodeAdvance.receiptOperationId === receipt.operationId
+    )
+      return;
+    heldEpisodeAdvance = {
+      playbackIntent: intent,
+      receiptOperationId: receipt.operationId,
+      next: { ...next, title: { ...next.title } },
+    };
   }
 
   /** Where the library says the target was left: nowhere once it was seen, so it plays from the start. */
@@ -2919,7 +3067,6 @@
     }
     return map;
   };
-  const followedAirings = $derived(airingsOf(followedSeries));
   // The library decides Continue Watching: a caught-up series whose next episode these dates put within its window
   // stays on the row. Every candidate's dates go, so whether one is caught up never waits on whether it is followed.
   // Sent again on each tick, so a new day is counted from.
@@ -2930,11 +3077,12 @@
     if (!library || !active) return;
     void library.observeAiring(facts).catch(() => {});
   });
-  /** "Coming up": each followed series' next episode or season premiere within a month, soonest first. */
+  /** "Coming up" (den-core): each followed series' next episode or season premiere within a month, soonest first. */
+  const comingUpReleases = $derived(policy?.comingUp ?? []);
   const comingUpRow = $derived(
     facet === 'movie'
       ? []
-      : comingUp(followedAirings).flatMap((release) => {
+      : comingUpReleases.flatMap((release) => {
           const title = session.displayTitle({ type: 'tv', id: release.series });
           return title ? [{ title, release }] : [];
         }),
@@ -2943,7 +3091,7 @@
   // and a card is drawn only for a named one, so it stayed empty where the Apple apps listed them.
   $effect(() => {
     if (!active || facet === 'movie') return;
-    const refs = comingUp(followedAirings)
+    const refs = comingUpReleases
       .map(({ series }) => ({ type: 'tv' as const, id: series }))
       .filter((ref) => !session.displayTitle(ref) && !session.displayMissing(ref));
     if (refs.length) void nameLibraryTitles(session, refs).catch(() => {});
@@ -3465,6 +3613,7 @@
       season={target.season}
       episode={target.episode}
       filename={target.filename}
+      allowCinema={target.allowCinema}
       content={session.content}
       region={detailPrefs.region}
       {scout}
@@ -3499,7 +3648,7 @@
       playbackReceiptHandoffAsOwner={session.administersHousehold}
       onplaybackreceipthandoff={requestPlaybackReceiptHandoff}
       onnext={after
-        ? () => void advance({ title: target.title, ...after })
+        ? () => advanceAfterFinalProgress(target, { title: target.title, ...after })
         : target.season !== undefined && (following === undefined || following === true)
           ? () => findFollowing(target)
           : undefined}
@@ -3512,6 +3661,8 @@
           : 0}
       onepisode={(at) => void advance({ title: target.title, ...at })}
       oncontrols={(controls) => (tvControls = controls)}
+      onstarted={() => remotePlayStarted(target)}
+      onfailed={(failure) => remotePlayFailed(target, failure)}
       onclose={closePlayer}
     />
   {/key}

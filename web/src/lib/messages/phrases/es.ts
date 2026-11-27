@@ -744,6 +744,10 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'One source': 'una fuente',
   'Only Owner can change this profile’s age limit and unrated-title policy.':
     'Solo el Propietario puede cambiar el límite de edad de este perfil y la política de títulos no clasificados.',
+  'Only cinema recordings so far': 'Por ahora solo hay grabaciones de cine',
+  'Camera and telesync copies have poor picture and sound. You can wait for a proper release or play the best one now.':
+    'Las copias de cámara y telesync tienen mala imagen y sonido. Puedes esperar una versión adecuada o reproducir ahora la mejor disponible.',
+  'Play anyway': 'Reproducir de todos modos',
   'Open Den': 'Abrir Den',
   'Open a recovery code in Den on a phone or computer, then link this TV with the QR or code above.':
     'Abre un código de recuperación en Den desde un teléfono u ordenador y, a continuación, vincula este televisor con el código QR o el código de arriba.',

@@ -362,6 +362,10 @@
             ...(linkHost === 'tv'
               ? { [`${hostDevice}.play`]: { value: { string: 'A'.repeat(43) }, at } }
               : {}),
+            // `tv-results`: that TV reports how each play went (den-spec play-results-v1 §6).
+            ...(linkHost === 'tv' && params.has('tv-results')
+              ? { [`${hostDevice}.control`]: { value: { int: 2 }, at } }
+              : {}),
             ...(params.has('second-tv')
               ? {
                   [`${secondTv}.name`]: { value: { string: 'Bedroom' }, at },
@@ -528,7 +532,12 @@
     openGate,
     settingsGate,
     failHistoryDetails: params.has('fail-history-details'),
-    rejectProgressCommands: params.has('reject-final-progress') ? 1 : 0,
+    // A natural finish writes the paused end position before its final receipt: reject both to reach the receipt.
+    rejectProgressCommands: params.has('reject-ended-progress')
+      ? 2
+      : params.has('reject-final-progress')
+        ? 1
+        : 0,
     progressReplyGate,
   });
   if (progressReplyGate)
@@ -825,7 +834,7 @@
 <main style="padding:var(--bar-space) var(--gutter)">
   {#if visitorReady}<span data-visitor-ready hidden>ready</span>{/if}
   <output data-testid="profile-handoff" hidden>{profileHandoff}</output>
-  <LibraryStatus toast={session.toast} alert={session.alert} />
+  <LibraryStatus toast={session.toast} alert={session.alert} undo={session.undo} />
   {#key session}
     <Library
       link={shownLink}

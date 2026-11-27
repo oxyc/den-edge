@@ -10,6 +10,7 @@ import {
   whilePlayKey,
 } from './householdPlays';
 import { linkKeys, sealMessage, type PlayRequest } from './inbox';
+import { openResults, resultAddress } from './playResults';
 import { fromBase64url, fromHex, toBase64url } from './wire';
 
 // den-spec, checked out at the repository root; the Apple TV and den-mcp derive the same lane.
@@ -27,7 +28,7 @@ describe("a TV's assistant lane", () => {
     const playKey = toBase64url(fromHex(wake.assistant.householdPlayKey));
     expect(await laneQueue(playKey, 'Living room LG')).toEqual({
       query: `queue=tv&tv=${wake.assistant.laneId}`,
-      body: '{"name":"Living room LG"}',
+      body: '{"name":"Living room LG","results":1}',
       key: `.tv.${wake.assistant.laneId}`,
     });
   });
@@ -155,15 +156,25 @@ describe('receiving household plays', () => {
     const key = await playKeyFor('library-one', storage);
     const { enc } = await linkKeys(fromBase64url(key));
     const now = Date.now();
-    const play = (title: string, sentAt = now) =>
-      sealMessage(enc, { type: 'play', tmdbId: 550, mediaType: 'movie', title }, { sentAt });
+    const ids = { Waited: 'a'.repeat(32), First: 'b'.repeat(32), Second: 'c'.repeat(32) };
+    const play = (title: keyof typeof ids, sentAt = now) =>
+      sealMessage(
+        enc,
+        { type: 'play', tmdbId: 550, mediaType: 'movie', title },
+        { sentAt, id: ids[title] },
+      );
     const queue = [
       { sealed: await play('Waited', now - 600_000) },
       { sealed: await play('First') },
       { sealed: await play('Second') },
     ];
     let drains = 0;
-    vi.stubGlobal('fetch', async () => {
+    const results: { address: string; sealed: string }[] = [];
+    vi.stubGlobal('fetch', async (path: string | URL | Request, init?: RequestInit) => {
+      if (String(path).endsWith('/play/result')) {
+        results.push(JSON.parse(String(init?.body)));
+        return new Response(null, { status: 204 });
+      }
       drains += 1;
       return new Response(JSON.stringify({ queues: [drains === 1 ? queue : []] }), { status: 200 });
     });
@@ -186,6 +197,19 @@ describe('receiving household plays', () => {
     expect(started.map((request) => request.title)).toEqual(['Second']);
     expect(stale.map((request) => request.title)).toEqual(['Waited']);
     expect(drains).toBe(1);
+    // The plays that never start tell their senders why, each under its own request's key (play-results-v1 §4).
+    await vi.waitFor(() => expect(results).toHaveLength(2));
+    const said = async (title: keyof typeof ids) => {
+      const address = await resultAddress(ids[title]);
+      const posted = results.filter((r) => r.address === address).map((r) => r.sealed);
+      return (await openResults(ids[title], posted)).map(({ state, reason }) => ({
+        state,
+        reason,
+      }));
+    };
+    expect(await said('Waited')).toEqual([{ state: 'failed', reason: 'expired' }]);
+    expect(await said('First')).toEqual([{ state: 'failed', reason: 'superseded' }]);
+    expect(await said('Second')).toEqual([]);
   });
 
   it('aborts a held old-household drain and takes over with the replacement key', async () => {

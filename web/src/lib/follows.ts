@@ -11,7 +11,6 @@ type Values = SettingsRow['values'];
 
 const FOLLOW_KEY = /^(tv|movie|person):([1-9][0-9]{0,15})$/;
 const DAY_MS = 86_400_000;
-export const EPISODE_DAYS = 7;
 export const RETURNS_DAYS = 90;
 export const RELEASE_DAYS = 30;
 const RETENTION_MS = 180 * DAY_MS;
@@ -94,6 +93,11 @@ export interface UpdateFacts {
       seasonPremiere?: { season: number; date: string };
     }
   >;
+  /**
+   * §3.1's episode, by series: den-core `new_episodes`' `released` for the followed series (the newest regular episode
+   * out today or within its 7 days), so this window is the one Home's New badge reads.
+   */
+  released?: Record<string, { season: number; episode: number }>;
   films?: Record<string, { date?: string; observedAt?: number }>;
   credits?: Record<
     string,
@@ -158,18 +162,15 @@ export function deriveUpdates(
       if (!airing) continue;
       const source = airing.source === 'tvmaze' ? 'tvmaze' : 'tmdb';
       const observedAt = airing.observedAt ?? 0;
-      let newest: { season: number; episode: number; day: number } | undefined;
-      for (const one of [airing.previous, airing.next, ...(airing.upcoming ?? [])]) {
-        if (!one || !safe(one.season) || !safe(one.episode) || one.season <= 0) continue;
-        const day = dayNumber(one.date);
-        if (day === undefined || now - day < 0 || now - day > EPISODE_DAYS) continue;
-        if (
-          !newest ||
-          one.season > newest.season ||
-          (one.season === newest.season && one.episode > newest.episode)
-        )
-          newest = { season: one.season, episode: one.episode, day };
-      }
+      const released = facts.released?.[raw];
+      const dated =
+        released &&
+        [airing.previous, airing.next, ...(airing.upcoming ?? [])].find(
+          (one) => one?.season === released.season && one.episode === released.episode,
+        );
+      const releasedDay = dayNumber(dated?.date);
+      const newest =
+        released && releasedDay !== undefined ? { ...released, day: releasedDay } : undefined;
       if (newest && newest.day > base)
         add(
           {

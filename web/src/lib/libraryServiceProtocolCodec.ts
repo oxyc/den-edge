@@ -1168,7 +1168,7 @@ function assistantApplied(value: unknown): value is AssistantApplied {
     return exact(value, ',seq,outcome,reason,') && boundedText(value.reason, 64);
   return (
     value.outcome === 'accepted' &&
-    exact(value, ',seq,outcome,op,title,season,episode,detail,') &&
+    exact(value, ',seq,outcome,op,title,season,episode,id,detail,') &&
     (value.op === 'watchlist_add' ||
       value.op === 'watchlist_remove' ||
       value.op === 'seen' ||
@@ -1178,6 +1178,7 @@ function assistantApplied(value: unknown): value is AssistantApplied {
     titleRef(value.title) &&
     optional(value.season, integer) &&
     optional(value.episode, integer) &&
+    optional(value.id, (id): id is string => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id)) &&
     boundedText(value.detail, 256)
   );
 }
