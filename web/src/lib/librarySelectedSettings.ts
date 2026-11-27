@@ -1,10 +1,12 @@
 import { GRANTS_ROW, READ_ROW } from './libraryAssistantAuthority';
-import type {
-  DevicesView,
-  LibrarySelectionValue,
-  RatingSource,
-  RuntimeDiscoveryView,
-  SettingsView,
+import { activeFollows, FOLLOWS_ROW, updateMarks, UPDATES_ROW } from './follows';
+import {
+  LIBRARY_SERVICE_WIRE_LIMITS,
+  type DevicesView,
+  type LibrarySelectionValue,
+  type RatingSource,
+  type RuntimeDiscoveryView,
+  type SettingsView,
 } from './libraryServiceProtocol';
 import { acceptsAddonURL, readPlugins } from './prefs';
 import { ADDRESSES, readPrivateAddresses } from './privateAddresses';
@@ -82,6 +84,18 @@ export function selectedSettingsView(
       services,
     },
     assistant: { read: false, write: false },
+    follows: Object.fromEntries(
+      Object.entries(activeFollows(byName.get(FOLLOWS_ROW)?.values)).slice(
+        0,
+        LIBRARY_SERVICE_WIRE_LIMITS.follows,
+      ),
+    ),
+    updates: Object.fromEntries(
+      Object.entries(updateMarks(byName.get(UPDATES_ROW)?.values, Date.now())).slice(
+        0,
+        LIBRARY_SERVICE_WIRE_LIMITS.updates,
+      ),
+    ),
   };
 }
 

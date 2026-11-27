@@ -433,14 +433,15 @@ export default mergeConfig(
     // to wrappers with byte-identical APIs beside the compatible generated modules.
     resolve: {
       alias: [
-        {
-          // Every TV tier hands persistent title administration to the supported Browser. Replace the static
-          // Library import at resolution time so bundler/chunking changes cannot retain the unreachable writer.
-          find: /^(?:.*\/)?components\/KidTitleAccessDialog\.svelte$/,
-          replacement: tvKidTitleAccessDialog,
-        },
         ...(tizen3
           ? [
+              {
+                // The reduced Tizen 3 package has no Owner PIN entry for title access: Detail keeps its handoff.
+                // Replace the static Library import at resolution time so bundler/chunking changes cannot retain
+                // the unreachable writer. webOS and supported Tizen keep the dialog for a Kid's request.
+                find: /^(?:.*\/)?components\/KidTitleAccessDialog\.svelte$/,
+                replacement: tvKidTitleAccessDialog,
+              },
               {
                 // Tizen 3 is deliberately viewer-only. Settings renders the supported-browser Content handoff;
                 // replacing both static ContentSection imports keeps the unreachable PIN/policy editor and its

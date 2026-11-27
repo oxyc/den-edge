@@ -131,6 +131,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Atlas couldn’t check this title for this profile.':
     'Atlas no pudo comprobar este título para este perfil.',
   'Art House': 'Casa de Arte',
+  'Ask Owner': 'Pedir al propietario',
+  'this title': 'este título',
   'Assassin & Hitman': 'Asesino y sicario',
   Assault: 'Asalto',
   Assistants: 'Asistentes',
@@ -1483,4 +1485,15 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'TorBox stopped—refreshing…': 'TorBox se detuvo; actualizando…',
   'Trying TorBox without Den subtitles…': 'Probando TorBox sin subtítulos Den…',
   'Trying Den Remux…': 'Probando Den Remux…',
+  Updates: 'Novedades',
+  Follow: 'Seguir',
+  Unfollow: 'Dejar de seguir',
+  'Mark all as read': 'Marcar todo como leído',
+  'Mark as read': 'Marcar como leído',
+  'Checking for updates': 'Buscando novedades',
+  'Couldn’t check for updates.': 'No se pudieron buscar novedades.',
+  'Nothing new yet.': 'Aún no hay nada nuevo.',
+  'Follow a title or person to see its updates here.':
+    'Sigue un título o una persona para ver aquí sus novedades.',
+  'Updates need a library.': 'Las novedades necesitan una biblioteca.',
 };

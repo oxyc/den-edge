@@ -128,6 +128,8 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'Atlas couldn’t check this title for this profile.':
     'Atlas kunde inte kontrollera den här titeln för den här profilen.',
   'Art House': 'Konsthus',
+  'Ask Owner': 'Fråga ägaren',
+  'this title': 'den här titeln',
   'Assassin & Hitman': 'Lönnmördare',
   Assault: 'Överfall',
   Assistants: 'Assistenter',
@@ -1463,4 +1465,15 @@ export const sourcePhrases: Readonly<Record<string, string>> = {
   'TorBox stopped—refreshing…': 'TorBox stannade – uppdaterar…',
   'Trying TorBox without Den subtitles…': 'Provar TorBox utan Den undertexter…',
   'Trying Den Remux…': 'Provar Den Remux…',
+  Updates: 'Nyheter',
+  Follow: 'Följ',
+  Unfollow: 'Sluta följa',
+  'Mark all as read': 'Markera alla som lästa',
+  'Mark as read': 'Markera som läst',
+  'Checking for updates': 'Söker efter nyheter',
+  'Couldn’t check for updates.': 'Det gick inte att söka efter nyheter.',
+  'Nothing new yet.': 'Inget nytt än.',
+  'Follow a title or person to see its updates here.':
+    'Följ en titel eller person för att se nyheter här.',
+  'Updates need a library.': 'Nyheter kräver ett bibliotek.',
 };

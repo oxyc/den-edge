@@ -21,8 +21,11 @@
     preloadScreens,
     SearchScreen,
     ServiceScreen,
+    UpdatesScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
+  import { UpdatesStore } from './lib/updates.svelte';
+  import { followKey } from './lib/follows';
   import {
     browseRows,
     contentPages,
@@ -317,7 +320,7 @@
   let busy = $state(false);
   let kidAccessRequest = $state.raw<{
     kid: { id: string; name: string };
-    title: Title;
+    title: Pick<Title, 'type' | 'id' | 'title'>;
     allow: boolean;
     authority: object;
   } | null>(null);
@@ -325,10 +328,34 @@
     const request = kidAccessRequest;
     if (
       request &&
-      (!profiles || profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority)
+      (!profiles ||
+        (profiles.mode === 'kid'
+          ? session !== request.authority
+          : profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority))
     )
       kidAccessRequest = null;
   });
+  /**
+   * A Kid whose policy blocks a title asks for the Owner PIN here, which writes the same persistent approval the
+   * Owner's menu does. Only a Kid session of a household with an Owner PIN, and never the reduced Tizen 3 package.
+   */
+  const askOwner = $derived(
+    !__DEN_TV_LEGACY_JS_CORE__ &&
+      profiles?.mode === 'kid' &&
+      profiles.parentalPinConfigured === true &&
+      session.identity.kind === 'profile'
+      ? (title: Pick<Title, 'type' | 'id' | 'title'>) => {
+          const kid = profiles.activeChoice;
+          if (kid?.id)
+            kidAccessRequest = {
+              kid: { id: kid.id, name: kid.name },
+              title,
+              allow: true,
+              authority: session,
+            };
+        }
+      : undefined,
+  );
   let retryingLibrary = $state(false);
   let failure = $state<string | null>(null);
   let notice = $state<string | null>(null);
@@ -861,6 +888,34 @@
   });
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
+  /**
+   * The profile's explicit follows and its updates list (den-spec follows-v1), apart from the series den-core's
+   * `new_episodes` infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground once Home has
+   * settled, when the follows change, and on opening Updates; never on a timer.
+   */
+  const updates =
+    model && !__DEN_TV__
+      ? new UpdatesStore(
+          () => model.settings.value,
+          untrack(() => session.content),
+          untrack(() => airings),
+        )
+      : null;
+  onDestroy(() => updates?.close());
+  $effect(() => updates?.publish());
+  const followsKey = $derived(updates ? Object.keys(updates.follows).sort().join(',') : '');
+  $effect(() => {
+    void followsKey;
+    if (!updates || !foreground || !initialHomeSettled || !atlas) return;
+    void untrack(() => updates.reconcile());
+  });
+  $effect(() => {
+    if (updates && route.page === 'updates' && atlas) void untrack(() => updates.reconcile());
+  });
+  const setFollow = (key: string, on: boolean) =>
+    runCommand(model ? () => model.setFollow(key, on) : undefined);
+  const markUpdates = (ids: string[], mark: 'read' | 'dismissed') =>
+    runCommand(model ? () => model.markUpdates(ids, mark) : undefined);
   /** Their library rows, to tell whether the viewer has started a released episode (`policy.released`). */
   let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
   /** What the library says of each series this viewer might follow (`airing.ts` `newEpisodesRequest`). */
@@ -1216,6 +1271,7 @@
     else if (route.page === 'downloads') void DownloadsScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
     else if (route.page === 'watchlist') void WatchlistScreen.load();
+    else if (route.page === 'updates') void UpdatesScreen.load();
   });
   $effect(() => {
     if (playing) void PlayerScreen.load();
@@ -3112,16 +3168,19 @@
   }
 </script>
 
-{#if !__DEN_TV__}
+{#if !__DEN_TV_LEGACY_JS_CORE__}
   <KidTitleAccessDialog
     request={kidAccessRequest}
     onclose={() => (kidAccessRequest = null)}
     onconfirm={async (pin) => {
       const request = kidAccessRequest;
+      const asKid = profiles?.mode === 'kid';
       if (
         !request ||
         !profiles ||
-        profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority
+        (asKid
+          ? session !== request.authority
+          : profiles.kidTitleApprovalAuthority(request.kid.id) !== request.authority)
       )
         return { outcome: 'superseded' };
       const result = await profiles.setKidTitleApproval(
@@ -3129,6 +3188,7 @@
         { type: request.title.type, id: request.title.id },
         request.allow,
         pin,
+        asKid,
       );
       return finishKidTitleApprovalPresentation(request, kidAccessRequest, result, () =>
         session.notify(
@@ -3210,6 +3270,10 @@
     {notice}
     model={downloadsModel}
     onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
+    following={updates?.following(followKey(page.type, page.id))}
+    onfollow={updates
+      ? (on: boolean) => fromPage(setFollow(followKey(page.type, page.id), on))
+      : undefined}
     onseen={(title, seen) => fromPage(setSeen(title, seen))}
     onseason={markSeasonSeen}
     onreact={(title, reaction) => fromPage(setReaction(title, reaction))}
@@ -3220,6 +3284,7 @@
     away={remuxAway && !!scout}
     blocked={remuxBlocked}
     ceiling={detailPrefs.ceiling}
+    onaskowner={askOwner}
     onepisode={markEpisodeSeen}
     shown={relatedShown}
     kidTitleAccessHandoff={__DEN_TV__ &&
@@ -3233,7 +3298,14 @@
 {:else if route.page === 'search' && !SearchScreen.current}
   <ScreenLoading screen={SearchScreen} />
 {:else if route.page === 'person'}
-  <PersonScreen.current id={route.id} content={session.content} {active} />
+  {@const personKey = followKey('person', route.id)}
+  <PersonScreen.current
+    id={route.id}
+    content={session.content}
+    {active}
+    following={updates?.following(personKey)}
+    onfollow={updates ? (on: boolean) => fromPage(setFollow(personKey, on)) : undefined}
+  />
 {:else if route.page === 'service' && !ServiceScreen.current}
   <ScreenLoading screen={ServiceScreen} />
 {:else if route.page === 'service'}
@@ -3294,6 +3366,14 @@
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
     <DownloadsScreen.current model={downloadsModel} {active} />
+  {/if}
+{:else if route.page === 'updates'}
+  {#if !updates}
+    <p class="note">Updates need a library. <a href="/settings">Link a TV</a></p>
+  {:else if !UpdatesScreen.current}
+    <ScreenLoading screen={UpdatesScreen} />
+  {:else}
+    <UpdatesScreen.current {updates} onmark={markUpdates} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !model && !profileActivity}

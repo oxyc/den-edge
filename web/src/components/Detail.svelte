@@ -81,6 +81,8 @@
     failure,
     notice,
     onwatchlist,
+    following = false,
+    onfollow,
     onseen,
     onreact,
     onplay,
@@ -101,7 +103,10 @@
     playRequest,
     trailerRequested = false,
     kidTitleAccessHandoff,
+    onaskowner,
   }: {
+    /** A Kid's way to ask the Owner (by PIN) to allow a title its policy withholds; absent for anyone else. */
+    onaskowner?: (title: Pick<Title, 'type' | 'id' | 'title'>) => void;
     ref: { type: MediaType; id: number };
     /**
      * The season the address names (`?season=2`), with the title it is for. Only the page of that title, while it is
@@ -148,6 +153,9 @@
     failure: string | null;
     notice: string | null;
     onwatchlist: (title: Title, on: boolean) => void;
+    /** Whether the profile follows this title (den-spec follows-v1); no Follow without `onfollow`. */
+    following?: boolean;
+    onfollow?: (on: boolean) => void | Promise<unknown>;
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
@@ -1122,6 +1130,17 @@
 
 {#if withheld}
   <p class="note">This title isn’t available on this profile.</p>
+  {#if onaskowner}
+    <Button
+      label="Ask Owner"
+      onclick={() =>
+        onaskowner({
+          type: ref.type,
+          id: ref.id,
+          title: seed?.title ?? i18n.phrase('this title'),
+        })}
+    />
+  {/if}
 {:else if detail === null}
   <p class="note" role="alert">
     {detailFailure?.state === 'unavailable' &&
@@ -1296,6 +1315,8 @@
             detailPage
             playLabel={i18n.text(continuing ? 'common.resume' : 'common.play')}
             onwatchlist={(on) => onwatchlist(d.title, on)}
+            {following}
+            {onfollow}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}
             seenItems={seriesSeenItems}

@@ -44,6 +44,7 @@ export const PRODUCTION_BUILD_SPECS = [
   'guest-library.spec.mjs',
   'hidden-start.spec.mjs',
   'household-downloads.spec.mjs',
+  'kid-pin-approval.spec.mjs',
   'library-retirement.spec.mjs',
   'origin-outage.spec.mjs',
   'playback-receipt-recovery.spec.mjs',

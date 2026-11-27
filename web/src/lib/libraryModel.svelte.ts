@@ -459,6 +459,16 @@ export class LibraryModel {
     return this.#command({ kind: 'library.remove', title: wireTitleRef(title) }, operationId);
   }
 
+  /** Follow or unfollow `key` (`tv:<id>`, `movie:<id>`, `person:<id>`; den-spec follows-v1). */
+  setFollow(key: string, follow: boolean): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'follow.set', key, follow });
+  }
+
+  /** Mark updates read or dismissed, by event id (den-spec follows-v1). */
+  markUpdates(ids: string[], mark: 'read' | 'dismissed'): Promise<LibraryServiceCommandResult> {
+    return this.#command({ kind: 'updates.mark', ids, mark });
+  }
+
   setWatched(
     title: TitleRef,
     watched: boolean,

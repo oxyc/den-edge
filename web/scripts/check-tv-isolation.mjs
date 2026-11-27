@@ -233,7 +233,9 @@ if (process.argv.includes('--capture')) {
   // Allow the next 128-byte boundary.
   // den#476: Play on TV's result toasts (waking, preparing, playing and each reason) in Spanish and Swedish measure
   // 53,791. Allow the next 128-byte boundary.
-  if (current.translationGzip > 53888) throw new Error('Lazy translation catalog budget exceeded');
+  // 2026-11-27 (den#477): Follow and the Updates list (buttons, empty and error notes, and the four event captions) in
+  // Swedish and Spanish measure 54,227 on top of den#476 (+436). Allow the next 128-byte boundary containing it.
+  if (current.translationGzip > 54272) throw new Error('Lazy translation catalog budget exceeded');
   // The series poster fade (one stream-list search per series at the episode its poster asks about, with the
   // Continue Watching targets it reads) adds 1.0 KiB to the poster graph versus main, which sat 0.5 KiB under the
   // ceiling. Allow one KiB; the initial and catalog ceilings are unchanged.
@@ -544,5 +546,13 @@ if (process.argv.includes('--capture')) {
   // boundary.
   // den#476: Play on TV's results (the sender's sealed-result reader and toast states in the routed library, and the
   // LG/Samsung receiver's reports) measured 133,220 with #991 and #1169. Allow the next 128-byte boundary.
-  if (coreTotalDelta > 133248) throw new Error('Browser total JS/CSS budget exceeded');
+  // Follows and the Updates list (den#477) measured 138,219 on main at 9ca7e30b (+4,999): the follows-v1 derivation (its
+  // episode window is den-core's `new_episodes` answer), the Updates store and page, the follow and mark commands with
+  // their settings-view fields, and the bell. The page is its own lazy chunk. Allow the next 128-byte boundary
+  // containing it.
+  // A Kid's "Ask Owner" on a title its policy withholds (the lazy Detail's action, the routed library's request, and
+  // the coordinator's Kid branch of the existing approval write) measured 138,501 with den#477 (+282). The PIN dialog
+  // and writer are already in this graph; the write must stay with the coordinator that owns the session. Allow the
+  // next 128-byte boundary.
+  if (coreTotalDelta > 138624) throw new Error('Browser total JS/CSS budget exceeded');
 }

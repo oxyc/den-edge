@@ -49,6 +49,8 @@
     seenOverride = undefined,
     seenItems,
     extraAction,
+    following = false,
+    onfollow,
   }: {
     /** The title's row as last read; undefined for a title the library has never held. */
     row: TitleRow | undefined;
@@ -121,7 +123,24 @@
     seenItems?: MenuItem[];
     /** A surface-specific action which belongs beside the title controls (the TV season picker). */
     extraAction?: Snippet;
+    /** Whether the profile follows this title (den-spec follows-v1): apart from the Watchlist. */
+    following?: boolean;
+    /** Follow or unfollow; no button without it. */
+    onfollow?: (on: boolean) => void | Promise<unknown>;
   } = $props();
+  /** A Follow press, shown until its save ends. */
+  let followPressed = $state<boolean | null>(null);
+  const followed = $derived(followPressed ?? following);
+  async function toggleFollow() {
+    if (!onfollow || followPressed !== null) return;
+    followPressed = !followed;
+    try {
+      await onfollow(followPressed);
+    } finally {
+      await tick();
+      followPressed = null;
+    }
+  }
   let viewportWidth = $state(window.innerWidth);
   /** Said on the button itself, where the link was copied rather than handed to a sheet that says so. */
   let copied = $state(false);
@@ -371,6 +390,20 @@
             const on = !seen;
             void save('seen', on, () => onseen(on));
           }}
+        />
+      {/if}
+      {#if onfollow}
+        <Button
+          variant="stateful"
+          class={followed ? 'pill on follow' : 'pill follow'}
+          icon="bell"
+          iconFilled={followed}
+          label={compact ? undefined : 'Follow'}
+          pressed={compact ? undefined : followed}
+          ariaLabel={compact ? (followed ? 'Unfollow' : 'Follow') : 'Follow'}
+          busy={followPressed !== null}
+          saving={followPressed !== null}
+          onclick={() => void toggleFollow()}
         />
       {/if}
       {#if extraAction}{@render extraAction()}{/if}

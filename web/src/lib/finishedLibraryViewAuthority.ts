@@ -1458,6 +1458,8 @@ const NEWEST_BACKGROUND_PAGE = 1_000;
  */
 const SETTINGS_ROWS = [
   'set:prefs',
+  'set:follows',
+  'set:updates',
   'set:assistant-grants',
   'set:assistant-read',
   'set:plugins',

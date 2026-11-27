@@ -16,6 +16,7 @@
       | 'expand'
       | 'warning'
       | 'sliders'
+      | 'bell'
       | 'sound'
       | 'mute';
     filled?: boolean;
@@ -61,6 +62,9 @@
       cy="7"
       r="2.1"
     /><circle cx="9.5" cy="12" r="2.1" /><circle cx="15.5" cy="17" r="2.1" />
+  {:else if name === 'bell'}<path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15L6 16.5Z" /><path
+      d="M10 20.5a2.2 2.2 0 0 0 4 0"
+    />
   {:else}<g transform={name === 'dislike' ? 'rotate(180 12 12)' : undefined}
       ><path d="M8 20H4V10h4m0 10V10l4-7c2 0 3 1 2 4l-1 3h6c2 0 2 1 2 2l-2 7-1 1H8Z" /></g
     >{/if}
