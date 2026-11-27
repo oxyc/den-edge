@@ -42,6 +42,14 @@ import {
   libraryMetadataTitle,
 } from './libraryMetadata';
 import { FinishedLibraryViewWriter } from './finishedLibraryViewWriter';
+import {
+  activeFollows,
+  FOLLOWS_ROW,
+  prunedMarks,
+  updateMarks,
+  UPDATES_ROW,
+  type UpdateMark,
+} from './follows';
 import { validProfilePreferenceValues } from './profilePreferenceSchema';
 import {
   continueAiring,
@@ -681,6 +689,10 @@ export class LibraryLogAuthority {
         return this.#watched(command.title, command.watched, operationId);
       case 'continue-dismissed.set':
         return this.#dismissed(command.title, command.dismissed);
+      case 'follow.set':
+        return this.#setFollow(command.key, command.follow);
+      case 'updates.mark':
+        return this.#markUpdates(command.ids, command.mark);
       case 'progress.record':
         return this.#progress(command);
       case 'preferences.patch':
@@ -1663,8 +1675,10 @@ export class LibraryLogAuthority {
     // A profile-aware household holds no preferences (profiles-v1 §6): any `set:prefs` an older one still carries is a
     // stale seed, never drawn, so no frame is painted from it while the profile's own library opens.
     const profileAware = this.#log.wireMinimum >= 5 || this.#log.profileDirectory() !== null;
-    const prefs = this.#log.settings('prefs');
-    const selected = selectedSettingsView(prefs ? [prefs] : [], profileAware)!;
+    const rows = ['prefs', FOLLOWS_ROW, UPDATES_ROW].flatMap(
+      (name) => this.#log.settings(name) ?? [],
+    );
+    const selected = selectedSettingsView(rows, profileAware)!;
     return { ...selected, assistant: await this.#assistant.needs() };
   }
 
@@ -2656,6 +2670,34 @@ export class LibraryLogAuthority {
       delivery: this.#delivery(pending),
       affected: this.#withPendingStatus(pending, [{ kind: 'simkl' }]),
     };
+  }
+
+  /** follows-v1 §1: a follow starts a new baseline; following what is already followed changes nothing. */
+  async #setFollow(key: string, follow: boolean): Promise<LibraryAuthorityCommandResult> {
+    const followed = activeFollows(this.#log.settings(FOLLOWS_ROW)?.values)[key] !== undefined;
+    if (follow === followed) return this.#unchanged();
+    const at = await this.#settingsStamp();
+    const row = this.#changedSettingsRow(
+      FOLLOWS_ROW,
+      { [key]: follow ? { int: at[0] } : null },
+      at,
+    );
+    return row ? this.#writeRow(row, [{ kind: 'settings' }]) : this.#unchanged();
+  }
+
+  /** follows-v1 §1: marks past retention are dropped by the write that adds these. */
+  async #markUpdates(ids: string[], mark: UpdateMark): Promise<LibraryAuthorityCommandResult> {
+    const base = this.#log.settings(UPDATES_ROW);
+    const held = updateMarks(base?.values, Date.now());
+    const changed = ids.filter((id) => held[id] !== mark);
+    if (!changed.length) return this.#unchanged();
+    const at = await this.#settingsStamp();
+    const values = prunedMarks(base?.values ?? {}, Date.now());
+    for (const id of changed) values[id] = { value: { string: mark }, at };
+    return this.#writeRow(
+      { ...(base ?? { kind: 'set' as const, schema: 2, name: UPDATES_ROW }), values },
+      [{ kind: 'settings' }],
+    );
   }
 
   async #patchSettings(

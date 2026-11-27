@@ -20,12 +20,29 @@
     id,
     content,
     active = true,
+    following = false,
+    onfollow,
   }: {
     id: number;
     content: ContentServiceClientPort;
     active?: boolean;
     shown?: (title: Title) => boolean;
+    /** Whether the profile follows this person (den-spec follows-v1); no Follow without `onfollow`. */
+    following?: boolean;
+    onfollow?: (on: boolean) => void | Promise<unknown>;
   } = $props();
+  /** A Follow press, shown until its save ends. */
+  let followPressed = $state<boolean | null>(null);
+  const followed = $derived(followPressed ?? following);
+  async function toggleFollow() {
+    if (!onfollow || followPressed !== null) return;
+    followPressed = !followed;
+    try {
+      await onfollow(followPressed);
+    } finally {
+      followPressed = null;
+    }
+  }
   const panel = $props.id();
   let person = $state<PersonDetail | null | undefined>();
   // The page names itself once it knows whose it is; until then the address is all anything has to go on.
@@ -135,6 +152,19 @@
     <div class="identity">
       <h1>{person.name}</h1>
       {#if person.knownFor}<p class="known">{person.knownFor}</p>{/if}
+      {#if onfollow}
+        <Button
+          variant="stateful"
+          class={followed ? 'follow on' : 'follow'}
+          icon="bell"
+          iconFilled={followed}
+          label="Follow"
+          pressed={followed}
+          busy={followPressed !== null}
+          saving={followPressed !== null}
+          onclick={() => void toggleFollow()}
+        />
+      {/if}
       {#if person.biography}
         <p class="bio" class:expanded>{person.biography}</p>
         {#if person.biography.length > 400}
@@ -257,6 +287,10 @@
 
   :global(.bio-more) {
     margin-top: 10px;
+  }
+
+  .identity :global(.follow) {
+    margin-top: 16px;
   }
 
   .more {

@@ -22,7 +22,9 @@ export function profileHouseholdWrite(row: {
     name.startsWith('set:deliver:') ||
     name.startsWith('set:handoff:') ||
     name === 'set:trackers' ||
-    name === 'set:assistant-applied'
+    name === 'set:assistant-applied' ||
+    name === 'set:follows' ||
+    name === 'set:updates'
   )
     return { effect: 'refuse' };
   if (name === 'set:prefs') return { effect: 'refuse' };

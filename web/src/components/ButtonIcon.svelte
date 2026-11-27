@@ -2,6 +2,7 @@
   export type ButtonIconName =
     | 'airplay'
     | 'back'
+    | 'bell'
     | 'bookmark'
     | 'cast'
     | 'chevron'
@@ -58,6 +59,9 @@
     />
   {:else if name === 'bookmark'}
     <path d="M7 4.5h10a1 1 0 0 1 1 1v14l-6-3.7-6 3.7v-14a1 1 0 0 1 1-1Z" />
+  {:else if name === 'bell'}
+    <path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15L6 16.5Z" />
+    <path d="M10 20.5a2.2 2.2 0 0 0 4 0" />
   {:else if name === 'eye'}
     <path d="M2.5 12S6 6.6 12 6.6 21.5 12 21.5 12 18 17.4 12 17.4 2.5 12 2.5 12Z" />
     <circle cx="12" cy="12" r="2.9" />

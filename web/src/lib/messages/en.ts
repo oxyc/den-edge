@@ -4,6 +4,8 @@ export const ENGLISH_MESSAGES = {
   'nav.movies': 'Movies',
   'nav.series': 'Series',
   'nav.watchlist': 'Watchlist',
+  'nav.updates': 'Updates',
+  'nav.unread': 'unread',
   'nav.settings': 'Settings',
   'nav.search': 'Search',
   'nav.loadingLibrary': 'Loading your library',

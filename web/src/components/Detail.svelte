@@ -81,6 +81,8 @@
     failure,
     notice,
     onwatchlist,
+    following = false,
+    onfollow,
     onseen,
     onreact,
     onplay,
@@ -148,6 +150,9 @@
     failure: string | null;
     notice: string | null;
     onwatchlist: (title: Title, on: boolean) => void;
+    /** Whether the profile follows this title (den-spec follows-v1); no Follow without `onfollow`. */
+    following?: boolean;
+    onfollow?: (on: boolean) => void | Promise<unknown>;
     onseen: (title: Title, on: boolean) => void;
     onreact: (title: Title, reaction: Reaction) => void;
     /** Absent for a guest, who has no TV to send to — `TitleActions` already omits the button without it. */
@@ -1296,6 +1301,8 @@
             detailPage
             playLabel={i18n.text(continuing ? 'common.resume' : 'common.play')}
             onwatchlist={(on) => onwatchlist(d.title, on)}
+            {following}
+            {onfollow}
             onseen={(on) => onseen(d.title, on)}
             {seenOverride}
             seenItems={seriesSeenItems}
