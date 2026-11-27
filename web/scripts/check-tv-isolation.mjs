@@ -544,5 +544,9 @@ if (process.argv.includes('--capture')) {
   // boundary.
   // den#476: Play on TV's results (the sender's sealed-result reader and toast states in the routed library, and the
   // LG/Samsung receiver's reports) measured 133,220 with #991 and #1169. Allow the next 128-byte boundary.
-  if (coreTotalDelta > 133248) throw new Error('Browser total JS/CSS budget exceeded');
+  // A Kid's "Ask Owner" on a title its policy withholds (the lazy Detail's action, the routed library's request, and
+  // the coordinator's Kid branch of the existing approval write) measured 133,317 against main's 133,220 (+97). The
+  // PIN dialog and writer are already in this graph; the write must stay with the coordinator that owns the session.
+  // Allow the next 128-byte boundary, retaining 59.
+  if (coreTotalDelta > 133376) throw new Error('Browser total JS/CSS budget exceeded');
 }

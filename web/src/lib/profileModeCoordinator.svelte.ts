@@ -358,23 +358,29 @@ export class ProfileModeCoordinator {
     }
   }
 
-  /** Owner-only, freshly PIN-authorized change to one Kid's title exception. */
+  /**
+   * Freshly PIN-authorized change to one Kid's title exception. An Owner session changes any Kid's; the active Kid
+   * session asks (`asKid`) to allow a title its own policy blocks, by the same write and the same Owner PIN.
+   */
   async setKidTitleApproval(
     profile: string,
     title: TitleRef,
     allow: boolean,
     pin: string,
+    asKid = false,
   ): Promise<KidTitleApprovalChangeResult> {
     this.#assertOpen();
-    // Packaged TVs hand this administration to the supported Browser. A programmatic caller still fails closed,
-    // and the build can remove the Browser-only mutation body and recovery copy.
-    if (__DEN_TV__) return KID_TITLE_APPROVAL_DENIED;
+    // Packaged TVs hand Owner administration to the supported Browser, and the reduced Tizen 3 package has no
+    // PIN entry at all. A programmatic caller still fails closed, and the build can remove the mutation body and
+    // recovery copy. Only a Kid's own request for a blocked title is written on the other TVs.
+    if (__DEN_TV_LEGACY_JS_CORE__ || (__DEN_TV__ && !asKid)) return KID_TITLE_APPROVAL_DENIED;
     if (this.#kidTitleApprovalActive)
       return {
         outcome: 'failed',
         cause: new Error('a Kid title-access change is already in progress'),
       };
-    if (this.mode !== 'owner') return KID_TITLE_APPROVAL_DENIED;
+    if (this.mode !== (asKid ? 'kid' : 'owner')) return KID_TITLE_APPROVAL_DENIED;
+    if (asKid && this.#session?.identity.id !== profile) return KID_TITLE_APPROVAL_DENIED;
     const kid = this.#choice(profile);
     if (!kid || kid.role !== 'kid' || !kid.id) return KID_TITLE_APPROVAL_DENIED;
     const owner = this.#session;
@@ -385,8 +391,9 @@ export class ProfileModeCoordinator {
       return (
         !this.#disposed &&
         ticket === this.#kidTitleApproval &&
-        this.#session === owner &&
-        this.mode === 'owner' &&
+        // The saved approval republishes the directory, which reopens the asking Kid's own session: that is the
+        // write taking effect, not a replacement of whoever asked.
+        (asKid || (this.#session === owner && this.mode === 'owner')) &&
         choice?.id === kid.id &&
         choice.role === 'kid' &&
         choice.libraryKey === kid.libraryKey &&
