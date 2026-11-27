@@ -379,6 +379,10 @@ test('an iPhone preview scales one complete 1920px TV canvas', async ({ browser,
 test('Home returns to the TV root without loading a backend document', async ({ page }) => {
   await setup(page, '/movies');
   await browse(page);
+  // The bar is the shell's and is up before the routed library has loaded; until a Router is mounted (the active route
+  // page exists) a click on its link is an ordinary anchor navigation, a backend document. Click only once the Router
+  // can handle it in place.
+  await expect(page.locator('[data-route-page][data-active="true"]')).toBeAttached();
   const documents = [];
   page.on('request', (request) => {
     if (request.isNavigationRequest() && request.frame() === page.mainFrame())
