@@ -156,6 +156,39 @@ test('an audio choice requests that exact track and stays acknowledged until it 
   await expect(status).toHaveCount(0);
 });
 
+test('another stream is asked for in the language being heard, not the stored preference', async ({
+  page,
+}) => {
+  const audioTracks = [
+    { language: 'en', name: null, channels: 6, commentary: false },
+    { language: 'ru', name: null, channels: 6, commentary: false },
+  ];
+  const asked = await mockPlayer(page, { audioTracks });
+  await page.goto(`${ORIGIN}/test/player.html`);
+  await expect
+    .poll(() => page.locator('.player video').evaluate((v) => v.currentTime), { timeout: 30_000 })
+    .toBeGreaterThan(1);
+
+  const audio = page.locator('button.web-audio-subtitles');
+  await audio.click();
+  await page
+    .getByRole('group', { name: 'Audio' })
+    .getByRole('menuitemradio', { name: 'Russian 5.1' })
+    .click();
+  await expect.poll(() => asked.length).toBe(2);
+  await expect(audio).toHaveAccessibleName(/^Audio and subtitles: Russian 5\.1,/, {
+    timeout: 30_000,
+  });
+
+  await openStreams(page, '4K · 11 GB');
+  await page
+    .getByRole('menuitemradio', { name: '4K · WEB-DL · HDR · 9 GB · from a 105 GB pack' })
+    .click();
+  await expect.poll(() => asked.length).toBe(3);
+  expect(asked[2].filename).toBe(releases[1].filename);
+  expect(asked[2].audio[0]).toBe('ru');
+});
+
 test('the modal player contains keyboard focus and returns it to its opener', async ({ page }) => {
   await mockPlayer(page);
   await page.goto(`${ORIGIN}/test/player.html?startClosed`);

@@ -77,6 +77,16 @@ describe('wantedLanguages', () => {
     });
   });
 
+  it('puts the language being heard first, keeping the setting behind it as the fallback', () => {
+    expect(wantedLanguages({ audio: 'fi' }, 'en', ['sv-FI', 'en-US'], 'jpn').audio).toEqual([
+      'ja',
+      'fi',
+      'sv',
+      'en',
+    ]);
+    expect(wantedLanguages({ audio: 'fi' }, 'en', ['fi'], 'fin').audio).toEqual(['fi']);
+  });
+
   it('asks for the title’s own language when the setting is Original', () => {
     expect(wantedLanguages({ subtitle: 'en' }, 'ko', ['en-GB'])).toEqual({
       audio: ['ko', 'en'],
