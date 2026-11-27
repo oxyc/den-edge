@@ -47,6 +47,7 @@
 
   const params = new URLSearchParams(location.search);
   const playBoundary = params.has('play-boundary');
+  const playBoundaryOwner = playBoundary && params.has('owner');
   const receiptUnsupported = params.has('receipt-unsupported');
   let profileHandoff = $state('');
   const populated = params.has('populated');
@@ -175,6 +176,10 @@
             page: 'title',
             type: params.get('type') === 'tv' ? 'tv' : 'movie',
             id: Number(params.get('id')),
+            ...(params.has('direct-play') ? { play: true as const } : {}),
+            ...(params.has('episode')
+              ? { season: Number(params.get('season')), episode: Number(params.get('episode')) }
+              : {}),
           }
         : { page: 'library' },
   );
@@ -292,6 +297,17 @@
             : []),
           ...(params.has('series-continue')
             ? [markEpisode(blankEpisode({ type: 'tv', id: 2002 }, 1, 1), true, [9000, 0, 'test'])]
+            : []),
+          // A newer, coordinate-overlapping Continue entry for another series must never supply the open title's
+          // target.
+          ...(params.has('other-series-continue')
+            ? [
+                blankTitle({ type: 'tv', id: 2002 }, 10_000),
+                {
+                  ...blankEpisode({ type: 'tv', id: 2002 }, 1, 1),
+                  progress: { value: 0.4, at: [10_000, 0, 'test'], viewing: 1 },
+                } satisfies EpisodeRow,
+              ]
             : []),
           ...(withDownload ? [downloadRow] : []),
           ...homeDownloadRows,
@@ -585,14 +601,22 @@
             )
           : playBoundary
             ? activeProfileSession(
-                persistentProfileIdentity('22222222222222222222222222222222', 'fixture-kid-a'),
+                persistentProfileIdentity(
+                  '22222222222222222222222222222222',
+                  playBoundaryOwner ? 'fixture-owner' : 'fixture-kid-a',
+                ),
                 library.session.household,
                 library.session.model!,
                 null,
-                { maximumAge: 12, unknownRatings: 'block' },
-                false,
-                true,
-                [{ type: 'movie', id: 1001 }],
+                playBoundaryOwner ? null : { maximumAge: 12, unknownRatings: 'block' },
+                playBoundaryOwner,
+                !playBoundaryOwner,
+                playBoundaryOwner
+                  ? []
+                  : [
+                      { type: 'movie', id: 1001 },
+                      { type: 'tv', id: 2007 },
+                    ],
               )
             : library.session,
   );
@@ -701,7 +725,7 @@
             replace: (profile: 'same' | 'other' | 'owner') => void;
             hold: () => void;
             release: () => void;
-            stats: () => { asked: number; waiting: number; cancelled: number };
+            stats: () => { asked: number; waiting: number; cancelled: number; sources: number };
           };
         }
       ).denTestPlayBoundary = {
@@ -731,6 +755,7 @@
           asked: boundaryContent!.asked,
           waiting: boundaryContent!.waiting.size,
           cancelled: boundaryContent!.cancelled,
+          sources: library.queryKinds.filter((kind) => kind === 'download.sources').length,
         }),
       };
   }

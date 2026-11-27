@@ -190,6 +190,16 @@ describe('detail presentation', () => {
       target: undefined,
     });
   });
+  it("keeps a known-future series' own Continue entry as its target, and nothing without one", () => {
+    const future = detail({ first_air_date: '2099-01-01' });
+    expect(
+      seriesPresentation(future, new Map(), undefined, {
+        episode: { season: 1, episode: 1 },
+        fraction: 0.4,
+      }),
+    ).toMatchObject({ target: { season: 1, episode: 1 }, kind: 'resume' });
+    expect(seriesPresentation(future, new Map())).toMatchObject({ target: undefined });
+  });
   it('offers the episode Home offers: a rewatch in progress resumes, not the one after the furthest finished', () => {
     // E1–E4 finished earlier; E1 is being rewatched now, part-way in. One series row per episode, as the TV writes.
     const series = { type: 'tv' as const, id: 1 };
