@@ -532,6 +532,6 @@ if (process.argv.includes('--capture')) {
   // the content Worker's `new.episodes` request and answer validators and their protocol types, and the vendored
   // den-core's newer JS glue, less the TypeScript copy of the rule it replaces. The Worker codec must check what the
   // page sends, and the page and Worker share the protocol module. Startup measured +87. On main at fc28480e it
-  // measured MEASURED_PLACEHOLDER; allow the next 128-byte boundary.
-  if (coreTotalDelta > 129792) throw new Error('Browser total JS/CSS budget exceeded');
+  // measured 130,329; allow the next 128-byte boundary.
+  if (coreTotalDelta > 130432) throw new Error('Browser total JS/CSS budget exceeded');
 }
