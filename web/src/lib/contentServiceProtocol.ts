@@ -21,9 +21,10 @@ import type {
  * Version 8 carries the active Kid's exact-title approvals with every restricted content query. Version 9 adds
  * the compact billboard projection; an earlier Worker must not silently reject that new critical-path query.
  * Version 10 adds selective title-extras retry and bounded per-lane answers, which must not be sent to or accepted
- * from an older long-lived SharedWorker that only knows the all-lane request.
+ * from an older long-lived SharedWorker that only knows the all-lane request. Version 11 adds den-core's
+ * new-episode decision (`new.episodes`).
  */
-export const CONTENT_SERVICE_PROTOCOL = 10 as const;
+export const CONTENT_SERVICE_PROTOCOL = 11 as const;
 export type ContentServiceProtocol = typeof CONTENT_SERVICE_PROTOCOL;
 
 export const CONTENT_SERVICE_WIRE_LIMITS = {
@@ -35,7 +36,72 @@ export const CONTENT_SERVICE_WIRE_LIMITS = {
   related: 512,
   importLookups: 10_000,
   cursor: 128,
+  /** Series in each list of a `new.episodes` request: a library's whole Watchlist and Seen history. */
+  newEpisodeSeries: 10_000,
+  airingEpisodes: 128,
 } as const;
+
+/** One episode den-atlas dates, as den-core `new_episodes` reads it. */
+export interface ContentDatedEpisode {
+  season: number;
+  episode: number;
+  /** A calendar date, `YYYY-MM-DD`. */
+  date: string;
+  name?: string;
+}
+
+/**
+ * den-core `new_episodes`' input: the library's facts about the series a viewer might follow, atlas's dates and the
+ * viewer's day. Who is followed, which episode is new and what is coming up are den-core's to say.
+ */
+export interface ContentNewEpisodesRequest {
+  /** The viewer's calendar day, `YYYY-MM-DD`. */
+  today: string;
+  watchlist: number[];
+  /** Each series on Continue Watching: its episode, whether the row waits for it, and the progress in it. */
+  continuing: Array<{
+    series: number;
+    season: number;
+    episode: number;
+    upcoming: boolean;
+    fraction: number;
+    watched: boolean;
+  }>;
+  caughtUp: number[];
+  seen: number[];
+  dismissed: number[];
+  airing: Array<{
+    series: number;
+    previous?: ContentDatedEpisode;
+    next?: ContentDatedEpisode;
+    upcoming: ContentDatedEpisode[];
+    premiere?: { season: number; date: string };
+  }>;
+}
+
+/** den-core `new_episodes`' answer. */
+export interface ContentNewEpisodes {
+  /** Every series that might be followed: atlas is asked about these. */
+  candidates: number[];
+  followed: number[];
+  /** Each followed series' episode out within den-core's window, whatever the viewer's standing on it. */
+  released: Array<{ series: number; season: number; episode: number }>;
+  /** Each followed series' new episode: the row entry that plays, and the release that made it new. */
+  new: Array<{
+    series: number;
+    season: number;
+    episode: number;
+    released: { season: number; episode: number };
+    name: string | null;
+  }>;
+  comingUp: Array<{
+    series: number;
+    season: number;
+    episode: number;
+    date: string;
+    premiere: boolean;
+  }>;
+}
 
 /** Which intended-audience evidence Kid discovery and direct admission accept (den-atlas `kidAudience`). */
 export type ContentKidAudience = 'child' | 'child-or-teen';
@@ -253,6 +319,8 @@ type ContentOperation =
   | { kind: 'atlas.recommend.personal'; body: ReturnType<typeof recommendBody> }
   /** Release dates for the series a viewer follows (`GET /airing/tv/{id}`), each kept as long as atlas said. */
   | { kind: 'atlas.airing'; series: import('./airing').AiringSeries[] }
+  /** den-core's new-episode decision over the library's facts and atlas's dates (`new_episodes`). */
+  | ({ kind: 'new.episodes' } & ContentNewEpisodesRequest)
   | { kind: 'import.resolve'; lookups: ContentImportLookup[] }
   | { kind: 'prefetch.detail'; title: ContentTitleRef; region: string }
   | { kind: 'provider-key.check'; service: ContentProviderKey; candidate?: string }
@@ -365,6 +433,7 @@ export type ContentResult =
       kind: 'atlas.airing';
       airing: OptionalContent<Array<{ tmdb: number; airing: import('./airing').Airing }>>;
     }
+  | { kind: 'new.episodes'; answer: ContentNewEpisodes }
   | { kind: 'import.resolve'; results: ContentImportLookupResult[] }
   | { kind: 'prefetch.detail' }
   | {

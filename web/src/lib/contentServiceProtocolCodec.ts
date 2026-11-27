@@ -3,6 +3,7 @@ import {
   CONTENT_SERVICE_WIRE_LIMITS,
   type ContentAtlasQuery,
   type ContentCatalogSpec,
+  type ContentDatedEpisode,
   type ContentDiscoverQuery,
   type ContentImportLookup,
   type ContentPolicy,
@@ -138,6 +139,79 @@ function optional<T>(
   check: (candidate: unknown) => candidate is T,
 ): value is T | undefined {
   return value === undefined || check(value);
+}
+
+const calendarDay = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+const coordinate = (value: Record<string, unknown>) =>
+  integer(value.season) && integer(value.episode);
+const seriesIds = (value: unknown): value is number[] =>
+  Array.isArray(value) &&
+  value.length <= CONTENT_SERVICE_WIRE_LIMITS.newEpisodeSeries &&
+  value.every((id) => integer(id, 1));
+
+function datedEpisode(value: unknown): value is ContentDatedEpisode {
+  return (
+    record(value) &&
+    exact(value, ['season', 'episode', 'date', 'name']) &&
+    coordinate(value) &&
+    calendarDay(value.date) &&
+    (value.name === undefined || text(value.name, 1_024))
+  );
+}
+
+/** den-core `new_episodes`' input, as the page sends it (`ContentNewEpisodesRequest`). */
+function newEpisodesRequest(value: Record<string, unknown>): boolean {
+  const limit = CONTENT_SERVICE_WIRE_LIMITS.newEpisodeSeries;
+  return (
+    exact(value, [
+      'kind',
+      'today',
+      'watchlist',
+      'continuing',
+      'caughtUp',
+      'seen',
+      'dismissed',
+      'airing',
+    ]) &&
+    calendarDay(value.today) &&
+    seriesIds(value.watchlist) &&
+    seriesIds(value.caughtUp) &&
+    seriesIds(value.seen) &&
+    seriesIds(value.dismissed) &&
+    Array.isArray(value.continuing) &&
+    value.continuing.length <= limit &&
+    value.continuing.every(
+      (row) =>
+        record(row) &&
+        exact(row, ['series', 'season', 'episode', 'upcoming', 'fraction', 'watched']) &&
+        integer(row.series, 1) &&
+        coordinate(row) &&
+        typeof row.upcoming === 'boolean' &&
+        finite(row.fraction) &&
+        row.fraction >= 0 &&
+        row.fraction <= 1 &&
+        typeof row.watched === 'boolean',
+    ) &&
+    Array.isArray(value.airing) &&
+    value.airing.length <= limit &&
+    value.airing.every(
+      (one) =>
+        record(one) &&
+        exact(one, ['series', 'previous', 'next', 'upcoming', 'premiere']) &&
+        integer(one.series, 1) &&
+        optional(one.previous, datedEpisode) &&
+        optional(one.next, datedEpisode) &&
+        Array.isArray(one.upcoming) &&
+        one.upcoming.length <= CONTENT_SERVICE_WIRE_LIMITS.airingEpisodes &&
+        one.upcoming.every(datedEpisode) &&
+        (one.premiere === undefined ||
+          (record(one.premiere) &&
+            exact(one.premiere, ['season', 'date']) &&
+            integer(one.premiere.season) &&
+            calendarDay(one.premiere.date))),
+    )
+  );
 }
 
 function discover(value: unknown): value is ContentDiscoverQuery {
@@ -531,6 +605,8 @@ function request(value: unknown): value is ContentRequest {
               (typeof one.imdb === 'string' && /^tt\d{1,12}$/.test(one.imdb))),
         )
       );
+    case 'new.episodes':
+      return newEpisodesRequest(value);
     case 'import.resolve':
       return (
         exact(value, ['kind', 'lookups']) &&
@@ -696,6 +772,20 @@ function result(value: unknown): value is ContentResult {
           value.airing.state !== 'ready' ||
           boundedArray(value.airing.value))
       );
+    case 'new.episodes': {
+      const answer = value.answer;
+      const limit = CONTENT_SERVICE_WIRE_LIMITS.newEpisodeSeries;
+      return (
+        exact(value, ['kind', 'answer']) &&
+        record(answer) &&
+        exact(answer, ['candidates', 'followed', 'released', 'new', 'comingUp']) &&
+        seriesIds(answer.candidates) &&
+        seriesIds(answer.followed) &&
+        boundedArray(answer.released, limit) &&
+        boundedArray(answer.new, limit) &&
+        boundedArray(answer.comingUp, limit)
+      );
+    }
     case 'search':
       return exact(value, ['kind', 'hits']) && boundedArray(value.hits);
     case 'service.regions':

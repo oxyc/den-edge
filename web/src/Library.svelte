@@ -124,20 +124,17 @@
   import {
     airedThrough,
     airingEpisode,
-    caughtUpTo,
-    comingUp,
     continueAiringFacts,
-    followCandidates,
-    followedOf,
     NewEpisodes,
+    newEpisodesRequest,
     outDay,
-    releasedEpisode,
     withNewEpisodes,
     type Airing,
-    type FollowCandidates,
+    type FollowFacts,
     type NewEpisode,
     type NewEpisodeClaim,
   } from './lib/airing';
+  import type { ContentNewEpisodes } from './lib/contentServiceProtocol';
   import { airingStore } from './lib/airing.svelte';
   import { recheckEpisode } from './lib/seasonDownloads.svelte';
 
@@ -837,13 +834,32 @@
   });
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
-  /** What the library says of each series this viewer might follow (`airing.ts` `followedOf`). */
-  const followFacts = $derived.by((): FollowCandidates => {
+  /** Their library rows, to tell whether the viewer has started a released episode (`policy.released`). */
+  let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
+  /** What the library says of each series this viewer might follow (`airing.ts` `newEpisodesRequest`). */
+  const followFacts = $derived.by((): FollowFacts => {
     const series = (refs: ReadonlyArray<{ type: string; id: number }> | undefined) =>
       (refs ?? []).flatMap((ref) => (ref.type === 'tv' ? [ref.id] : []));
     const continuing = (profileActivity?.continueWatching ?? continueView?.items ?? []).flatMap(
-      ({ title, episode, upcoming }) =>
-        title.type === 'tv' && episode ? [{ series: title.id, episode, upcoming: !!upcoming }] : [],
+      ({ title, episode, upcoming, fraction }) => {
+        if (title.type !== 'tv' || !episode) return [];
+        // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
+        // Continue Watching's resume point instead.
+        const row = releasedViews
+          .get(title.id)
+          ?.snapshot.value?.episodes.find(
+            (item) => item.season === episode.season && item.episode === episode.episode,
+          );
+        return [
+          {
+            series: title.id,
+            episode,
+            upcoming: !!upcoming,
+            fraction: Math.max(fraction ?? 0, row?.fraction ?? 0),
+            watched: row?.watched ?? false,
+          },
+        ];
+      },
     );
     // Marked Seen as a whole: the visitor's by its activity key (`tv:1399`), a library's from its overview.
     const seen = profileActivity
@@ -859,14 +875,31 @@
       dismissed: series(continueView?.dismissed),
     };
   });
-  /** Every series that might be followed: their release dates are asked for while Home is open, and again as each
-   * answer's hour runs out. */
-  const followCandidateSeries = $derived(followCandidates(followFacts).sort((a, b) => a - b));
-  /** The series this viewer follows (`airing.ts` `followedOf`): what Coming up and new episodes are about. */
-  const followedSeries = $derived(followedOf(followFacts, airings));
-  const followedKey = $derived(followCandidateSeries.join(','));
   /** Ticks while Home is open so released episodes are looked for again (`NewEpisodes` holds each to `RECHECK_MS`). */
   let airingTick = $state(0);
+  /**
+   * den-core's answer (`new_episodes`, in the content Worker): who might be followed and who is, each followed series'
+   * fresh release and new episode, and Coming up. Asked again whenever the facts, the dates or the day change.
+   */
+  let policy = $state.raw<ContentNewEpisodes | null>(null);
+  $effect(() => {
+    void airingTick;
+    const request = newEpisodesRequest(followFacts, airings.all);
+    let current = true;
+    void session.content.query({ kind: 'new.episodes', ...request }).then(
+      ({ answer }) => {
+        if (current) policy = answer;
+      },
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  });
+  /** Every series that might be followed: their release dates are asked for while Home is open, and again as each
+   * answer's hour runs out. */
+  const followCandidateSeries = $derived([...(policy?.candidates ?? [])].sort((a, b) => a - b));
+  const followedKey = $derived(followCandidateSeries.join(','));
   $effect(() => {
     void followedKey;
     const ids = untrack(() => followCandidateSeries);
@@ -880,15 +913,8 @@
     }, 5 * 60_000);
     return () => clearInterval(timer);
   });
-  /** Each followed series' episode released in the last `NEW_EPISODE_DAYS`, by atlas's date. */
-  const releasedEpisodes = $derived(
-    followedSeries.flatMap((series): NewEpisode[] => {
-      const episode = releasedEpisode(airings.get(series));
-      return episode ? [{ series, season: episode.season, episode: episode.episode }] : [];
-    }),
-  );
-  /** Their library rows, to tell whether the viewer has started the released episode. */
-  let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
+  /** Each followed series' episode out within den-core's window, whatever the viewer's standing on it. */
+  const releasedEpisodes = $derived(policy?.released ?? []);
   const releasedKey = $derived(releasedEpisodes.map(({ series }) => series).join(','));
   $effect(() => {
     void releasedKey;
@@ -908,36 +934,18 @@
   const newEpisodes = new NewEpisodes();
   onDestroy(() => newEpisodes.retain());
   /**
-   * For each released episode a viewer is caught up to, the episode that plays: their Continue Watching entry, which
-   * is the released one itself week to week and where they are in a season that came out at once (S2E1, never the
-   * finale). It is what is searched for, and what the billboard and the row name. Only those not started, whose
-   * library row has been read.
+   * den-core's new episodes, each as the episode that plays: the viewer's Continue Watching entry, which is the released
+   * one itself week to week and where they are in a season that came out at once (S2E1, never the finale). It is what
+   * is searched for, and what the billboard and the row name. Only those whose library row has been read.
    */
   const unstartedEpisodes = $derived(
-    releasedEpisodes.flatMap((released): NewEpisode[] => {
-      const view = releasedViews.get(released.series)?.snapshot.value;
+    (policy?.new ?? []).flatMap(({ series, season, episode }): NewEpisode[] => {
+      const view = releasedViews.get(series)?.snapshot.value;
       // Both reads are needed to say it is unstarted: an unread one is no evidence, and searching on it is wasted.
       // A followed series' view lists its watched episodes once the library knows its layout; before that, neither it
       // nor Continue Watching can say whether the new one was started.
       if (!view || !view.episodes.length || (!profileActivity && !continueView)) return [];
-      // Read before naming: an entry whose title is not named yet is already a resume point.
-      const continued = (profileActivity?.continueWatching ?? continueView?.items ?? []).find(
-        ({ title }) => title.type === 'tv' && title.id === released.series,
-      );
-      const at = continued?.episode;
-      // A viewer behind on the series is told of no new episode anywhere: not on the billboard, not on the row.
-      if (!at || !caughtUpTo(at, released, airings.get(released.series))) return [];
-      const next = { series: released.series, season: at.season, episode: at.episode };
-      const row = view.episodes.find(
-        (item) => item.season === at.season && item.episode === at.episode,
-      );
-      // The title view lists only episodes TMDB counts as aired, so a start on one atlas dated earlier shows as
-      // Continue Watching's resume point instead.
-      if ((continued.fraction ?? 0) > 0 || (row && (row.watched || row.fraction > 0))) {
-        newEpisodes.clear(next);
-        return [];
-      }
-      return [next];
+      return [{ series, season, episode }];
     }),
   );
   let newEpisodesVersion = $state(0);
@@ -2887,7 +2895,6 @@
     }
     return map;
   };
-  const followedAirings = $derived(airingsOf(followedSeries));
   // The library decides Continue Watching: a caught-up series whose next episode these dates put within its window
   // stays on the row. Every candidate's dates go, so whether one is caught up never waits on whether it is followed.
   // Sent again on each tick, so a new day is counted from.
@@ -2898,11 +2905,12 @@
     if (!library || !active) return;
     void library.observeAiring(facts).catch(() => {});
   });
-  /** "Coming up": each followed series' next episode or season premiere within a month, soonest first. */
+  /** "Coming up" (den-core): each followed series' next episode or season premiere within a month, soonest first. */
+  const comingUpReleases = $derived(policy?.comingUp ?? []);
   const comingUpRow = $derived(
     facet === 'movie'
       ? []
-      : comingUp(followedAirings).flatMap((release) => {
+      : comingUpReleases.flatMap((release) => {
           const title = session.displayTitle({ type: 'tv', id: release.series });
           return title ? [{ title, release }] : [];
         }),
@@ -2911,7 +2919,7 @@
   // and a card is drawn only for a named one, so it stayed empty where the Apple apps listed them.
   $effect(() => {
     if (!active || facet === 'movie') return;
-    const refs = comingUp(followedAirings)
+    const refs = comingUpReleases
       .map(({ series }) => ({ type: 'tv' as const, id: series }))
       .filter((ref) => !session.displayTitle(ref) && !session.displayMissing(ref));
     if (refs.length) void nameLibraryTitles(session, refs).catch(() => {});
