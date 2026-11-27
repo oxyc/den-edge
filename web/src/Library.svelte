@@ -3192,11 +3192,7 @@
   {/if}
 {:else if route.page === 'updates'}
   {#if !updates}
-    <p class="note">
-      Updates come from what you follow, which lives in your library. <a href="/settings"
-        >Link a TV</a
-      > to follow series, films and people.
-    </p>
+    <p class="note">Updates need a library. <a href="/settings">Link a TV</a></p>
   {:else if !UpdatesScreen.current}
     <ScreenLoading screen={UpdatesScreen} />
   {:else}

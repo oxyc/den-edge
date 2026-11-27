@@ -64,7 +64,7 @@
     {/if}
   </div>
   {#if !anyFollows}
-    <p class="note">Follow a series, film or person to see what’s new from them here.</p>
+    <p class="note">Follow a title or person to see its updates here.</p>
   {:else if !events.length && updates.state === 'checking'}
     <Loading label="Checking for updates" />
   {:else if !events.length && updates.state === 'failed'}
@@ -76,7 +76,7 @@
       onclick={() => updates.reconcile()}
     />
   {:else if !events.length}
-    <p class="note">Nothing new from what you follow yet.</p>
+    <p class="note">Nothing new yet.</p>
   {:else}
     <ul class="list">
       {#each events as event (event.id)}

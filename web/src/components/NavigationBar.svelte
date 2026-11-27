@@ -499,6 +499,7 @@
           <a
             href={tab.page === 'library' ? '/' : `/${tab.page}`}
             class:home={tab.page === 'library'}
+            class:quiet={tab.page === 'updates' && !unread && route.page !== 'updates'}
             aria-current={route.page === tab.page ? 'page' : undefined}
           >
             {#if tab.icon}<DetailIcon name={tab.icon} /><span class="label">{tab.label}</span>
@@ -972,6 +973,11 @@
     }
 
     nav a.home {
+      display: none;
+    }
+
+    /* The bell shows here only once something is new: the search field needs its 200px otherwise. */
+    nav a.quiet {
       display: none;
     }
 

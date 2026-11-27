@@ -91,9 +91,7 @@ test('a follow made today is a baseline: what already aired is not listed', asyn
   await page.clock.setFixedTime(SATURDAY);
   await library(page, [follows(SATURDAY.getTime())]);
   await page.goto(`${E2E_ORIGIN}/updates`);
-  await expect(page.getByText('Nothing new from what you follow yet.')).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(page.getByText('Nothing new yet.')).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(`[data-update="${EVENT}"]`)).toHaveCount(0);
 });
 
@@ -112,7 +110,5 @@ test('Follow on a series page follows it, apart from the Watchlist', async ({ pa
   );
   await page.goto(`${E2E_ORIGIN}/updates`);
   // Followed today: S2E1 came out yesterday, so it is history.
-  await expect(page.getByText('Nothing new from what you follow yet.')).toBeVisible({
-    timeout: 30_000,
-  });
+  await expect(page.getByText('Nothing new yet.')).toBeVisible({ timeout: 30_000 });
 });
