@@ -528,7 +528,12 @@
     openGate,
     settingsGate,
     failHistoryDetails: params.has('fail-history-details'),
-    rejectProgressCommands: params.has('reject-final-progress') ? 1 : 0,
+    // A natural finish writes the paused end position before its final receipt: reject both to reach the receipt.
+    rejectProgressCommands: params.has('reject-ended-progress')
+      ? 2
+      : params.has('reject-final-progress')
+        ? 1
+        : 0,
     progressReplyGate,
   });
   if (progressReplyGate)
