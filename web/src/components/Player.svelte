@@ -734,7 +734,7 @@
   let stillWatchingTitle = $state('');
   let stillWatchingAdvance: (() => void) | undefined;
   let stillWatchingContinue = $state<HTMLButtonElement>();
-  let consecutiveAutoAdvances = 0;
+  let consecutiveAutoAdvances = $state(0);
   let automaticAdvanceTarget: Episode | undefined;
   let unattendedStopped = false;
   const AUTO_ADVANCE_LIMIT = 2;
@@ -6946,7 +6946,7 @@
   onfocusout={scheduleWebControls}
 >
   {#if stillWatching && stillWatchingTitle}
-    <section
+    <div
       class="still-watching"
       role="alertdialog"
       aria-modal="true"
@@ -6973,7 +6973,7 @@
           <Button label="Stay" onclick={stayAfterPrompt} />
         </div>
       </div>
-    </section>
+    </div>
   {/if}
   {#if webTransport}
     {#if airPlayActive}
