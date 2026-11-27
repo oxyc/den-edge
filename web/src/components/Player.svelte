@@ -1494,6 +1494,12 @@
     const replacingSubtitleLanguage = replacing
       ? selectedSubtitle(replacing, subtitleChoice)?.language
       : undefined;
+    // Another release has its own track indices, so only the language heard is carried over; a pick that names a
+    // track of the same release already carries its own.
+    const replacingAudioLanguage =
+      replacing && pick?.audioTrack === undefined
+        ? (replacing.audioTracks[replacing.audioTrack]?.language ?? undefined)
+        : undefined;
     clearTimeout(retry);
     retry = undefined;
     // The startup notice's own clock, for this attempt (den-edge#234): reset here rather than on a notice first
@@ -1554,6 +1560,7 @@
       },
       title.originalLanguage,
       [interfaceLanguage],
+      replacingAudioLanguage,
     );
     const claimed = (decodes ??= await playable());
     if (attempt.signal.aborted || ended) return false;
@@ -5046,7 +5053,7 @@
       void loadSegments();
     }
     if (!segments.length) return;
-    active = activeAt(segments, at);
+    active = activeAt(segments, at, length());
     const next = nextAutoSkip(
       autoSkip,
       active,

@@ -96,9 +96,24 @@ export const autoSkipCountdown = (pending: PendingAutoSkip, now: number): number
 export const cancelsAutoSkip = (pending: PendingAutoSkip | null, at?: number): boolean =>
   !!pending && (at === undefined || (at >= pending.segment.start && at < pending.segment.end));
 
-/** The segment under the playhead, if any — what a Skip button should offer. */
-export function activeAt(segments: readonly SkipSegment[], time: number): SkipSegment | null {
-  return segments.find((one) => time >= one.start && time < one.end) ?? null;
+/**
+ * The segment under the playhead, if any — what a Skip button should offer. An outro cannot be credits in the
+ * front half of a title, so one starting there is ignored (button and auto-skip alike), and an outro is withheld
+ * until the duration is known — as the native apps' `SkipSegments.active(at:duration:)` does.
+ */
+export function activeAt(
+  segments: readonly SkipSegment[],
+  time: number,
+  duration: number,
+): SkipSegment | null {
+  return (
+    segments.find(
+      (one) =>
+        time >= one.start &&
+        time < one.end &&
+        (one.kind !== 'outro' || (duration > 0 && one.start >= duration / 2)),
+    ) ?? null
+  );
 }
 
 interface Answer {

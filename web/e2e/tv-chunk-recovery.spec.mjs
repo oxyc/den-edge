@@ -55,6 +55,11 @@ for (const persistent of [false, true]) {
       .getByRole('navigation', { name: 'Main navigation' })
       .getByRole('link', { name: 'Settings', exact: true });
     await expect(settings).toBeVisible();
+    // The bar is the shell's and is up before the routed library has loaded; until a Router is mounted (the active
+    // route page exists) a click on its link is an ordinary anchor navigation, a plain `/settings` document with no
+    // `den-retry`. Press Enter only once the Router can handle it in place, so the one document recorded below is the
+    // recovery reload.
+    await expect(page.locator('[data-route-page][data-active="true"]')).toBeAttached();
     const documents = [];
     page.on('request', (request) => {
       if (request.isNavigationRequest() && request.frame() === page.mainFrame())
@@ -63,7 +68,7 @@ for (const persistent of [false, true]) {
     await settings.focus();
     await page.keyboard.press('Enter');
     await expect.poll(() => documents.length).toBe(1);
-    expect(new URL(documents[0]).searchParams.get('den-retry')).toMatch(/^[0-9a-z]+$/);
+    expect(documents[0]).toMatch(/[?&]den-retry=[0-9a-z]+(&|$)/);
     if (persistent) {
       await expect(
         page.getByText('Couldn’t load this page. Check that this device is online.'),
