@@ -1498,7 +1498,7 @@
     // track of the same release already carries its own.
     const replacingAudioLanguage =
       replacing && pick?.audioTrack === undefined
-        ? replacing.audioTracks[replacing.audioTrack]?.language
+        ? (replacing.audioTracks[replacing.audioTrack]?.language ?? undefined)
         : undefined;
     clearTimeout(retry);
     retry = undefined;
