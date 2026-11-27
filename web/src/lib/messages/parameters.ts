@@ -66,7 +66,7 @@ export const PARAMETER_FALLBACKS = {
   'player.upNext': 'Up next · {title}',
   'player.playsIn': 'Plays in {seconds} s',
   'player.nextIn': 'Next episode in {seconds} seconds',
-  'player.stillWatching.one': 'The last {count} episode started on its own. Next: {title}',
+  'player.stillWatching.one': 'The last episode started on its own. Next: {title}',
   'player.stillWatching.other': 'The last {count} episodes started on their own. Next: {title}',
   'player.autoSkipIn': 'Auto-skip in {seconds}s',
   'player.autoSkipNotice':

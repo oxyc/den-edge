@@ -8378,7 +8378,7 @@
     place-items: center;
     padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
       max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
-    background: rgb(0 0 0 / 78%);
+    background: rgb(0 0 0 / 0.78);
   }
 
   .still-watching-card {
