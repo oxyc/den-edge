@@ -887,6 +887,35 @@ test('switching to Kid from Settings at 390px in WebKit lands on Home', async ()
   }
 });
 
+test('switching profile on a title page stays on that title without a new history entry', async ({
+  page,
+}) => {
+  await routeLibraryEdge(page, {});
+  await page.route('**/capabilities/profiles', (route) =>
+    route.fulfill({
+      headers: { 'cache-control': 'no-store' },
+      json: { enabled: true, preview: true },
+    }),
+  );
+  await page.goto(`${ROUTED_FIXTURE}?nav`);
+  await page.getByLabel('Owner PIN').fill('1234');
+  await expect(page.getByRole('heading', { name: 'Services' })).toBeVisible();
+  await page.evaluate(() =>
+    document.dispatchEvent(
+      new CustomEvent('den:navigate', { detail: { path: '/movie/1002?play=1' } }),
+    ),
+  );
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/movie/1002');
+  const history = await page.evaluate(() => history.length);
+
+  await page.getByRole('button', { name: 'Switch profile, current Owner' }).click();
+  await page.getByRole('button', { name: 'Use Kids' }).click();
+  await expect(page.getByRole('button', { name: 'Switch profile, current Kids' })).toBeVisible();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/movie/1002');
+  expect(new URL(page.url()).search).toBe('');
+  expect(await page.evaluate(() => history.length)).toBe(history);
+});
+
 test('Kid Settings at 390px in Chromium: full-width Owner PIN, labelled Content limit rows', async ({
   page,
 }) => {
