@@ -455,7 +455,10 @@ test('two unattended advances play and the third waits for Still watching', asyn
     await finishEpisode();
 
     const prompt = page.getByRole('alertdialog', { name: 'Still watching?' });
-    await expect(prompt).toContainText('The last 2 episodes started on their own. Next: S1 · E4');
+    // The ten-second up-next countdown runs before the prompt takes its place.
+    await expect(prompt).toContainText('The last 2 episodes started on their own. Next: S1 · E4', {
+      timeout: 20_000,
+    });
     const continueButton = prompt.getByRole('button', { name: 'Continue', exact: true });
     await expect(continueButton).toBeFocused();
     expect(asked.playback.map(itemOf)).toEqual(['e1', 'e2', 'e3']);
