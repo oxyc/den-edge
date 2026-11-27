@@ -157,15 +157,26 @@ describe('what may be skipped unasked', () => {
     expect(canAutoSkip(segment({ confidence: 0.82 }))).toBe(true);
     expect(canAutoSkip(segment({ confidence: 0.75 }))).toBe(false);
     // Still under the playhead, whatever its confidence — a button is offered where a jump is not.
-    expect(activeAt([segment({ confidence: 0.75 })], 150)?.kind).toBe('outro');
+    expect(activeAt([segment({ confidence: 0.75 })], 150, 200)?.kind).toBe('outro');
   });
 
   it('finds the segment under the playhead, and none between them', () => {
     const list = [segment({ kind: 'intro', start: 60, end: 90 }), segment()];
-    expect(activeAt(list, 75)?.kind).toBe('intro');
-    expect(activeAt(list, 150)?.kind).toBe('outro');
-    expect(activeAt(list, 95)).toBeNull();
-    expect(activeAt(list, 200)).toBeNull();
+    expect(activeAt(list, 75, 200)?.kind).toBe('intro');
+    expect(activeAt(list, 150, 200)?.kind).toBe('outro');
+    expect(activeAt(list, 95, 200)).toBeNull();
+    expect(activeAt(list, 200, 200)).toBeNull();
+  });
+
+  it('ignores an outro in the front half of the title, or before the duration is known', () => {
+    const early = segment({ start: 100, end: 200, confidence: 0.9 });
+    expect(activeAt([early], 150, 1_320)).toBeNull();
+    expect(activeAt([early], 150, 0)).toBeNull();
+    const late = segment({ start: 1_250, end: 1_320 });
+    expect(activeAt([late], 1_260, 0)).toBeNull();
+    expect(activeAt([late], 1_260, 1_320)).toBe(late);
+    const intro = segment({ kind: 'intro', start: 10, end: 40 });
+    expect(activeAt([intro], 20, 0)).toBe(intro);
   });
 });
 
