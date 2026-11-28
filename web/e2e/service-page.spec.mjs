@@ -374,6 +374,17 @@ test('a failed service hero stays visible and retries only its own request', asy
   await expect(popular).toBeVisible();
   await expect(popular.getByRole('link', { name: /Film 301/ }).first()).toBeVisible();
 
+  // The hero and the lead row ask for the same chart at about the same time. When the hero's failed request is still in
+  // flight as the row asks, the row joins it and fails with it, showing its own retry; otherwise it asks again and
+  // recovers by itself. Either way the row must end up recovered, so that the failed hero plus the recovered row is two
+  // requests, and a hero retry can reuse the row's answer.
+  const lead = page.getByRole('region', { name: 'Recently released Movies' });
+  const leadRetry = lead.getByRole('button', { name: /Try again/ });
+  const leadCard = lead.getByRole('link', { name: /Film 201/ }).first();
+  await expect(leadRetry.or(leadCard)).toBeVisible();
+  if (await leadRetry.isVisible()) await leadRetry.click();
+  await expect(leadCard).toBeVisible();
+
   const stableRows = {
     manifest: 1,
     movieDirectory: 1,
