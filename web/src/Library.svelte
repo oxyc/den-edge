@@ -21,10 +21,9 @@
     preloadScreens,
     SearchScreen,
     ServiceScreen,
-    UpdatesScreen,
     WatchlistScreen,
   } from './lib/screens.svelte';
-  import { UpdatesStore } from './lib/updates.svelte';
+  import { UpdatesStore, type ShownUpdate } from './lib/updates.svelte';
   import { followKey } from './lib/follows';
   import {
     browseRows,
@@ -889,33 +888,36 @@
   /** Atlas's release dates for the series this viewer follows (`airing.ts`). */
   const airings = $derived(airingStore(session.content));
   /**
-   * The profile's explicit follows and its updates list (den-spec follows-v1), apart from the series den-core's
-   * `new_episodes` infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground once Home has
-   * settled, when the follows change, and on opening Updates; never on a timer.
+   * The profile's explicit follows and the updates they bring (den-spec follows-v1), apart from the series den-core's
+   * `new_episodes` infers for Coming up. Visitor has no library, so no follows. Reconciled on coming to the foreground
+   * once Home has settled and when the follows change; never on a timer. A TV shows the row but follows nothing.
    */
-  const updates =
-    model && !__DEN_TV__
-      ? new UpdatesStore(
-          () => model.settings.value,
-          untrack(() => session.content),
-          untrack(() => airings),
-        )
-      : null;
+  const updates = model
+    ? new UpdatesStore(
+        () => model.settings.value,
+        untrack(() => session.content),
+        untrack(() => airings),
+      )
+    : null;
   onDestroy(() => updates?.close());
-  $effect(() => updates?.publish());
   const followsKey = $derived(updates ? Object.keys(updates.follows).sort().join(',') : '');
   $effect(() => {
     void followsKey;
     if (!updates || !foreground || !initialHomeSettled || !atlas) return;
     void untrack(() => updates.reconcile());
   });
-  $effect(() => {
-    if (updates && route.page === 'updates' && atlas) void untrack(() => updates.reconcile());
-  });
   const setFollow = (key: string, on: boolean) =>
     runCommand(model ? () => model.setFollow(key, on) : undefined);
-  const markUpdates = (ids: string[], mark: 'read' | 'dismissed') =>
-    runCommand(model ? () => model.markUpdates(ids, mark) : undefined);
+  /** A title leaves "From titles you follow" once the viewer opens or plays it: its current events are read. */
+  const readUpdates = (ids: string[] | undefined) => {
+    if (ids?.length)
+      model?.markUpdates(ids, 'read').catch((error) => console.error('updates read failed', error));
+  };
+  $effect(() => {
+    if (!active || route.page !== 'title') return;
+    const ids = updates?.unreadIds(route.type, route.id);
+    untrack(() => readUpdates(ids));
+  });
   /** Their library rows, to tell whether the viewer has started a released episode (`policy.released`). */
   let releasedViews = $state.raw(new Map<number, LibraryModelLease<TitleView>>());
   /** What the library says of each series this viewer might follow (`airing.ts` `newEpisodesRequest`). */
@@ -1271,7 +1273,6 @@
     else if (route.page === 'downloads') void DownloadsScreen.load();
     else if (route.page === 'service') void ServiceScreen.load();
     else if (route.page === 'watchlist') void WatchlistScreen.load();
-    else if (route.page === 'updates') void UpdatesScreen.load();
   });
   $effect(() => {
     if (playing) void PlayerScreen.load();
@@ -1469,6 +1470,7 @@
       ? async (tvId: string, title: Title, season?: number, episode?: number) => {
           const tv = tvs.find((candidate) => candidate.id === tvId);
           if (!tv) return;
+          readUpdates(updates?.unreadIds(title.type, title.id));
           busy = true;
           failure = null;
           const blocked = await playGuard(title, {
@@ -1582,6 +1584,7 @@
           filename?: string,
           allowCinema = false,
         ) => {
+          readUpdates(updates?.unreadIds(title.type, title.id));
           const blocked = await playGuard(title, {
             content: session.content,
             region: detailPrefs.region,
@@ -3120,6 +3123,33 @@
       .filter((ref) => !session.displayTitle(ref) && !session.displayMissing(ref));
     if (refs.length) void nameLibraryTitles(session, refs).catch(() => {});
   });
+  /** "From titles you follow": what their follows have brought that the viewer has not opened (follows-v1). */
+  const followsRow = $derived(
+    (updates?.row ?? []).filter((event) => !facet || event.title.type === facet),
+  );
+  /** "Aired", "Released" and "returns" never say a source was found, so the card does not claim it can be played. */
+  function updateCaption(event: ShownUpdate): string {
+    const day = outDay(event.date, i18n.language);
+    if (event.type === 'episode')
+      return i18n.format('updates.episodeAired', 'S{season}E{episode} · aired {day}', {
+        season: event.season ?? 0,
+        episode: event.episode ?? 0,
+        day,
+      });
+    if (event.type === 'returns')
+      return event.season === 1
+        ? i18n.format('updates.premieres', 'Premieres {day}', { day })
+        : i18n.format('updates.returns', 'Season {season} returns {day}', {
+            season: event.season ?? 0,
+            day,
+          });
+    return i18n.format('updates.released', 'Released {day}', { day });
+  }
+  const updateHref = (event: ShownUpdate) =>
+    titleHref({
+      ...event.card,
+      ...(event.type === 'episode' ? { season: event.season, episode: event.episode } : {}),
+    });
   const watchlistShelf = $derived(savedTitles.filter((title) => !facet || title.type === facet));
   /** Home's library shelves, top to bottom as drawn, and whether each has anything to show. */
   const shelves = $derived([
@@ -3271,7 +3301,7 @@
     model={downloadsModel}
     onwatchlist={(title, on) => fromPage(toggleWatchlist(title, on))}
     following={updates?.following(followKey(page.type, page.id))}
-    onfollow={updates
+    onfollow={updates && !__DEN_TV__
       ? (on: boolean) => fromPage(setFollow(followKey(page.type, page.id), on))
       : undefined}
     onseen={(title, seen) => fromPage(setSeen(title, seen))}
@@ -3304,7 +3334,9 @@
     content={session.content}
     {active}
     following={updates?.following(personKey)}
-    onfollow={updates ? (on: boolean) => fromPage(setFollow(personKey, on)) : undefined}
+    onfollow={updates && !__DEN_TV__
+      ? (on: boolean) => fromPage(setFollow(personKey, on))
+      : undefined}
   />
 {:else if route.page === 'service' && !ServiceScreen.current}
   <ScreenLoading screen={ServiceScreen} />
@@ -3366,14 +3398,6 @@
     <ScreenLoading screen={DownloadsScreen} />
   {:else}
     <DownloadsScreen.current model={downloadsModel} {active} />
-  {/if}
-{:else if route.page === 'updates'}
-  {#if !updates}
-    <p class="note">Updates need a library. <a href="/settings">Link a TV</a></p>
-  {:else if !UpdatesScreen.current}
-    <ScreenLoading screen={UpdatesScreen} />
-  {:else}
-    <UpdatesScreen.current {updates} onmark={markUpdates} />
   {/if}
 {:else if route.page === 'watchlist'}
   {#if !model && !profileActivity}
@@ -3485,6 +3509,25 @@
       </WindowedPosterRow>
     {:else if !shelvesReady && !facet && (shelfPlan?.continue || retainedContinue)}
       <PendingPosterRow heading="Continue Watching" />
+    {/if}
+    {#if lowerShelvesReady && followsRow.length}
+      <WindowedPosterRow
+        heading="From titles you follow"
+        items={followsRow}
+        itemKey={(event) => `${event.title.type}:${event.title.id}`}
+        itemHref={updateHref}
+        itemLabel={(event) => event.card.title}
+      >
+        {#snippet children(event, onscreen)}
+          <PosterCard
+            title={event.card}
+            href={updateHref(event)}
+            caption={updateCaption(event)}
+            checkAvailability={false}
+            {onscreen}
+          />
+        {/snippet}
+      </WindowedPosterRow>
     {/if}
     {#if !facet && downloading.length && shelfMounted('downloading')}
       <WindowedPosterRow

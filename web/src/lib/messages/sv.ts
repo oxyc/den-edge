@@ -8,8 +8,6 @@ export const messages = {
   'nav.movies': 'Filmer',
   'nav.series': 'Serier',
   'nav.watchlist': 'Min lista',
-  'nav.updates': 'Nyheter',
-  'nav.unread': 'olästa',
   'nav.settings': 'Inställningar',
   'nav.search': 'Sök',
   'nav.loadingLibrary': 'Läser in ditt bibliotek',

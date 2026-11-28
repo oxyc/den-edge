@@ -1,4 +1,4 @@
-// Follows and the updates list (den-spec follows-v1) through the real app, with the clock on Saturday 31 Oct 2026 and
+// Follows and Home's "From titles you follow" row (den-spec follows-v1) through the real app, with the clock on Saturday 31 Oct 2026 and
 // atlas's recorded answer for Dexter: Resurrection, whose S2E1 came out on Friday 30 Oct. The library is kept in this
 // browser; nothing leaves it.
 import { test, expect } from '@playwright/test';
@@ -12,7 +12,6 @@ const AIRING = JSON.parse(
 );
 /** Saturday 31 Oct 2026, midday. */
 const SATURDAY = new Date(2026, 9, 31, 12);
-const EVENT = `episode:tv:${ID}:2:1`;
 
 const series = {
   id: ID,
@@ -64,35 +63,54 @@ const follows = (since) => ({
   values: { [`tv:${ID}`]: { value: { int: since }, at: [since, 0, 'aaaaaaaaaaaaaaaa'] } },
 });
 
-test('an episode out after the follow is listed, and marking it read clears the count for good', async ({
+const ROW = { name: 'From titles you follow', exact: true };
+
+/**
+ * A fresh load of Home with time for the row to have appeared: the first test shows it lands within a few seconds, and
+ * the request that fills it is made by a Worker, which no page event or later route reports.
+ */
+async function homeSettled(page) {
+  await page.goto(`${E2E_ORIGIN}/`);
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(8_000);
+}
+
+test('an episode out after the follow is on Home until the title is opened, for good', async ({
   page,
 }) => {
   await page.clock.setFixedTime(SATURDAY);
   await library(page, [follows(new Date(2026, 9, 20, 12).getTime())]);
-  await page.goto(`${E2E_ORIGIN}/updates`);
-  const update = page.locator(`[data-update="${EVENT}"]`);
-  await expect(update).toContainText('S2E1 · aired', { timeout: 30_000 });
-  await expect(page.locator('nav a[href="/updates"] .count')).toContainText('1');
+  await page.goto(`${E2E_ORIGIN}/`);
+  const row = page.getByRole('region', ROW);
+  await expect(row).toContainText('Dexter: Resurrection', { timeout: 30_000 });
+  await expect(row).toContainText('S2E1 · aired');
+  // No bell and no Updates page: the row is the only place the update shows.
+  await expect(page.locator('nav a[href="/updates"]')).toHaveCount(0);
 
-  await update.getByRole('button', { name: 'Mark as read' }).click();
-  await expect(page.locator('nav a[href="/updates"] .count')).toHaveCount(0);
-  await expect(update.getByRole('button', { name: 'Mark as read' })).toHaveCount(0);
+  await row
+    .getByRole('link', { name: /Dexter: Resurrection/ })
+    .first()
+    .click();
+  const active = page.locator('[data-route-page][data-active="true"]');
+  await expect(active.getByRole('button', { name: 'Follow' })).toBeVisible({ timeout: 30_000 });
 
   // The mark is in the profile's library, not in this page: a reload derives the event again, already read.
-  await page.reload();
-  await expect(page.locator(`[data-update="${EVENT}"]`)).toBeVisible({ timeout: 30_000 });
-  await expect(
-    page.locator(`[data-update="${EVENT}"]`).getByRole('button', { name: 'Mark as read' }),
-  ).toHaveCount(0);
-  await expect(page.locator('nav a[href="/updates"] .count')).toHaveCount(0);
+  await homeSettled(page);
+  await expect(page.getByRole('region', ROW)).toHaveCount(0);
 });
 
-test('a follow made today is a baseline: what already aired is not listed', async ({ page }) => {
+test('a follow made today is a baseline: what already aired is not on Home', async ({ page }) => {
   await page.clock.setFixedTime(SATURDAY);
   await library(page, [follows(SATURDAY.getTime())]);
+  await homeSettled(page);
+  await expect(page.getByRole('region', ROW)).toHaveCount(0);
+});
+
+test('an old Updates link lands on Home', async ({ page }) => {
+  await page.clock.setFixedTime(SATURDAY);
+  await library(page, []);
   await page.goto(`${E2E_ORIGIN}/updates`);
-  await expect(page.getByText('Nothing new yet.')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator(`[data-update="${EVENT}"]`)).toHaveCount(0);
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
 });
 
 test('Follow on a series page follows it, apart from the Watchlist', async ({ page }) => {
@@ -108,7 +126,7 @@ test('Follow on a series page follows it, apart from the Watchlist', async ({ pa
     'aria-pressed',
     'false',
   );
-  await page.goto(`${E2E_ORIGIN}/updates`);
   // Followed today: S2E1 came out yesterday, so it is history.
-  await expect(page.getByText('Nothing new yet.')).toBeVisible({ timeout: 30_000 });
+  await homeSettled(page);
+  await expect(page.getByRole('region', ROW)).toHaveCount(0);
 });

@@ -1,19 +1,9 @@
-import { SvelteMap } from 'svelte/reactivity';
 import { localDay, newEpisodesRequest, type Airing } from './airing';
 import type { AiringStore } from './airing.svelte';
 import type { ContentServiceClientPort } from './contentServiceClient';
 import { deriveUpdates, type UpdateEvent, type UpdateFacts } from './follows';
 import type { Title } from './library';
 import type { SettingsView } from './libraryServiceProtocol';
-
-/** The unread count of the profile on screen, for the navigation bar; 0 with none open. */
-const unread = new SvelteMap<object, number>();
-
-export function updatesUnread(): number {
-  let total = 0;
-  for (const count of unread.values()) total += count;
-  return total;
-}
 
 /** People's filmographies asked for at once while reconciling. */
 const PEOPLE_AT_ONCE = 4;
@@ -23,9 +13,9 @@ export interface ShownUpdate extends UpdateEvent {
 }
 
 /**
- * The profile's updates list (den-spec follows-v1): its follows and marks come from the library's settings view, the
- * facts from the caches every other surface reads (atlas's airing, the content worker's titles and filmographies).
- * Reconciled when asked, which the page does on coming to the foreground and on opening the list, never on a timer.
+ * The profile's updates (den-spec follows-v1), shown on Home: its follows and marks come from the library's settings
+ * view, the facts from the caches every other surface reads (atlas's airing, the content worker's titles and
+ * filmographies). Reconciled when asked, which the page does on coming to the foreground, never on a timer.
  * Only events whose title the content worker returns under the profile's policy are shown (follows-v1 §4).
  */
 export class UpdatesStore {
@@ -66,17 +56,26 @@ export class UpdatesStore {
     });
   }
 
-  get unread(): number {
-    return this.events.filter((event) => !event.read).length;
+  /** Home's row: the unread events, newest first, one for each title (follows-v1 §3's newest for it). */
+  get row(): ShownUpdate[] {
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- Built whole for one read and discarded.
+    const seen = new Set<string>();
+    return this.events.filter((event) => {
+      const key = `${event.title.type}:${event.title.id}`;
+      if (event.read || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
-  /** Publish this store's unread count for the bar until `close`. */
-  publish(): void {
-    unread.set(this, this.unread);
+  /** The ids of every unread event of one title: what opening it marks read. */
+  unreadIds(type: string, id: number): string[] {
+    return this.events
+      .filter((event) => !event.read && event.title.type === type && event.title.id === id)
+      .map((event) => event.id);
   }
 
   close(): void {
-    unread.delete(this);
     this.#run++;
   }
 
