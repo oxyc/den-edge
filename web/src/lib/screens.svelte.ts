@@ -52,7 +52,6 @@ export const LinkScreen = lazy(() => import('../LinkTV.svelte'));
 /** The paired (or browsing) app: Home, the catalogue and the library service. An unpaired start never loads it. */
 export const RoutedLibraryScreen = lazy(() => import('../RoutedLibrary.svelte'));
 export const WatchlistScreen = lazy(() => import('../components/WatchlistPage.svelte'));
-export const UpdatesScreen = lazy(() => import('../components/UpdatesPage.svelte'));
 /** Asked only by a page that carries their question: an invite link, or an assistant's request to connect. */
 export const InviteDialogScreen = lazy(() => import('../components/InviteDialog.svelte'));
 export const PhoneDialogScreen = lazy(() => import('../components/PhoneDialog.svelte'));

@@ -143,6 +143,8 @@
     if (links.list.length) void navigator.storage?.persist?.().catch(() => false);
   });
 
+  // The Updates page is gone: its marks live on in Home's "From titles you follow", so an old link lands on Home.
+  if (!__DEN_TV_PACKAGED__ && location.pathname === '/updates') history.replaceState(null, '', '/');
   let route = $state.raw(
     parseRoute(__DEN_TV_PACKAGED__ ? currentAppPath() : location.pathname + location.search),
   );
