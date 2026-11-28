@@ -66,13 +66,14 @@ const follows = (since) => ({
 const ROW = { name: 'From titles you follow', exact: true };
 
 /**
- * A fresh load of Home with time for the row to have appeared: the first test shows it lands within a few seconds, and
- * the request that fills it is made by a Worker, which no page event or later route reports.
+ * A fresh load of Home once its follows have been reconciled and its shelves mounted, which Home says with
+ * `data-follows-state="ready"`: after it, an absent row is absent for good, not merely not yet there.
  */
 async function homeSettled(page) {
   await page.goto(`${E2E_ORIGIN}/`);
-  await page.waitForLoadState('networkidle');
-  await page.waitForTimeout(8_000);
+  await page
+    .locator('[data-follows-state="ready"]')
+    .waitFor({ state: 'attached', timeout: 30_000 });
 }
 
 test('an episode out after the follow is on Home until the title is opened, for good', async ({

@@ -3482,6 +3482,10 @@
     onwatchlist={(title, on) => fromSlide(toggleWatchlist(title, on))}
     onseen={(title, on) => fromSlide(setSeen(title, on))}
   />
+  {#if updates}
+    <!-- "ready" once the follows' facts are in and the lower shelves are mounted: "From titles you follow" is final. -->
+    <i hidden data-follows-state={lowerShelvesReady ? updates.state : 'pending'}></i>
+  {/if}
   {#if !shelvesReady && (!(retainedContinue || shelfPlan?.continue) || facet)}
     <div data-route-loading><Loading label="Loading your shelves" /></div>
   {:else}
